@@ -1,4 +1,4 @@
-module github.com/yi-nology/ekit-concurrency
+module github.com/openekit/concurrency
 
 go 1.26.0
 

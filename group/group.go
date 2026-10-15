@@ -1,7 +1,7 @@
 package group
 
 import (
-	"github.com/yi-nology/ekit-concurrency/async"
+	"github.com/openekit/concurrency/async"
 )
 
 // Group 收集多个 Actor（函数对）并并发执行。

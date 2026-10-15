@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yi-nology/ekit-concurrency/async"
+	"github.com/openekit/concurrency/async"
 )
 
 // KeyedLimiter 是按 key 隔离的限流器管理器。
