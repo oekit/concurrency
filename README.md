@@ -11,7 +11,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/concurrency@v0.1.3
+go get github.com/oekit/concurrency@v0.1.5
 ```
 
 ## 能做什么
