@@ -1,6 +1,6 @@
 // Package async 提供安全的 goroutine 启动工具。
 //
-// 所有 enjoydream 后端服务共享此包，防止 goroutine panic 导致进程崩溃。
+// 适用于所有使用此包的后端服务，防止 goroutine panic 导致进程崩溃。
 //
 // # 核心特性
 //
@@ -49,7 +49,7 @@
 //
 // # 为什么使用标准库 log 而非 logx
 //
-// 本包是 enjoydream 后端的 panic 兜底层，必须保持零内部依赖（依赖叶子节点）。
+// 本包是使用方的 panic 兜底层，必须保持零内部依赖（依赖叶子节点）。
 // logx 会间接依赖 middleware、ratelimit 等上层包，而这些包又依赖 async，
 // 若 async 反向依赖 logx 将形成导入环。因此本包刻意使用标准库 log。
 package async
