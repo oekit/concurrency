@@ -1,14 +1,16 @@
-# ekit-concurrency
+# concurrency
 
 > 并发与流控原语——safe-go goroutine、键控闸门、扇出、令牌桶、重试轮询。零内部依赖。
 
+> 项目主页：**https://oekit.github.io/oekit/** · 名称由来：**O**pen **E**asy **Kit**（开源 · 易用 · 工具集合）
+
 本仓库是 [ekit](https://git.enjoye.top/enjoydream/ekit)（`git.enjoye.top/enjoydream/ekit` v0.34.0）
-拆分出的独立 Go module，属于 **oekit** ekit 子项目矩阵（Round-2 深拆粒度）。
+拆分出的独立 Go module，属于 **oekit** oekit（Open Easy Kit）模块矩阵。
 
 ## 安装
 
 ```bash
-go get github.com/oekit/concurrency@v0.1.0
+go get github.com/oekit/concurrency@v0.1.3
 ```
 
 ## 包清单
