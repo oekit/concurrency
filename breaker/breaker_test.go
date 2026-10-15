@@ -20,12 +20,13 @@ func newSmallClockBreaker(clock *fakeClock, opts ...BreakerOption) *circuitBreak
 }
 
 // openBreaker 用连续失败把熔断器打到打开状态（冻结时钟禁用强制探活，
-// dropRatio → 1，500 次后必然打开）。
+// dropRatio → (total-5)/(total+1)。预热 5 万次后单次调用漏过的概率 ≈ 6/50001 ≈ 1.2e-4，
+// 使后续"必被拒绝"的单发断言抖动可忽略；纯内存操作，毫秒级完成。
 func openBreaker(t *testing.T, cb *circuitBreaker) {
 	t.Helper()
 	boom := errors.New("boom")
 	ctx := context.Background()
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 50000; i++ {
 		_ = cb.Do(ctx, func() error { return boom })
 	}
 }
