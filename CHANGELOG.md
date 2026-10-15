@@ -15,6 +15,16 @@
 - `ErrCircuitOpen`（逐字 "circuit breaker is open"）为全库熔断规范哨兵；API 全量
   ctx-aware（`Allow(ctx)`/`Do(ctx,…)`），时间源可注入 `WithBreakerClock`，拒绝走可选钩子
   `WithBreakerRejectHandler`（缺省 no-op，零强制 metrics/logx）；`GetBreaker` 按名共享单例
+- feat(shedding): 新增 CPU 自适应降载 `shedding`（移植 go-zero core/load
+  adaptiveshedder，算法忠实上游）：maxPass×minRt 的 Little's Law 并发上限、
+  CPU 过载因子夹 [0.1,1]（至少保留 10% 容量）、avgFlying 滞后 EMA（beta=0.9，
+  仅完成时更新）、1s 冷却期；丢弃要求 (CPU 过载 || 冷却期内) && 并发超限同时成立
+- CPU 采样纯标准库（/proc/stat 差分 + cgroup v1/v2 配额感知、beta=0.95 指数平滑、
+  250ms 周期、毫秒‰ 单位；采样 goroutine 惰性启动 + 每周期 recover 兜底）；
+  非 linux polyfill 返回错误 → 降载自动禁用全放行，源错误同按 fail-open；
+  CPU 源可注入包级 `SetCPUUsageFunc`（仿 async.SetPanicHandler），时间源可注入
+  `WithShedderClock`；`ErrServiceOverloaded` 哨兵；API ctx-aware（`Allow(ctx)`）；
+  丢弃走可选钩子 `WithShedderRejectHandler`（缺省 no-op）
 
 ## [v0.2.1] — 2026-10-16
 
