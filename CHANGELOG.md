@@ -8,6 +8,13 @@
   collection.RollingWindow，算法、惰性重置与时间对齐保持上游语义）：泛型桶
   `BucketInterface[T]` + 默认 `Bucket[T]{Sum, Count}` + `Reduce` + `IgnoreCurrentBucket`
 - 时间源可注入 `WithWindowClock`（缺省 `time.Now`，测试确定性）；选项类型按硬规则命名 `WindowOption`
+- feat(breaker): 新增 Google SRE 概率式自适应熔断 `breaker`（移植 go-zero
+  core/breaker googleBreaker，无状态机）：40×250ms 滑动窗口统计、k=1.5/minK=1.1/
+  protection=5、失败占比→丢弃概率、强制探活（缺省 1s）自动恢复、panic 记失败后
+  re-panic；统计容器复用 `window.RollingWindow`（自定义桶实现 `BucketInterface[int64]`）
+- `ErrCircuitOpen`（逐字 "circuit breaker is open"）为全库熔断规范哨兵；API 全量
+  ctx-aware（`Allow(ctx)`/`Do(ctx,…)`），时间源可注入 `WithBreakerClock`，拒绝走可选钩子
+  `WithBreakerRejectHandler`（缺省 no-op，零强制 metrics/logx）；`GetBreaker` 按名共享单例
 
 ## [v0.2.1] — 2026-10-16
 

@@ -1,10 +1,10 @@
 # AGENTS.md — oekit/concurrency
 
-> 并发与流控原语（async GoSafe 系列 / gopool 协程池 / group / singleflight / progress / syncx / ratelimit / retry / window 滑动窗口）
+> 并发与流控原语（async GoSafe 系列 / gopool 协程池 / group / singleflight / progress / syncx / ratelimit / retry / window 滑动窗口 / breaker 熔断）
 > 当前版本：`v0.2.0` · module：`github.com/oekit/concurrency` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
-`async/`、`gopool/`、`group/`、`progress/`、`ratelimit/`、`retry/`、`singleflight/`、`syncx/`、`window/`
+`async/`、`breaker/`、`gopool/`、`group/`、`progress/`、`ratelimit/`、`retry/`、`singleflight/`、`syncx/`、`window/`
 
 ## 硬规则速览（全矩阵适用）
 
