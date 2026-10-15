@@ -65,7 +65,8 @@ func TestPool_PanicRecovered(t *testing.T) {
 	defer p.SetPanicHandler(nil)
 
 	done := make(chan struct{})
-	ctxKey := context.WithValue(context.Background(), "k", "v")
+	type ctxKeyT struct{}
+	ctxKey := context.WithValue(context.Background(), ctxKeyT{}, "v")
 	p.CtxGo(ctxKey, func() {
 		defer close(done)
 		panic("boom")
