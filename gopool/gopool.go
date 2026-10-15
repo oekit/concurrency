@@ -102,6 +102,8 @@ func (p *Pool) CtxGo(ctx context.Context, f func()) {
 	select {
 	case p.tasks <- task{ctx: ctx, f: f}:
 	default:
+		// 队列满：回退为一次性 goroutine 直跑（任务不丢）。任务 panic 由
+		// runTask→recoverRun 收敛，与池内 worker 同一保护路径。
 		go p.runTask(ctx, f)
 		return
 	}
@@ -109,6 +111,10 @@ func (p *Pool) CtxGo(ctx context.Context, f func()) {
 	if len(p.tasks) == 0 {
 		return
 	}
+	// 裸起（未走本包 goSafe）：worker 循环内的用户任务 panic 已由 recoverRun
+	// 收敛；但循环体自身代码若 panic（内部 bug 场景），该 worker goroutine
+	// 会静默退出、池有效并发减一且无告警——给循环体引入可 panic 路径前，
+	// 应先改为 goSafe 启动。
 	go p.runWorker()
 }
 

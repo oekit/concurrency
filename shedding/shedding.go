@@ -427,6 +427,10 @@ func currentCPUUsage() (int64, error) {
 // beta=0.95 指数平滑。进程级单例（惰性启动，随进程存活——与上游 stat 包的
 // init goroutine 同款取舍，量级为 1 goroutine + 1 ticker）；每周期独立
 // recover 兜底，单次采样 panic 不终止采样循环。
+//
+// 刻意不走 async.GoSafe：GoSafe recover 一次后 goroutine 即终结，常驻循环
+// 会因单次 panic 永久停摆（降载随之失效）；每 tick 独立 recover 才能自愈。
+// 循环体之外只有 ticker 构造与 channel 收发（interval 为常量，不会 panic）。
 func startSampler() {
 	go func() {
 		ticker := time.NewTicker(cpuRefreshInterval)

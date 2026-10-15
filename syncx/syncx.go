@@ -6,8 +6,6 @@ package syncx
 import (
 	"context"
 	"sync"
-
-	"github.com/oekit/concurrency/async"
 )
 
 // KeyedGate 按键在飞上限闸门（并发安全；channel 令牌先到先得；键集由调用方
@@ -57,10 +55,12 @@ func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
 }
 
 // FanIn 并行执行 fn(0..n-1)，各 goroutine 只写自己的 results[i] 槽位（免锁），
-// 全部完成后按 index 序返回。fn 经 async.GoSafe 收编（AGENTS.md「禁裸 go func」，
-// v0.2.1 前为裸 go、fn panic 会打死宿主进程）：单个 fn panic 被恢复并走全局
-// panic handler 落日志，该槽位保持零值、其余槽位与收口不受影响——消费方按
-// 「空槽降级」处理（零值歧义由调用方区分）。n<=0 返回空切片。
+// 全部完成后按 index 序返回。n<=0 返回空切片。
+//
+// panic 语义（刻意不接，与裸 go 一致——拆分自 ekit 单体时的既定取舍）：fn 的
+// panic 不做 recover，沿该 goroutine 直接崩溃进程；wg.Done 已 defer，不会
+// 因 panic 死锁在 Wait 上。需要收敛 panic 的调用方在 fn 内自行 defer
+// recover，或改用 async.GoSafe 自行组装保序收集。
 func FanIn[T any](n int, fn func(i int) T) []T {
 	if n <= 0 {
 		return nil
@@ -69,10 +69,10 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		async.GoSafe(func() {
+		go func(i int) {
 			defer wg.Done()
 			results[i] = fn(i)
-		})
+		}(i)
 	}
 	wg.Wait()
 	return results
