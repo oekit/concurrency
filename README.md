@@ -14,20 +14,34 @@
 go get github.com/oekit/concurrency@v0.1.3
 ```
 
-## 快速使用
+## 能做什么
 
+- **GoSafe 系列**：裸 goroutine 的安全替代，panic 自动 recover、可注入 panic handler
+- **重试**：`retry.Do` 可配置次数/退避
+- **流控**：令牌桶限流、键控闸门（同 key 串行）、扇出
+- **编排**：分组并发、单飞去重、多阶段进度追踪
+
+## 使用示例
+
+### 安全起 goroutine + 重试
 ```go
 import (
     "github.com/oekit/concurrency/async"
     "github.com/oekit/concurrency/retry"
 )
 
-async.GoSafe(func() { /* panic 自动 recover */ })
+async.GoSafe(func() { process(ch) }) // panic 被 recover，进程不倒
 err := retry.Do(ctx, retry.Config{}, func(attempt int) error {
-    return call(); // 失败自动重试
+    return flakyCall() // 按配置自动重试
 })
 ```
+### 键控闸门：同 key 串行、异 key 并行
+```go
+import "github.com/oekit/concurrency/syncx"
 
+g := syncx.NewKeyedGate() // 按业务 key 加锁
+g.Acquire(key)
+defer g.Release(key)
 ## 包清单
 
 - `async/` — GoSafe 系列（GoSafe/GoSafeWithErr/GoWithContext...），panic recover + 可注入 panic handler
