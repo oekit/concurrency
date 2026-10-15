@@ -1,6 +1,6 @@
 # concurrency
 
-> 并发与流控原语——GoSafe safe-go/重试/键控闸门/令牌桶
+> 并发与流控原语——GoSafe safe-go/协程池/重试/键控闸门/令牌桶
 
 > 🌐 项目主页：**https://oekit.github.io/** · 名称由来：**O**pen **E**asy **Kit**（开源 · 易用 · 工具集合）
 > 🤖 AI Agent：本仓规范与硬规则见 [AGENTS.md](AGENTS.md)；机器可读索引见 [llms.txt](https://oekit.github.io/llms.txt)（接口签名以源码为准）。
@@ -8,19 +8,20 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/concurrency@v0.1.5
+go get github.com/oekit/concurrency@v0.2.0
 ```
 
 ## 这个仓库做什么
 
 `concurrency` 是**并发与流控原语集**：把 Go 并发开发里最容易出事的部分——
-裸 goroutine 的 panic、无界重试、限流、并发去重——封装成开箱即用且经过生产验证的原语。
+裸 goroutine 的 panic、无界重试、无界并发、限流、并发去重——封装成开箱即用且经过生产验证的原语。
 
 ## 核心能力
 
 | 包 | 做什么 |
 |---|---|
 | `async` | **GoSafe 系列** safe-go：`GoSafe`/`GoSafeWithErr`/`GoWithContext`/`GoSafeWithContext`/`GoSafeWithErrChannel`，panic 自动 recover + 可注入 panic 上报。全矩阵禁止裸 `go func` 的替代品 |
+| `gopool` | **自适应协程池**：惰性拉起 worker、队列满回退直接 `go`（不丢任务）、空闲按 WorkerMaxAge 老化退出、`Close(ctx)` 优雅排空。高频突发任务的并发数软上限（v0.2.0 吸收自 cloudwego/gopkg） |
 | `retry` | `Do(ctx, cfg, fn)` 重试/轮询：次数、退避、可重试判定 |
 | `syncx` | 键控闸门（同一 key 串行）、扇出控制 |
 | `ratelimit` | 令牌桶限流 |
@@ -33,11 +34,22 @@ go get github.com/oekit/concurrency@v0.1.5
 ```go
 import (
     "github.com/oekit/concurrency/async"
+    "github.com/oekit/concurrency/gopool"
     "github.com/oekit/concurrency/retry"
 )
 
 // 替代裸 go func：panic 被 recover，可注入 panic 上报
 async.GoSafe(func() { serve() })
+
+// 高频突发任务走池：worker 数软上限，panic 汇入 logx
+gopool.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
+    logx.Error("gopool panic", "error", r, "stack", string(stack))
+})
+gopool.Go(func() { process(item) })
+
+p := gopool.NewPool("ingest", gopool.PoolOption{MaxIdleWorkers: 64})
+p.CtxGo(ctx, func() { handle(req) })
+defer p.Close(ctx) // 优雅排空
 
 // 带重试的调用
 err := retry.Do(ctx, retry.Config{}, func(attempt int) error {
@@ -56,8 +68,8 @@ err := retry.Do(ctx, retry.Config{}, func(attempt int) error {
 
 | 模块 | 内容 | 矩阵内依赖 |
 |---|---|---|
-| [pkg](https://github.com/oekit/pkg) | 微工具集 16 合 1（errors/validator/stringx/slicex/enumx/convert/encoding/jsonrepair/httpjson/mathx/pathx/pagination/ptrx/timex/uidgen/cache） | — |
-| [concurrency](https://github.com/oekit/concurrency) | 并发与流控原语（async/group/singleflight/progress/syncx/ratelimit/retry） | — |
+| [pkg](https://github.com/oekit/pkg) | 微工具集 18 合 1（errors/validator/stringx/slicex/enumx/convert/encoding/jsonrepair/httpjson/mathx/pathx/pagination/ptrx/timex/uidgen/cache/bufiox/strmap） | — |
+| [concurrency](https://github.com/oekit/concurrency) | 并发与流控原语（async/gopool/group/singleflight/progress/syncx/ratelimit/retry） | — |
 | [logx](https://github.com/oekit/logx) | 统一日志门面（多后端可替换 + Sink + caller 归属）+ 优雅关停 | — |
 | [core](https://github.com/oekit/core) | 应用基建件（governance 治理 schema / config 配置加载 / lifecycle 契约 / network IP 工具 / version） | [logx](https://github.com/oekit/logx) |
 | [istio](https://github.com/oekit/istio) | Istio Proxyless——Kitex xDS 动态熔断 | — |
