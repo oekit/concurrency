@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.0] — 2026-10-16
+
+- feat(window): 新增滑动窗口统计容器 `window.RollingWindow`（移植 go-zero
+  collection.RollingWindow，算法、惰性重置与时间对齐保持上游语义）：泛型桶
+  `BucketInterface[T]` + 默认 `Bucket[T]{Sum, Count}` + `Reduce` + `IgnoreCurrentBucket`
+- 时间源可注入 `WithWindowClock`（缺省 `time.Now`，测试确定性）；选项类型按硬规则命名 `WindowOption`
 
 ## [v0.2.1] — 2026-10-16
 

@@ -1,6 +1,6 @@
 # concurrency
 
-> 并发与流控原语——GoSafe safe-go/协程池/重试/键控闸门/令牌桶
+> 并发与流控原语——GoSafe safe-go/协程池/重试/键控闸门/令牌桶/滑动窗口统计
 
 > 🌐 项目主页：**https://oekit.github.io/** · 名称由来：**O**pen **E**asy **Kit**（开源 · 易用 · 工具集合）
 > 🤖 AI Agent：本仓规范与硬规则见 [AGENTS.md](AGENTS.md)；机器可读索引见 [llms.txt](https://oekit.github.io/llms.txt)（接口签名以源码为准）。
@@ -25,6 +25,7 @@ go get github.com/oekit/concurrency@v0.2.0
 | `retry` | `Do(ctx, cfg, fn)` 重试/轮询：次数、退避、可重试判定 |
 | `syncx` | 键控闸门（同一 key 串行）、扇出控制 |
 | `ratelimit` | 令牌桶限流 |
+| `window` | **滑动窗口统计容器**（v0.2.0 移植自 go-zero collection.RollingWindow）：泛型桶 `BucketInterface` + 默认 `Bucket{Sum, Count}`、惰性重置、`Reduce` 聚合、`IgnoreCurrentBucket`；时间源可注入 `WithWindowClock`——熔断/降载的数据源 |
 | `singleflight` | 并发去重（同 key 合并为一次调用） |
 | `group` | 并发分组编排 |
 | `progress` | 多阶段进度追踪 |
@@ -69,7 +70,7 @@ err := retry.Do(ctx, retry.Config{}, func(attempt int) error {
 | 模块 | 内容 | 矩阵内依赖 |
 |---|---|---|
 | [pkg](https://github.com/oekit/pkg) | 微工具集 18 合 1（errors/validator/stringx/slicex/enumx/convert/encoding/jsonrepair/httpjson/mathx/pathx/pagination/ptrx/timex/uidgen/cache/bufiox/strmap） | — |
-| [concurrency](https://github.com/oekit/concurrency) | 并发与流控原语（async/gopool/group/singleflight/progress/syncx/ratelimit/retry） | — |
+| [concurrency](https://github.com/oekit/concurrency) | 并发与流控原语（async/gopool/group/singleflight/progress/syncx/ratelimit/retry/window） | — |
 | [logx](https://github.com/oekit/logx) | 统一日志门面（多后端可替换 + Sink + caller 归属）+ 优雅关停 | — |
 | [core](https://github.com/oekit/core) | 应用基建件（governance 治理 schema / config 配置加载 / lifecycle 契约 / network IP 工具 / version） | [logx](https://github.com/oekit/logx) |
 | [istio](https://github.com/oekit/istio) | Istio Proxyless——Kitex xDS 动态熔断 | — |
