@@ -1,4 +1,4 @@
-module github.com/openekit/concurrency
+module github.com/oekit/concurrency
 
 go 1.26.0
 

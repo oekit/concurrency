@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openekit/concurrency/async"
+	"github.com/oekit/concurrency/async"
 )
 
 // WaitGroupWrapper 是 context 感知的 WaitGroup 封装。
