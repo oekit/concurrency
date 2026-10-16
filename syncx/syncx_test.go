@@ -102,3 +102,17 @@ func TestFanInEmpty(t *testing.T) {
 		t.Fatalf("n<=0 应返回 nil，得到 %v", out)
 	}
 }
+
+func TestFanInPanicRecovered(t *testing.T) {
+	// 单个 fn panic：GoSafe 恢复（不炸进程、不波及其余槽位与收口），该槽保持
+	// 零值——消费方按「空槽降级」处理。v0.2.1 前为裸 go，此场景直接 crash。
+	got := FanIn(3, func(i int) int {
+		if i == 1 {
+			panic("lane boom")
+		}
+		return i * 10
+	})
+	if len(got) != 3 || got[0] != 0 || got[1] != 0 || got[2] != 20 {
+		t.Fatalf("panic 槽应保持零值且其余照常: %+v", got)
+	}
+}

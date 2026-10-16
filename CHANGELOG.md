@@ -3,6 +3,20 @@
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
 
+## [v0.2.1] — 2026-10-16
+
+- fix(syncx)：FanIn 裸 goroutine 改 async.GoSafe 收编——AGENTS.md「禁裸 go func」
+  铁律对齐（v0.2.1 前 fn panic 直接打死宿主进程）。单个 fn panic 被恢复并走全局
+  panic handler 落日志，该槽位保持零值、其余槽位与收口不受影响，消费方按「空槽
+  降级」处理。新增 TestFanInPanicRecovered；全仓 -race 8 包零竞争。消费者侧动机：
+  agentkit（github.com/yi-nology/agentkit）rag Hybrid 双路检索等 GoSafe 手写扇出
+  形态此前无法安全换用 FanIn。
+
+## [v0.2.0] — 2026-10-15
+
+- feat(gopool)：吸收 cloudwego/gopkg——gopool 自适应协程池（惰性扩容/队列满回退/
+  老化退出/Close 排空）
+
 ## [v0.1.3] — 2026-10-15
 
 - v0.1.3

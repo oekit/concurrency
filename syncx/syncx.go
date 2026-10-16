@@ -6,6 +6,8 @@ package syncx
 import (
 	"context"
 	"sync"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // KeyedGate 按键在飞上限闸门（并发安全；channel 令牌先到先得；键集由调用方
@@ -55,8 +57,10 @@ func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
 }
 
 // FanIn 并行执行 fn(0..n-1)，各 goroutine 只写自己的 results[i] 槽位（免锁），
-// 全部完成后按 index 序返回。fn 内 panic 不接（与裸 go 语义一致，由调用方的
-// panic 守卫约定承担）。n<=0 返回空切片。
+// 全部完成后按 index 序返回。fn 经 async.GoSafe 收编（AGENTS.md「禁裸 go func」，
+// v0.2.1 前为裸 go、fn panic 会打死宿主进程）：单个 fn panic 被恢复并走全局
+// panic handler 落日志，该槽位保持零值、其余槽位与收口不受影响——消费方按
+// 「空槽降级」处理（零值歧义由调用方区分）。n<=0 返回空切片。
 func FanIn[T any](n int, fn func(i int) T) []T {
 	if n <= 0 {
 		return nil
@@ -65,10 +69,10 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		go func(i int) {
+		async.GoSafe(func() {
 			defer wg.Done()
 			results[i] = fn(i)
-		}(i)
+		})
 	}
 	wg.Wait()
 	return results
