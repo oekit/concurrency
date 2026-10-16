@@ -2,6 +2,21 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.4.0] — 2026-10-16
+
+- feat(batch): 新增攒批执行器 `batch`——`PeriodicalExecutor` + `TaskContainer` 扩展点
+  （参考 go-zero core/executors，按需后台协程 + 空闲自退出模型）：满条数 `BulkExecutor` /
+  满字节 `ChunkExecutor` / 窗口去重 `LessExecutor`（CAS 裁决恰一次）；Ticker/时钟可注入
+  （`WithBatchTicker`/`WithBatchClock`）时序测试完全确定；Execute 统一经 `async.RunSafe`
+  隔离 panic，单批失败不影响后续；退出摘牌与取空判定同临界区，任务不滞留无人消费
+- async: 新增 `RunSafe`——同步 recover 包装（复用统一 PanicHandler），批量回调等
+  "第三方回调不应打死调用方"场景
+- feat(timewheel): 新增单级时间轮 `timewheel`（参考 go-zero collection.TimingWheel，
+  圈数 circle 表达超轮延迟）：任务收敛为 `func()` 类型安全，触发经 async.RunSafe 隔离；
+  Ticker 可注入 + `HasTimer` 串行 barrier 使时序测试完全确定；生命周期 `Close(ctx) error`
+  幂等（硬规则），Close 后未触发任务丢弃（持久化/死信/分片需求走 oekit/timertask）
+- 补记：shedding（v0.3.0 节已载）实际随本版首发——v0.3.1 tag 之后合入 main，漏发一轮
+
 ## [v0.2.0] — 2026-10-16
 
 - feat: v0.2.0 吸收 cloudwego/gopkg——gopool 自适应协程池（惰性扩容/队列满回退/老化退出/Close 排空）；
