@@ -60,18 +60,6 @@
 - feat(gopool)：吸收 cloudwego/gopkg——gopool 自适应协程池（惰性扩容/队列满回退/
   老化退出/Close 排空）
 
-## [v0.1.3] — 2026-10-15
-
-- v0.1.3
-
-## [v0.1.2] — 2026-10-15
-
-- v0.1.2
-
-## [v0.1.1] — 2026-10-15
-
-- v0.1.1
-
 ## [v0.1.0] — 2026-10-15
 
-- v0.1.0
+自 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来的初始公开版本，完成拆分稳定化：模块路径统一为 `github.com/oekit/concurrency`，多轮拆分/合并收敛至当前模块边界，组织基建（共享 CI workflow、golangci v2、Dependabot）就位。
