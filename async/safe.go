@@ -48,6 +48,18 @@ func callPanicHandler(msg string, stack []byte) {
 	(*fn)(msg, stack)
 }
 
+// RunSafe 在当前 goroutine 同步运行 fn，panic 被 recover 并经 PanicHandler
+// 汇报（不重新 panic）。适合"第三方回调不应打死调用方"的场景，如批量执行器
+// 执行用户回调；需要独立 goroutine 用 GoSafe。
+func RunSafe(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
+		}
+	}()
+	fn()
+}
+
 // GoSafe launches a goroutine with panic recovery.
 func GoSafe(fn func()) {
 	go func() {
