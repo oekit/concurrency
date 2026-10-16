@@ -2,6 +2,11 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.0] — 2026-10-16
+
+- feat: v0.2.0 吸收 cloudwego/gopkg——gopool 自适应协程池（惰性扩容/队列满回退/老化退出/Close 排空）；
+  async 措辞中性化（#2）。补记：本段随 v0.3.0 发布批次补录
+
 ## [v0.3.0] — 2026-10-16
 
 - feat(window): 新增滑动窗口统计容器 `window.RollingWindow`（移植 go-zero
