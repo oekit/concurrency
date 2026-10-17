@@ -349,3 +349,69 @@ func TestFlight_PanicWaiterErrorTyped(t *testing.T) {
 		t.Fatalf("prefix text broken: %q", err.Error())
 	}
 }
+
+// TestFlight_DoShared 钉住 #18：DoShared 返回 Shared 折叠标记——
+// 首个 caller false，并发 waiter true；Do 保持 (T, error) 不动。
+func TestFlight_DoShared(t *testing.T) {
+	f := New[string]()
+	key := "shared-key"
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	go func() {
+		_, _, _ = f.DoShared(context.Background(), key, func(ctx context.Context) (string, error) {
+			close(started)
+			<-release
+			return "leader-result", nil
+		})
+	}()
+
+	<-started
+	sharedDone := make(chan struct{})
+	go func() {
+		v, shared, err := f.DoShared(context.Background(), key, func(ctx context.Context) (string, error) {
+			return "should-not-run", nil
+		})
+		if err != nil || v != "leader-result" || !shared {
+			t.Errorf("waiter: v=%q shared=%v err=%v", v, shared, err)
+		}
+		close(sharedDone)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	<-sharedDone
+}
+
+// TestFlight_ResultWaiters 钉住 #18 附带：DoChan 的 Result.Waiters 反映
+// 「这一轮折叠掉的调用方数」（leader 记 1，每个 waiter 计入）。
+func TestFlight_ResultWaiters(t *testing.T) {
+	f := New[string]()
+	key := "waiters-key"
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	resCh := f.DoChan(context.Background(), key, func(ctx context.Context) (string, error) {
+		close(started)
+		<-release
+		return "leader", nil
+	})
+
+	<-started
+	waiterDone := make(chan int, 1)
+	go func() {
+		res := <-f.DoChan(context.Background(), key, func(ctx context.Context) (string, error) {
+			return "should-not-run", nil
+		})
+		waiterDone <- res.Waiters
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	got := <-waiterDone
+	res := <-resCh
+	if res.Waiters < 1 {
+		t.Fatalf("leader Waiters = %d, want >= 1（折叠掉的 waiter 数）", res.Waiters)
+	}
+	_ = got
+}

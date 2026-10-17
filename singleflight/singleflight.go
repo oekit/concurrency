@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/oekit/concurrency/async"
 )
@@ -23,6 +24,9 @@ type call[T any] struct {
 	ready chan struct{}
 	val   T
 	err   error
+	// waiters 折叠掉的并发调用方数。原子递增：close(ready) 与 Delete 之间
+	// 仍可能有迟到 waiter 注册——计数为近似值（观测口径，非精确账目）。
+	waiters atomic.Int32
 }
 
 // Do 执行 fn，同一个 key 的并发调用共享结果。
@@ -47,6 +51,7 @@ func (f *Flight[T]) Do(ctx context.Context, key string, fn func(ctx context.Cont
 
 	if loaded {
 		// waiter：等待 caller 完成或 context 取消
+		existing.waiters.Add(1)
 		select {
 		case <-existing.ready:
 			return existing.val, existing.err
@@ -85,6 +90,46 @@ type Result[T any] struct {
 	Val    T
 	Err    error
 	Shared bool // true 表示与其他调用方共享了同一次 fn
+	// Waiters 是本轮折叠掉的并发调用方数（leader 视角：不含自己，>=0）。
+	// 排障时可直接看出「这一轮合并了几个调用方」（#18）。
+	Waiters int
+}
+
+// DoShared 是 Do 的折叠可观测形态（#18）：额外返回 Shared——true 表示
+// 本次调用与其他调用方共享了同一次 fn（自己是 waiter 而非 leader）。
+// 用于埋点区分「本轮真采集」与「复用了并发中的那一轮」；Do 保持 (T, error)
+// 不动，不破坏现有调用点。
+func (f *Flight[T]) DoShared(ctx context.Context, key string, fn func(ctx context.Context) (T, error)) (T, bool, error) {
+	c := &call[T]{ready: make(chan struct{})}
+
+	actual, loaded := f.calls.LoadOrStore(key, c)
+	existing := actual.(*call[T])
+
+	if loaded {
+		existing.waiters.Add(1)
+		select {
+		case <-existing.ready:
+			return existing.val, true, existing.err
+		case <-ctx.Done():
+			var zero T
+			return zero, false, ctx.Err()
+		}
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
+			close(c.ready)
+			f.calls.Delete(key)
+			panic(r)
+		}
+		close(c.ready)
+		f.calls.Delete(key)
+	}()
+
+	val, err := fn(ctx)
+	c.val, c.err = val, err
+	return val, false, err
 }
 
 // DoChan 与 Do 语义相同，但结果经 channel 返回，调用方可用 select 组合：
@@ -110,10 +155,11 @@ func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.
 	existing := actual.(*call[T])
 
 	if loaded {
+		existing.waiters.Add(1)
 		go func() {
 			select {
 			case <-existing.ready:
-				ch <- Result[T]{Val: existing.val, Err: existing.err, Shared: true}
+				ch <- Result[T]{Val: existing.val, Err: existing.err, Shared: true, Waiters: int(existing.waiters.Load())}
 			case <-ctx.Done():
 				ch <- Result[T]{Err: ctx.Err()}
 			}
@@ -132,7 +178,7 @@ func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.
 			}
 			close(c.ready)
 			f.calls.Delete(key)
-			ch <- Result[T]{Val: c.val, Err: c.err}
+			ch <- Result[T]{Val: c.val, Err: c.err, Waiters: int(c.waiters.Load())}
 		}()
 		c.val, c.err = fn(innerCtx)
 	}()

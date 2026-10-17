@@ -2,7 +2,8 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
-## [v0.7.0] — 2026-10-18
+## [- feat(singleflight): `Flight.DoShared`（#18）——折叠可观测形态，额外返回 Shared（自己是 waiter 而非 leader）；Do 保持 (T, error) 不动；`Result.Waiters` 新增——本轮折叠掉的并发调用方数（近似值，观测口径）。#17（breaker 三态状态机）评估后挂起：等价于核心原语状态机重构，实施大纲已评论，保持 open
+v0.7.0] — 2026-10-18
 
 ### feat(async)：panic 收编统一 typed *PanicError（[#12](https://github.com/oekit/concurrency/issues/12)）
 - 新增 `async.PanicError{Value, Stack, Task}`——`RunSafeErr`/`RunSafeRet`/`RunSafeRetLabeled` 的
