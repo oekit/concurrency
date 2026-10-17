@@ -2,12 +2,6 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
-## [Unreleased]
-
-- **test(singleflight)**：接入 `pkg/singleflighttest` 共享语义契约（与
-  `pkg/internal/singleflight` 同一套），漂移双红
-  （[pkg#4](https://github.com/oekit/pkg/issues/4)）
-
 ## [v0.5.0] — 2026-10-17
 
 - feat(retry): `Config` 新增指数退避 `Exponential`（`Delay*2^(attempt-1)`，受 `MaxDelay` 封顶、
@@ -26,17 +20,17 @@
   - `AllowWithRetryAfter(key) (wait, ok)`：拒绝时返回下一个可用令牌等待时长，
     内部 `Reserve→Delay→Cancel` **不消耗令牌**（429 + Retry-After 标准姿势）
   - `Replace(key, l)` 速率热更（换桶即新配额）；`TokenBucket.RetryAfter()` 暴露探测能力
-
-## [v0.5.0] — 2026-10-17
-
 - **feat(syncx)**：新增逐槽错误变体 `FanInErr`（`fn func(i int) (T, error)` 返回
   `[]Slot[T]`）——`Slot.Val/Err/Panicked` 三态：fn panic 不再静默零值槽，
   payload 直达调用侧（经新增 `async.ReportPanic` 上报全局 handler，观测面
   统一），合法零值与 panic 空槽可区分，消费方按槽降级免写 recover→占位
   样板。`FanIn` 保留不动（无 error 形态的轻量路径）
   （[#7](https://github.com/oekit/concurrency/issues/7)）
+- **test(singleflight)**：接入 `pkg/singleflighttest` 共享语义契约（与
+  `pkg/internal/singleflight` 同一套），漂移双红
+  （[pkg#4](https://github.com/oekit/pkg/issues/4)）
 
-## [v0.4.0] — 2026-10-17 — 2026-10-16
+## [v0.4.0] — 2026-10-16
 
 - feat(batch): 新增攒批执行器 `batch`——`PeriodicalExecutor` + `TaskContainer` 扩展点
   （参考 go-zero core/executors，按需后台协程 + 空闲自退出模型）：满条数 `BulkExecutor` /
