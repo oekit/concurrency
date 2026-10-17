@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.5.3] — 2026-10-17
+
+- fix(deps): pkg 地板 v0.9.3 → v0.10.0（BREAKING 拆分版；本仓仅引用 singleflighttest，零代码改动）
+
 ## [v0.5.2] — 2026-10-17
 
 - build: go 最低版本实际降至 1.24.0——golang.org/x/time 锁 v0.14.0（声明 go≤1.24 的最高版）；pkg 地板 v0.8.0 → v0.9.3（v0.5.1 事故修正）
