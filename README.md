@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/concurrency@v0.5.0
+go get github.com/oekit/concurrency@v0.5.2
 ```
 
 ## 这个仓库做什么
