@@ -6,10 +6,6 @@
 
 - build: go 最低版本实际降至 1.24.0——golang.org/x/time 锁 v0.14.0（声明 go≤1.24 的最高版）；pkg 地板 v0.8.0 → v0.9.3（v0.5.1 事故修正）
 
-## [v0.5.1] — 2026-10-17
-
-- build: go 最低版本降至 1.24；pkg 地板 v0.8.0 → v0.9.2——⚠️ 发布事故：本版 go 行实际仍为 1.26.0（pkg v0.9.2 同源回抬 + x/time 未降），真实降级见 v0.5.2
-
 ## [v0.5.0] — 2026-10-17
 
 - feat(retry): `Config` 新增指数退避 `Exponential`（`Delay*2^(attempt-1)`，受 `MaxDelay` 封顶、
