@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.5.1] — 2026-10-17
+
+- build: go 最低版本降至 1.24（go.mod go 1.26 → 1.24，golangci 同步）；pkg 地板 v0.8.0 → v0.9.2
+
 ## [v0.5.0] — 2026-10-17
 
 - feat(retry): `Config` 新增指数退避 `Exponential`（`Delay*2^(attempt-1)`，受 `MaxDelay` 封顶、
