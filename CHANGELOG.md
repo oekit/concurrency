@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [Unreleased]
+
+- **test(singleflight)**：接入 `pkg/singleflighttest` 共享语义契约（与
+  `pkg/internal/singleflight` 同一套），漂移双红
+  （[pkg#4](https://github.com/oekit/pkg/issues/4)）
+
 ## [v0.5.0] — 2026-10-17
 
 - feat(retry): `Config` 新增指数退避 `Exponential`（`Delay*2^(attempt-1)`，受 `MaxDelay` 封顶、

@@ -153,7 +153,7 @@ func TestDoExponentialBackoff(t *testing.T) {
 	if delays[0] < 4*time.Millisecond || delays[1] < 8*time.Millisecond || delays[2] < 16*time.Millisecond {
 		t.Fatalf("指数退避未生效：%v", delays)
 	}
-	if !(delays[0] < delays[1] && delays[1] < delays[2]) {
+	if delays[0] >= delays[1] || delays[1] >= delays[2] {
 		t.Fatalf("退避未递增：%v", delays)
 	}
 }
