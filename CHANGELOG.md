@@ -2,6 +2,15 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [Unreleased]
+
+- **feat(async)**：`RunSafeErr` / `RunSafeRet[T]` / `RunSafeRetLabeled`——panic 收编为
+  error 透给调用方（「panic→领域 error」场景可采用）
+  （[#8](https://github.com/oekit/concurrency/issues/8)）
+- **feat(singleflight)**：`Flight.DoChan`——channel 交付结果；配合
+  `context.WithoutCancel` 实现「leader 免疫取消 + waiter 各自 ctx 退出」
+  （[#10](https://github.com/oekit/concurrency/issues/10)）
+
 ## [v0.5.4] — 2026-10-17
 
 - pkg 地板 v0.10.0 → v0.11.0（mathx Upward/jsonrepair UnmarshalLenient，零代码改动）

@@ -77,3 +77,62 @@ func (f *Flight[T]) Do(ctx context.Context, key string, fn func(ctx context.Cont
 func (f *Flight[T]) Forget(key string) {
 	f.calls.Delete(key)
 }
+
+// Result 是 DoChan 的单次结果。
+type Result[T any] struct {
+	Val    T
+	Err    error
+	Shared bool // true 表示与其他调用方共享了同一次 fn
+}
+
+// DoChan 与 Do 语义相同，但结果经 channel 返回，调用方可用 select 组合：
+//
+//	// leader 免疫取消 + waiter 各自 ctx 退出
+//	resCh := f.DoChan(context.WithoutCancel(ctx), key, dial)
+//	select {
+//	case r := <-resCh:
+//	    ...
+//	case <-ctx.Done():
+//	    return ctx.Err() // 仅本 waiter 退出，不影响 leader
+//	}
+//
+// fn 始终在内部 goroutine 执行；返回的 channel 缓冲 1，调用方放弃读取
+// 不会泄漏 goroutine。leader 的 fn 是否免疫取消由调用方传入的 ctx 决定
+// （配合 context.WithoutCancel）。
+func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.Context) (T, error)) <-chan Result[T] {
+	innerCtx := context.WithoutCancel(ctx)
+	ch := make(chan Result[T], 1)
+
+	c := &call[T]{ready: make(chan struct{})}
+	actual, loaded := f.calls.LoadOrStore(key, c)
+	existing := actual.(*call[T])
+
+	if loaded {
+		go func() {
+			select {
+			case <-existing.ready:
+				ch <- Result[T]{Val: existing.val, Err: existing.err, Shared: true}
+			case <-ctx.Done():
+				ch <- Result[T]{Err: ctx.Err()}
+			}
+		}()
+		return ch
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.err = fmt.Errorf("singleflight: fn panic: %v", r)
+				close(c.ready)
+				f.calls.Delete(key)
+				ch <- Result[T]{Err: c.err}
+				return
+			}
+			close(c.ready)
+			f.calls.Delete(key)
+			ch <- Result[T]{Val: c.val, Err: c.err}
+		}()
+		c.val, c.err = fn(innerCtx)
+	}()
+	return ch
+}

@@ -177,3 +177,39 @@ func labeledMsg(task string, r any) string {
 	}
 	return fmt.Sprintf("task=%s: %v", task, r)
 }
+
+// RunSafeErr 同步运行 fn，panic 收编为 error 返回（不再静默）。
+// 适合「panic → 领域 error 透给调用方」场景（如 guardedCall）。
+// 正常返回值原样透传；panic 时额外经 PanicHandler 汇报。
+func RunSafeErr(fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return fn()
+}
+
+// RunSafeRet 同步运行返回 (T, error) 的 fn，panic 收编为 error（零值 T）。
+// 调用方能区分「合法零值 + nil」与「panic 失败」。
+func RunSafeRet[T any](fn func() (T, error)) (val T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return fn()
+}
+
+// RunSafeRetLabeled 同 RunSafeRet，panic 汇报带任务归属标签。
+func RunSafeRetLabeled[T any](task string, fn func() (T, error)) (val T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			callPanicHandler(labeledMsg(task, r), debug.Stack())
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return fn()
+}
