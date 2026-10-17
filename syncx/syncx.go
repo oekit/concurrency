@@ -77,3 +77,43 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 	wg.Wait()
 	return results
 }
+
+// Slot 是 FanInErr 的逐槽结果：Val/Err 为 fn 的正常返回；Panicked 非 nil 表示
+// fn panic（已恢复并经 async.ReportPanic 上报全局 handler），此时 Val 为零值、
+// Err 为 nil——T 的合法零值与 panic 空槽由此可区分，消费方按槽降级不再需要
+// 自写 recover→占位样板。
+type Slot[T any] struct {
+	Val      T
+	Err      error
+	Panicked any
+}
+
+// FanInErr 逐槽错误变体：并行执行 fn(0..n-1)（fn 可返回 error），全部完成后
+// 按 index 序返回逐槽结果。fn 正常返回 → Val/Err 如实记录；fn panic → 该槽
+// Panicked=payload、Val 零值、Err nil——不再静默（FanIn 契约保留不动，供无
+// error 形态的轻量路径）。n<=0 返回空切片。
+func FanInErr[T any](n int, fn func(i int) (T, error)) []Slot[T] {
+	if n <= 0 {
+		return nil
+	}
+	slots := make([]Slot[T], n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		async.GoSafe(func() {
+			defer wg.Done()
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slots[i].Panicked = r
+						async.ReportPanic(r)
+					}
+				}()
+				v, err := fn(i)
+				slots[i].Val, slots[i].Err = v, err
+			}()
+		})
+	}
+	wg.Wait()
+	return slots
+}

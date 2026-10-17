@@ -27,7 +27,16 @@
     内部 `Reserve→Delay→Cancel` **不消耗令牌**（429 + Retry-After 标准姿势）
   - `Replace(key, l)` 速率热更（换桶即新配额）；`TokenBucket.RetryAfter()` 暴露探测能力
 
-## [v0.4.0] — 2026-10-16
+## [v0.5.0] — 2026-10-17
+
+- **feat(syncx)**：新增逐槽错误变体 `FanInErr`（`fn func(i int) (T, error)` 返回
+  `[]Slot[T]`）——`Slot.Val/Err/Panicked` 三态：fn panic 不再静默零值槽，
+  payload 直达调用侧（经新增 `async.ReportPanic` 上报全局 handler，观测面
+  统一），合法零值与 panic 空槽可区分，消费方按槽降级免写 recover→占位
+  样板。`FanIn` 保留不动（无 error 形态的轻量路径）
+  （[#7](https://github.com/oekit/concurrency/issues/7)）
+
+## [v0.4.0] — 2026-10-17 — 2026-10-16
 
 - feat(batch): 新增攒批执行器 `batch`——`PeriodicalExecutor` + `TaskContainer` 扩展点
   （参考 go-zero core/executors，按需后台协程 + 空闲自退出模型）：满条数 `BulkExecutor` /

@@ -48,6 +48,14 @@ func callPanicHandler(msg string, stack []byte) {
 	(*fn)(msg, stack)
 }
 
+// ReportPanic 将一次「已被调用方 recover 的 panic」上报给全局 PanicHandler，
+// 供自管 recover 的编排原语（如 syncx.FanInErr 逐槽收编）保持与 GoSafe/RunSafe
+// 统一的观测面——handler 注入方（日志/告警）不漏接任何恢复事件。
+// msg 形如 "panic recovered: <payload>"；stack 取当前调用栈。
+func ReportPanic(r any) {
+	callPanicHandler(fmt.Sprintf("panic recovered: %v", r), debug.Stack())
+}
+
 // RunSafe 在当前 goroutine 同步运行 fn，panic 被 recover 并经 PanicHandler
 // 汇报（不重新 panic）。适合"第三方回调不应打死调用方"的场景，如批量执行器
 // 执行用户回调；需要独立 goroutine 用 GoSafe。
