@@ -2,7 +2,7 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
-## [Unreleased]
+## [v0.6.0] — 2026-10-17
 
 - **feat(async)**：`RunSafeErr` / `RunSafeRet[T]` / `RunSafeRetLabeled`——panic 收编为
   error 透给调用方（「panic→领域 error」场景可采用）
