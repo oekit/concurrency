@@ -131,3 +131,41 @@ func GoSafeWithErrChannel(ch chan<- error, fn func() error) {
 		send(fn())
 	}()
 }
+
+// RunSafeLabeled 与 RunSafe 相同，但 panic 汇报带任务归属标签。
+// msg 形如 "task=janitor: boom"，便于按任务维度聚合告警，不依赖堆栈解析。
+// task 为空时退化为 RunSafe 的消息格式。
+func RunSafeLabeled(task string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			callPanicHandler(labeledMsg(task, r), debug.Stack())
+		}
+	}()
+	fn()
+}
+
+// GoSafeLabeled 与 GoSafe 相同，但 panic 汇报带任务归属标签。
+// 后台循环 / 心跳 / 清扫等命名任务用本变体，运维可直接按 task 聚合。
+func GoSafeLabeled(task string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callPanicHandler(labeledMsg(task, r), debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
+// GoSafeWithContextLabeled 启动带 ctx 的安全 goroutine，panic 汇报带任务归属标签。
+func GoSafeWithContextLabeled(ctx context.Context, task string, fn func(ctx context.Context)) {
+	GoSafeLabeled(task, func() { fn(ctx) })
+}
+
+// labeledMsg 组装带任务归属的 panic 消息。
+func labeledMsg(task string, r any) string {
+	if task == "" {
+		return fmt.Sprintf("%v", r)
+	}
+	return fmt.Sprintf("task=%s: %v", task, r)
+}

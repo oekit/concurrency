@@ -34,6 +34,11 @@
 //	async.GoWithContext(ctx, func(ctx context.Context) { doWork(ctx) })
 //	async.GoSafeWithContext(ctx, func(ctx context.Context) error { return doWork(ctx) })
 //
+// 命名后台任务（panic 日志带 task 标签，可按任务聚合告警）：
+//
+//	async.GoSafeLabeled("janitor", func() { sweep() })
+//	async.RunSafeLabeled("batch-flush", func() { flush() })
+//
 // # 使用场景
 //
 //   - 后台任务：日志上报、指标采集、缓存预热

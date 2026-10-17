@@ -2,6 +2,25 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.5.0] — 2026-10-17
+
+- feat(retry): `Config` 新增指数退避 `Exponential`（`Delay*2^(attempt-1)`，受 `MaxDelay` 封顶、
+  溢出饱和不回绕）与可选抖动 `Jitter`（叠加 `[0, Jitter)` 随机量，打散重试风暴）——
+  外部 IM 频控（429/5xx）标准应对姿势，消费方内联指数退避可下线收编（#4）
+- feat(loop): 新增周期任务循环原语 `loop`——`Run(ctx, Config, fn)` + `Wait`/`Done` 排水。
+  语义契约钉死四点：忙时丢 tick（fn 同步不重叠）、单轮 panic 按 RunSafe 收编（循环存活）、
+  ctx 取消拦「下一轮」在飞轮次跑完、`FirstDelay` 走 select 可被停机打断（#5）
+- async: 新增带任务归属标签的 `RunSafeLabeled`/`GoSafeLabeled`/`GoSafeWithContextLabeled`——
+  panic 汇报消息形如 `task=janitor: boom`，运维可按任务维度聚合告警，不再依赖堆栈解析（#6）
+- feat(ratelimit): `KeyedLimiter` 增强（#3）：
+  - 泛型 key：`KeyedLimiterOf[K comparable]` + `NewKeyedLimiterOf`；`KeyedLimiter` 保留为
+    `= KeyedLimiterOf[string]` 别名，旧 API `NewKeyedLimiter(factory, ttl)` 无破坏兼容
+  - 容量护栏 `WithMaxEntries`：表满先回收空闲条目，仍满拒绝**未登记** key（已登记不受影响）；
+    拒绝建议 `WithOverCapRetryAfter`（默认 60s）；`OverCapHits()` 可观测
+  - `AllowWithRetryAfter(key) (wait, ok)`：拒绝时返回下一个可用令牌等待时长，
+    内部 `Reserve→Delay→Cancel` **不消耗令牌**（429 + Retry-After 标准姿势）
+  - `Replace(key, l)` 速率热更（换桶即新配额）；`TokenBucket.RetryAfter()` 暴露探测能力
+
 ## [v0.4.0] — 2026-10-16
 
 - feat(batch): 新增攒批执行器 `batch`——`PeriodicalExecutor` + `TaskContainer` 扩展点

@@ -20,11 +20,12 @@ go get github.com/oekit/concurrency@v0.4.0
 
 | 包 | 做什么 |
 |---|---|
-| `async` | **GoSafe 系列** safe-go：`GoSafe`/`GoSafeWithErr`/`GoWithContext`/`GoSafeWithContext`/`GoSafeWithErrChannel`，panic 自动 recover + 可注入 panic 上报。全矩阵禁止裸 `go func` 的替代品 |
+| `async` | **GoSafe 系列** safe-go：`GoSafe`/`GoSafeWithErr`/`GoWithContext`/`GoSafeWithContext`/`GoSafeWithErrChannel`/`RunSafe`，以及带任务归属标签的 `RunSafeLabeled`/`GoSafeLabeled`（panic 日志 `task=…`，可按任务聚合告警）。panic 自动 recover + 可注入 panic 上报。全矩阵禁止裸 `go func` 的替代品 |
 | `gopool` | **自适应协程池**：惰性拉起 worker、队列满回退直接 `go`（不丢任务）、空闲按 WorkerMaxAge 老化退出、`Close(ctx)` 优雅排空。高频突发任务的并发数软上限（v0.2.0 吸收自 cloudwego/gopkg） |
-| `retry` | `Do(ctx, cfg, fn)` 重试/轮询：次数、退避、可重试判定 |
+| `retry` | `Do(ctx, cfg, fn)` 重试/轮询：次数、固定/线性/**指数**退避（`Exponential` + 可选 `Jitter` 抖动、`MaxDelay` 封顶）、可重试判定 |
+| `loop` | **周期任务循环原语**：ctx 感知 + 单轮 panic 收编 + 忙时丢 tick + 排水（`Wait`/`Done`）。过期清理/心跳/快照落盘等手搓循环的收编件 |
 | `syncx` | 键控闸门（同一 key 串行）、扇出控制 |
-| `ratelimit` | 令牌桶限流 |
+| `ratelimit` | 令牌桶/滑动窗口限流 + 按 key 隔离的 `KeyedLimiter`（泛型 key、容量护栏 `WithMaxEntries`、空闲回收、`AllowWithRetryAfter` 不消耗探测、`Replace` 速率热更） |
 | `window` | **滑动窗口统计容器**（v0.3.0 移植自 go-zero collection.RollingWindow）：泛型桶 `BucketInterface` + 默认 `Bucket{Sum, Count}`、惰性重置、`Reduce` 聚合、`IgnoreCurrentBucket`；时间源可注入 `WithWindowClock`——熔断/降载的数据源 |
 | `breaker` | **自适应熔断**（v0.3.0 移植自 go-zero googleBreaker）：Google SRE 概率式丢弃、无状态机，40×250ms 窗口 + 强制探活自愈，panic 记失败后 re-panic；`ErrCircuitOpen` 全库规范哨兵（httpx/nns-endpoint 别名共用）——下游保护的执行件 |
 | `shedding` | **CPU 自适应降载**（v0.3.0 移植自 go-zero adaptiveshedder）：maxPass×minRt 的 Little's Law 并发上限、CPU 过载因子夹 [0.1,1]、avgFlying 滞后 EMA、1s 冷却期；CPU 采样纯标准库（/proc/stat + cgroup v1/v2 配额感知），非 linux 自动禁用全放行；`ErrServiceOverloaded` 哨兵——本机过载保护的入口件 |

@@ -1,6 +1,7 @@
 package async
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -129,4 +130,94 @@ func TestSetPanicHandler_HandlerPanics(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("panicking handler crashed the process")
 	}
+}
+
+func TestRunSafeLabeled_PanicMessage(t *testing.T) {
+	orig := panicHandler.Load()
+	var got atomic.Value
+	SetPanicHandler(PanicHandler(func(msg string, stack []byte) {
+		got.Store(msg)
+	}))
+	defer func() {
+		if orig != nil {
+			SetPanicHandler(*orig)
+		}
+	}()
+
+	RunSafeLabeled("batch-flush", func() {
+		panic("boom")
+	})
+	msg, _ := got.Load().(string)
+	if msg != "task=batch-flush: boom" {
+		t.Fatalf("期望 task 前缀消息，得到 %q", msg)
+	}
+}
+
+func TestGoSafeLabeled_PanicMessage(t *testing.T) {
+	orig := panicHandler.Load()
+	var got atomic.Value
+	SetPanicHandler(PanicHandler(func(msg string, stack []byte) {
+		got.Store(msg)
+	}))
+	defer func() {
+		if orig != nil {
+			SetPanicHandler(*orig)
+		}
+	}()
+
+	done := make(chan struct{})
+	GoSafeLabeled("janitor", func() {
+		defer close(done)
+		panic("kaboom")
+	})
+	<-done
+	// handler 在 recover 闭包内同步调用，close(done) 在 panic 前已 defer，
+	// 但 handler 在 recover 后执行——用 waitFor 兜底
+	waitFor(t, func() bool {
+		msg, ok := got.Load().(string)
+		return ok && msg == "task=janitor: kaboom"
+	}, time.Second)
+}
+
+func TestRunSafeLabeled_EmptyTaskFallsBack(t *testing.T) {
+	orig := panicHandler.Load()
+	var got atomic.Value
+	SetPanicHandler(PanicHandler(func(msg string, stack []byte) {
+		got.Store(msg)
+	}))
+	defer func() {
+		if orig != nil {
+			SetPanicHandler(*orig)
+		}
+	}()
+
+	RunSafeLabeled("", func() { panic("plain") })
+	msg, _ := got.Load().(string)
+	if msg != "plain" {
+		t.Fatalf("空 task 应退化为无前缀，得到 %q", msg)
+	}
+}
+
+func TestGoSafeWithContextLabeled(t *testing.T) {
+	orig := panicHandler.Load()
+	var got atomic.Value
+	SetPanicHandler(PanicHandler(func(msg string, stack []byte) {
+		got.Store(msg)
+	}))
+	defer func() {
+		if orig != nil {
+			SetPanicHandler(*orig)
+		}
+	}()
+
+	done := make(chan struct{})
+	GoSafeWithContextLabeled(context.Background(), "heartbeat", func(ctx context.Context) {
+		defer close(done)
+		panic("hb-fail")
+	})
+	<-done
+	waitFor(t, func() bool {
+		msg, ok := got.Load().(string)
+		return ok && msg == "task=heartbeat: hb-fail"
+	}, time.Second)
 }
