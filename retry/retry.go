@@ -6,6 +6,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"time"
 )
 
@@ -17,11 +18,19 @@ type Config struct {
 	// Attempts 总尝试次数（含首次）；<=1 视为 1。
 	Attempts int
 	// Delay 退避基数。Linear=false 固定间隔；Linear=true 第 i 次失败后等待 Delay*i。
+	// Exponential=true 时第 i 次失败后等待 Delay*2^(i-1)（见 Exponential）。
 	Delay time.Duration
 	// MaxDelay 单次退避上限（<=0 不限）。
 	MaxDelay time.Duration
 	// Linear true=线性递增退避（Delay*i），false=固定间隔。
+	// 与 Exponential 同时为 true 时 Exponential 优先。
 	Linear bool
+	// Exponential true=指数退避 Delay*2^(attempt-1)，受 MaxDelay 封顶。
+	// 外部频控（429/5xx）的标准应对姿势。
+	Exponential bool
+	// Jitter 可选抖动：每次退避在计算结果上叠加 [0, Jitter) 随机量。
+	// 0 = 关闭。用于打散同时失败的重试风暴。
+	Jitter time.Duration
 	// Retryable 判定错误是否可重试；nil = 所有错误都重试。
 	Retryable func(error) bool
 }
@@ -48,13 +57,7 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 		if cfg.Retryable != nil && !cfg.Retryable(err) {
 			return err
 		}
-		delay := cfg.Delay
-		if cfg.Linear {
-			delay = time.Duration(attempt) * cfg.Delay
-		}
-		if cfg.MaxDelay > 0 && delay > cfg.MaxDelay {
-			delay = cfg.MaxDelay
-		}
+		delay := backoff(cfg, attempt)
 		if delay <= 0 {
 			continue
 		}
@@ -65,6 +68,41 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 		}
 	}
 	return err
+}
+
+// backoff 计算第 attempt 次失败后的退避时长。
+// 优先级：Exponential > Linear > 固定间隔；再按 MaxDelay 封顶；最后叠加 Jitter。
+func backoff(cfg Config, attempt int) time.Duration {
+	var delay time.Duration
+	switch {
+	case cfg.Exponential:
+		// Delay * 2^(attempt-1)；溢出饱和而非回绕为负
+		delay = cfg.Delay
+		for i := 1; i < attempt; i++ {
+			if delay <= 0 {
+				break
+			}
+			if cfg.MaxDelay > 0 && delay >= cfg.MaxDelay {
+				break
+			}
+			if delay > time.Duration(1<<62) {
+				delay = time.Duration(1<<63 - 1)
+				break
+			}
+			delay *= 2
+		}
+	case cfg.Linear:
+		delay = time.Duration(attempt) * cfg.Delay
+	default:
+		delay = cfg.Delay
+	}
+	if cfg.MaxDelay > 0 && delay > cfg.MaxDelay {
+		delay = cfg.MaxDelay
+	}
+	if cfg.Jitter > 0 {
+		delay += time.Duration(rand.Int63n(int64(cfg.Jitter)))
+	}
+	return delay
 }
 
 // Poll 按 interval 间隔轮询 cond 直到返回 done 或超过 timeout：cond 返回错误

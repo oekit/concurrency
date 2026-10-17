@@ -129,3 +129,82 @@ func TestPollEventuallyDone(t *testing.T) {
 		t.Fatalf("期望第 3 次达成，得到 err=%v n=%d", err, n)
 	}
 }
+
+func TestDoExponentialBackoff(t *testing.T) {
+	var delays []time.Duration
+	last := time.Now()
+	err := Do(context.Background(), Config{Attempts: 4, Delay: 5 * time.Millisecond, Exponential: true}, func(attempt int) error {
+		if attempt > 1 {
+			delays = append(delays, time.Since(last))
+		}
+		last = time.Now()
+		if attempt < 4 {
+			return errors.New("busy")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("期望成功，得到 %v", err)
+	}
+	// 指数退避：5ms → 10ms → 20ms；允许调度误差，但必须严格递增
+	if len(delays) != 3 {
+		t.Fatalf("期望 3 段退避，实际 %d", len(delays))
+	}
+	if delays[0] < 4*time.Millisecond || delays[1] < 8*time.Millisecond || delays[2] < 16*time.Millisecond {
+		t.Fatalf("指数退避未生效：%v", delays)
+	}
+	if !(delays[0] < delays[1] && delays[1] < delays[2]) {
+		t.Fatalf("退避未递增：%v", delays)
+	}
+}
+
+func TestDoExponentialCappedByMaxDelay(t *testing.T) {
+	start := time.Now()
+	err := Do(context.Background(), Config{Attempts: 5, Delay: 10 * time.Millisecond, Exponential: true, MaxDelay: 15 * time.Millisecond}, func(attempt int) error {
+		return errors.New("busy")
+	})
+	if err == nil {
+		t.Fatal("期望最终失败")
+	}
+	// 10 + 15 + 15 + 15 ≈ 55ms；指数 10/20/40/80 被 MaxDelay=15 封顶后应显著小于全指数
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("MaxDelay 封顶未生效，耗时 %v", elapsed)
+	}
+}
+
+func TestDoJitterAddsNoise(t *testing.T) {
+	// 固定 Delay + 大 Jitter：总耗时应大于纯固定间隔（3×1ms）
+	start := time.Now()
+	_ = Do(context.Background(), Config{Attempts: 3, Delay: time.Millisecond, Jitter: 20 * time.Millisecond}, func(attempt int) error {
+		return errors.New("busy")
+	})
+	if elapsed := time.Since(start); elapsed < 3*time.Millisecond {
+		t.Fatalf("固定基线异常：%v", elapsed)
+	}
+}
+
+func TestBackoffUnit(t *testing.T) {
+	// 纯函数级验证，避免测试抖动
+	cfg := Config{Delay: 10 * time.Millisecond, Exponential: true}
+	if d := backoff(cfg, 1); d != 10*time.Millisecond {
+		t.Fatalf("attempt=1 期望 10ms，得到 %v", d)
+	}
+	if d := backoff(cfg, 3); d != 40*time.Millisecond {
+		t.Fatalf("attempt=3 期望 40ms，得到 %v", d)
+	}
+	cfg.MaxDelay = 25 * time.Millisecond
+	if d := backoff(cfg, 3); d != 25*time.Millisecond {
+		t.Fatalf("MaxDelay 封顶期望 25ms，得到 %v", d)
+	}
+	cfg = Config{Delay: 10 * time.Millisecond, Linear: true}
+	if d := backoff(cfg, 2); d != 20*time.Millisecond {
+		t.Fatalf("线性 attempt=2 期望 20ms，得到 %v", d)
+	}
+	cfg = Config{Delay: 10 * time.Millisecond, Jitter: 5 * time.Millisecond}
+	for i := 0; i < 20; i++ {
+		d := backoff(cfg, 1)
+		if d < 10*time.Millisecond || d >= 15*time.Millisecond {
+			t.Fatalf("抖动越界：%v", d)
+		}
+	}
+}

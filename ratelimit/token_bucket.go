@@ -46,6 +46,19 @@ func (tb *TokenBucket) Reserve() time.Duration {
 	return time.Duration(1<<63 - 1) // 最大 duration，表示不可用
 }
 
+// RetryAfter 探测下一个可用令牌的等待时长，不消耗令牌（Reserve→Delay→Cancel）。
+// ok=false 表示限流器本身不可用（如 burst=0 且 rps=0）。
+// 被拒请求不会自我消耗配额——429 + Retry-After 场景的标准姿势。
+func (tb *TokenBucket) RetryAfter() (time.Duration, bool) {
+	r := tb.limiter.Reserve()
+	if !r.OK() {
+		return 0, false
+	}
+	d := r.Delay()
+	r.Cancel()
+	return d, true
+}
+
 // Rate 返回限流器的 RPS 配置。
 func (tb *TokenBucket) Rate() rate.Limit {
 	return tb.limiter.Limit()
