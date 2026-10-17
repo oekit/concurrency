@@ -186,25 +186,104 @@ func TestDoJitterAddsNoise(t *testing.T) {
 func TestBackoffUnit(t *testing.T) {
 	// 纯函数级验证，避免测试抖动
 	cfg := Config{Delay: 10 * time.Millisecond, Exponential: true}
-	if d := backoff(cfg, 1); d != 10*time.Millisecond {
+	if d := backoff(cfg, 1, nil); d != 10*time.Millisecond {
 		t.Fatalf("attempt=1 期望 10ms，得到 %v", d)
 	}
-	if d := backoff(cfg, 3); d != 40*time.Millisecond {
+	if d := backoff(cfg, 3, nil); d != 40*time.Millisecond {
 		t.Fatalf("attempt=3 期望 40ms，得到 %v", d)
 	}
 	cfg.MaxDelay = 25 * time.Millisecond
-	if d := backoff(cfg, 3); d != 25*time.Millisecond {
+	if d := backoff(cfg, 3, nil); d != 25*time.Millisecond {
 		t.Fatalf("MaxDelay 封顶期望 25ms，得到 %v", d)
 	}
 	cfg = Config{Delay: 10 * time.Millisecond, Linear: true}
-	if d := backoff(cfg, 2); d != 20*time.Millisecond {
+	if d := backoff(cfg, 2, nil); d != 20*time.Millisecond {
 		t.Fatalf("线性 attempt=2 期望 20ms，得到 %v", d)
 	}
 	cfg = Config{Delay: 10 * time.Millisecond, Jitter: 5 * time.Millisecond}
 	for i := 0; i < 20; i++ {
-		d := backoff(cfg, 1)
+		d := backoff(cfg, 1, nil)
 		if d < 10*time.Millisecond || d >= 15*time.Millisecond {
 			t.Fatalf("抖动越界：%v", d)
 		}
+	}
+}
+
+// TestDo_DelayHintClampedByMaxDelay 钉住 #14：服务端退避建议优先于计算退避，
+// 但仍受 MaxDelay 封顶。
+func TestDo_DelayHintClampedByMaxDelay(t *testing.T) {
+	cfg := Config{
+		Attempts:    2,
+		Exponential: true,
+		Delay:       10 * time.Millisecond,
+		MaxDelay:    20 * time.Millisecond,
+		DelayHint: func(err error) (time.Duration, bool) {
+			return 10 * time.Second, true // 服务端给小时级建议 → 钳到 MaxDelay
+		},
+	}
+	start := time.Now()
+	var lastErr error
+	_ = Do(context.Background(), cfg, func(attempt int) error {
+		lastErr = errors.New("hint-me")
+		return lastErr
+	})
+	elapsed := time.Since(start)
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("hint should be clamped by MaxDelay, elapsed %v", elapsed)
+	}
+	if elapsed < 15*time.Millisecond {
+		t.Fatalf("hint should win over computed backoff, elapsed %v", elapsed)
+	}
+}
+
+// TestDo_DelayHintNotProvided_FallsBackToBackoff 钉住 ok=false 走计算退避。
+func TestDo_DelayHintNotProvided_FallsBackToBackoff(t *testing.T) {
+	cfg := Config{
+		Attempts: 2,
+		Delay:    30 * time.Millisecond,
+		DelayHint: func(err error) (time.Duration, bool) {
+			return 0, false
+		},
+	}
+	start := time.Now()
+	_ = Do(context.Background(), cfg, func(int) error { return errors.New("x") })
+	if elapsed := time.Since(start); elapsed < 25*time.Millisecond {
+		t.Fatalf("fallback backoff not applied, elapsed %v", elapsed)
+	}
+}
+
+// TestDo_JitterRatioBounded 钉住 JitterRatio：单边向上按当次 delay 比例抖动，
+// 上界 delay*(1+ratio)；ratio 生效时固定 Jitter 不叠加。
+func TestDo_JitterRatioBounded(t *testing.T) {
+	cfg := Config{
+		Attempts:    50, // 采样足量，全部落在固定 delay 上界内
+		Delay:       5 * time.Millisecond,
+		JitterRatio: 0.5,         // [5ms, 7.5ms)
+		Jitter:      time.Second, // 若错误叠加会远超上界 → 用上界检出
+	}
+	start := time.Now()
+	_ = Do(context.Background(), cfg, func(int) error { return errors.New("x") })
+	elapsed := time.Since(start)
+	// 50 次平均应落在 ~6.25ms/次 → 总 250-375ms；若固定 Jitter 叠加则为 50s+
+	if elapsed > 2*time.Second {
+		t.Fatalf("ratio jitter should replace fixed jitter, elapsed %v", elapsed)
+	}
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("jitter floor too low, elapsed %v", elapsed)
+	}
+}
+
+// TestDo_JitterRatioStaysAboveBase 钉住单边向上：不含向下抖动。
+func TestDo_JitterRatioStaysAboveBase(t *testing.T) {
+	cfg := Config{
+		Attempts:    3,
+		Delay:       20 * time.Millisecond,
+		JitterRatio: 0.5,
+	}
+	start := time.Now()
+	_ = Do(context.Background(), cfg, func(int) error { return errors.New("x") })
+	// Attempts=3 → 2 次退避等待；单边向上 ⇒ ≥ 40ms（无向下抖动）
+	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
+		t.Fatalf("2 waits with 20ms base should be >= 40ms, got %v", elapsed)
 	}
 }

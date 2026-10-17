@@ -184,8 +184,9 @@ func labeledMsg(task string, r any) string {
 func RunSafeErr(fn func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
-			err = fmt.Errorf("panic: %v", r)
+			pe := newPanicError("", r)
+			callPanicHandler(fmt.Sprintf("%v", r), pe.Stack)
+			err = pe
 		}
 	}()
 	return fn()
@@ -196,8 +197,9 @@ func RunSafeErr(fn func() error) (err error) {
 func RunSafeRet[T any](fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
-			err = fmt.Errorf("panic: %v", r)
+			pe := newPanicError("", r)
+			callPanicHandler(fmt.Sprintf("%v", r), pe.Stack)
+			err = pe
 		}
 	}()
 	return fn()
@@ -207,8 +209,9 @@ func RunSafeRet[T any](fn func() (T, error)) (val T, err error) {
 func RunSafeRetLabeled[T any](task string, fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			callPanicHandler(labeledMsg(task, r), debug.Stack())
-			err = fmt.Errorf("panic: %v", r)
+			pe := newPanicError(task, r)
+			callPanicHandler(labeledMsg(task, r), pe.Stack)
+			err = pe
 		}
 	}()
 	return fn()

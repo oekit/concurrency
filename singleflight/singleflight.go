@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // Flight 对同一个 key 的并发调用只执行一次 fn。
@@ -59,7 +61,7 @@ func (f *Flight[T]) Do(ctx context.Context, key string, fn func(ctx context.Cont
 	// fn panic 时先把 panic 转成 error 存给 waiter，再 re-panic 传播给首个 caller。
 	defer func() {
 		if r := recover(); r != nil {
-			c.err = fmt.Errorf("singleflight: fn panic: %v", r)
+			c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
 			close(c.ready)
 			f.calls.Delete(key)
 			panic(r)
@@ -122,7 +124,7 @@ func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				c.err = fmt.Errorf("singleflight: fn panic: %v", r)
+				c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
 				close(c.ready)
 				f.calls.Delete(key)
 				ch <- Result[T]{Err: c.err}

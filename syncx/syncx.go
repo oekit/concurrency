@@ -78,13 +78,17 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 	return results
 }
 
-// Slot 是 FanInErr 的逐槽结果：Val/Err 为 fn 的正常返回；Panicked 非 nil 表示
-// fn panic（已恢复并经 async.ReportPanic 上报全局 handler），此时 Val 为零值、
-// Err 为 nil——T 的合法零值与 panic 空槽由此可区分，消费方按槽降级不再需要
-// 自写 recover→占位样板。
+// Slot 是 FanInErr 的逐槽结果：Val/Err 为 fn 的正常返回；fn panic 时
+// Err 承载 *async.PanicError（errors.As 可辨、携带栈，#12）且 Val 为零值。
+// Panicked 保留原始 payload（兼容字段，Deprecated——改用 errors.As(Slot.Err)）。
 type Slot[T any] struct {
-	Val      T
-	Err      error
+	Val T
+	// Err 正常错误，或 panic 收编的 *async.PanicError。
+	Err error
+	// Panicked 历史兼容字段：panic 原始 payload。新代码改用
+	// errors.As(&async.PanicError) 读 Err。
+	//
+	// Deprecated: v0.7.0 起由 Slot.Err 承载。
 	Panicked any
 }
 
@@ -106,6 +110,7 @@ func FanInErr[T any](n int, fn func(i int) (T, error)) []Slot[T] {
 				defer func() {
 					if r := recover(); r != nil {
 						slots[i].Panicked = r
+						slots[i].Err = async.NewPanicError(r)
 						async.ReportPanic(r)
 					}
 				}()

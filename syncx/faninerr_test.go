@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // TestFanInErr_NormalAndError 正常槽与 error 槽逐槽如实记录。
@@ -51,8 +53,12 @@ func TestFanInErr_PanicSlotIsMarked(t *testing.T) {
 	if fmt.Sprintf("%v", slots[1].Panicked) != "branch-1 exploded" {
 		t.Errorf("Panicked 应携带 panic payload，got %v", slots[1].Panicked)
 	}
-	if slots[1].Val != (report{}) || slots[1].Err != nil {
-		t.Errorf("panic 槽 Val 应为零值、Err 为 nil，got %+v", slots[1])
+	if slots[1].Val != (report{}) {
+		t.Errorf("panic 槽 Val 应为零值，got %+v", slots[1])
+	}
+	var pe *async.PanicError
+	if !errors.As(slots[1].Err, &pe) {
+		t.Errorf("panic 槽 Err 应承载 *async.PanicError，got %v", slots[1].Err)
 	}
 	if slots[0].Val.Name != "branch-0" || slots[2].Val.Name != "branch-2" {
 		t.Errorf("其余槽位不应受影响，got %+v", slots)
@@ -66,5 +72,29 @@ func TestFanInErr_Empty(t *testing.T) {
 	}
 	if got := FanInErr(-1, func(i int) (int, error) { return 0, nil }); got != nil {
 		t.Errorf("n<0 应返回 nil，got %+v", got)
+	}
+}
+
+// TestFanInErr_SlotErrTypedPanicError 钉住 #12：panic 槽的 Err 承载
+// *async.PanicError（errors.As 可辨、携带栈），Panicked 保留兼容。
+func TestFanInErr_SlotErrTypedPanicError(t *testing.T) {
+	slots := FanInErr(3, func(i int) (string, error) {
+		if i == 1 {
+			panic("slot-boom")
+		}
+		return fmt.Sprintf("ok-%d", i), nil
+	})
+	var pe *async.PanicError
+	if !errors.As(slots[1].Err, &pe) {
+		t.Fatalf("slot[1].Err = %v, want *PanicError", slots[1].Err)
+	}
+	if pe.Value != "slot-boom" || len(pe.Stack) == 0 {
+		t.Fatalf("PanicError = %+v", pe)
+	}
+	if slots[1].Panicked != "slot-boom" {
+		t.Fatalf("Panicked compat broken: %v", slots[1].Panicked)
+	}
+	if slots[0].Val != "ok-0" || slots[2].Val != "ok-2" {
+		t.Fatalf("healthy slots broken: %+v", slots)
 	}
 }

@@ -2,6 +2,36 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.7.0] — 2026-10-18
+
+### feat(async)：panic 收编统一 typed *PanicError（[#12](https://github.com/oekit/concurrency/issues/12)）
+- 新增 \`async.PanicError{Value, Stack, Task}\`——\`RunSafeErr\`/\`RunSafeRet\`/\`RunSafeRetLabeled\` 的
+  panic 分支、\`syncx.Slot.Err\`（新增字段承载，\`Panicked\` 标 Deprecated 保留）、
+  \`singleflight.Flight\` waiter 错误（\`fmt.Errorf %w\` 包装，前缀文案保留）统一使用本类型；
+  \`errors.As\` 可辨、携带栈；Error() 文案与历史实现一致，字符串匹配零破坏
+
+### feat(async)：实例级 Runner——库形态 panic 路由（[#13](https://github.com/oekit/concurrency/issues/13)）
+- \`Runner{Handler}\` 携带自己的 PanicHandler（GoSafe/GoSafeLabeled/GoWithContext/RunSafe/RunSafeErr
+  方法族 + \`RunSafeRetWith[T]\` 泛型包级）；零值回退全局 handler，纯增量。
+  库被宿主 import 时不再需要（也不能）动全局 SetPanicHandler
+
+### feat(retry)：DelayHint + JitterRatio（[#14](https://github.com/oekit/concurrency/issues/14)）
+- \`Config.DelayHint func(err) (d, ok)\`——服务端退避建议（Retry-After）优先于计算退避，
+  仍受 MaxDelay 封顶；ok=false 走计算退避
+- \`Config.JitterRatio\`——按当次退避幅度比例抖动（单边向上 [d, d*(1+ratio))），
+  修复固定 Jitter 在高 attempt 档占比趋零导致重试重新同步；>0 时优先于固定 Jitter
+
+### feat(retry/httpx) 新子包：HTTP 可重试性判定（[#15](https://github.com/oekit/concurrency/issues/15)）
+- \`Retryable(status)\`（429/5xx）、\`HTTPError{Status, Err}\`（Unwrap 保留链）、
+  \`IsTransportRetryable\`（ctx 取消/超时 false）、\`Classifier()\`（直塞 \`Config.Retryable\`）、
+  \`RetryAfterHint()\`（直塞 \`Config.DelayHint\`，配 \`NewRetryAfterError\`/\`NewRetryAfter\`）；
+  零外部依赖（不 import net/http，状态码以 int 传入）
+
+### feat(budget) 新子包：预算/配额记账原语（[#16](https://github.com/oekit/concurrency/issues/16)）
+- \`Ledger\`：按维度累计消耗，**超限内容存档不丢**（\`Consume\` → \`ErrOverBudget + Ref\`，
+  \`Get(ref)\` 取回，\`Sweep(olderThan)\` 按龄清理）；\`WithClock\` 注入时钟确定性测试；
+  未声明维度不限量；超限消耗不计入。与丢弃式流控面（ratelimit/shedding/breaker）互补
+
 ## [v0.6.0] — 2026-10-17
 
 - **feat(async)**：`RunSafeErr` / `RunSafeRet[T]` / `RunSafeRetLabeled`——panic 收编为

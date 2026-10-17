@@ -2,11 +2,14 @@ package singleflight
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oekit/concurrency/async"
 )
 
 func TestFlight_Dedup(t *testing.T) {
@@ -316,5 +319,33 @@ func TestFlight_GenericStruct(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("expected 1 call, got %d", got)
+	}
+}
+
+// TestFlight_PanicWaiterErrorTyped 钉住 #12：fn panic 时 waiter 拿到的错误
+// errors.As 可辨 *async.PanicError（前缀文案保留），首个 caller 仍收到原始 panic。
+func TestFlight_PanicWaiterErrorTyped(t *testing.T) {
+	f := New[string]()
+	key := "panic-typed"
+
+	go func() {
+		defer func() { _ = recover() }() // 首个 caller 收到 re-panic
+		_, _ = f.Do(context.Background(), key, func(ctx context.Context) (string, error) {
+			time.Sleep(50 * time.Millisecond) // 给 main 时间注册为 waiter
+			panic("do-not-do-this")
+		})
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	_, err := f.Do(context.Background(), key, func(ctx context.Context) (string, error) {
+		return "", errors.New("should-not-run")
+	})
+
+	var pe *async.PanicError
+	if !errors.As(err, &pe) || pe.Value != "do-not-do-this" {
+		t.Fatalf("waiter err = %v, want *PanicError", err)
+	}
+	if !strings.HasPrefix(err.Error(), "singleflight: fn panic:") {
+		t.Fatalf("prefix text broken: %q", err.Error())
 	}
 }

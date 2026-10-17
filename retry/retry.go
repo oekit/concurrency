@@ -30,7 +30,18 @@ type Config struct {
 	Exponential bool
 	// Jitter 可选抖动：每次退避在计算结果上叠加 [0, Jitter) 随机量。
 	// 0 = 关闭。用于打散同时失败的重试风暴。
+	// JitterRatio > 0 时本字段不生效（比例抖动优先，见 JitterRatio）。
 	Jitter time.Duration
+	// JitterRatio 按当次退避幅度的比例抖动（单边向上）：最终退避 ∈ [d, d*(1+ratio))。
+	// 固定 Jitter 在高 attempt 档占比趋零（指数退避下 32s 档 500ms 只占 1.5%），
+	// 打散重试风暴失效——比例抖动让占比恒定。>0 时优先于固定 Jitter；0 = 关闭。
+	JitterRatio float64
+	// DelayHint 从本次错误提取服务端退避建议（如 429/503 的 Retry-After）；
+	// ok=true 时建议值取代计算退避，仍受 MaxDelay 封顶（避免服务端小时级建议
+	// 把调用方钉死）；ok=false 或 nil 走计算退避。
+	// 「仅限流失败采信建议」等门控放在实现里（配合 retry/httpx 的
+	// RetryAfterHint 一行接入）。
+	DelayHint func(err error) (d time.Duration, ok bool)
 	// Retryable 判定错误是否可重试；nil = 所有错误都重试。
 	Retryable func(error) bool
 }
@@ -57,7 +68,7 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 		if cfg.Retryable != nil && !cfg.Retryable(err) {
 			return err
 		}
-		delay := backoff(cfg, attempt)
+		delay := backoff(cfg, attempt, err)
 		if delay <= 0 {
 			continue
 		}
@@ -70,9 +81,10 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 	return err
 }
 
-// backoff 计算第 attempt 次失败后的退避时长。
-// 优先级：Exponential > Linear > 固定间隔；再按 MaxDelay 封顶；最后叠加 Jitter。
-func backoff(cfg Config, attempt int) time.Duration {
+// backoff 计算第 attempt 次失败后的实际退避时长。
+// 顺序：计算退避（Exponential > Linear > 固定间隔）→ DelayHint 建议覆盖 →
+// MaxDelay 封顶 → 抖动（JitterRatio 比例抖动优先，否则固定 Jitter）。
+func backoff(cfg Config, attempt int, err error) time.Duration {
 	var delay time.Duration
 	switch {
 	case cfg.Exponential:
@@ -96,10 +108,22 @@ func backoff(cfg Config, attempt int) time.Duration {
 	default:
 		delay = cfg.Delay
 	}
+
+	// 服务端退避建议覆盖计算退避（负值视为无效走计算值）
+	if cfg.DelayHint != nil {
+		if d, ok := cfg.DelayHint(err); ok && d >= 0 {
+			delay = d
+		}
+	}
+
 	if cfg.MaxDelay > 0 && delay > cfg.MaxDelay {
 		delay = cfg.MaxDelay
 	}
-	if cfg.Jitter > 0 {
+
+	// 抖动：比例抖动（单边向上 [d, d*(1+ratio))）优先于固定 Jitter
+	if cfg.JitterRatio > 0 {
+		delay += time.Duration(rand.Int63n(int64(float64(delay) * cfg.JitterRatio)))
+	} else if cfg.Jitter > 0 {
 		delay += time.Duration(rand.Int63n(int64(cfg.Jitter)))
 	}
 	return delay
