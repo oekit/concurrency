@@ -2,6 +2,47 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.15.0] — 2026-10-18
+
+### feat(breaker)：同名共享熔断器配置冲突可观测（[#29](https://github.com/oekit/concurrency/issues/29)）
+- **新增 `WithBreakerConflictHandler(func(name, detail string))`**：`GetBreaker(name, opts...)`
+  是进程级单例、opts 仅首次创建生效，同名再传**不同** opts 时本次参数被静默丢弃（不报错、
+  不告警，表现为「该断的时候没断 / 不该断的时候断了」）。现把这一静默失效变成可观测事件：
+  同名已存在 + 本次 opts 非空 + 生效配置指纹与首次不同 → 回调一次 detail 对照串
+  （含 name、首次生效配置、本次传入配置与规避建议）。**纯 `GetBreaker(name)` 复用、
+  传 nil 选项（=缺省）、传入与首次等价或仅钩子不同的 opts 均不告警**，无误报
+- 冲突指纹 `configFingerprint` 只覆盖值语义字段（window/interval/forcePass/probeTimeout/
+  cooldown/consecutive），**刻意排除 clock/onReject/onConflict 三个函数字段**——函数值
+  不可比较，且钩子属每调用方私有接线，纳入比对会让先注册钩子的调用方被后续每个调用方
+  无谓告警
+- 每个 name 至多告警一次（`atomic.Bool` CAS 去重，避免热路径每次 GetBreaker 刷屏）；
+  **回调在锁外触发**（消费方代码可能反过来调 GetBreaker，`sync.RWMutex` 不可重入）
+- 冲突信号走**独立回调**而非复用 `WithBreakerRejectHandler`：拒绝回调语义是「熔断拒绝
+  了一次请求」，混入配置冲突会污染按 reject 计数的看板。未注册回调时行为与此前完全
+  一致（不产生任何日志/告警），保持本包零强制注入定位
+- 文档：`GetBreaker` doc 补命名空间隔离示例（路线 A 参数编进名字 / 路线 B 改用
+  `NewBreaker` 显式自建），不再只留一句「opts 仅首次生效」；`NewBreaker` doc 注明它
+  无按名共享语义故不存在该问题
+- **行为兼容**：共享语义、实例唯一性、并发安全均未变，仍返回首次创建的同一实例
+
+### feat(breaker)：缺省值导出，下游改为引用而非复制魔法数字（[#28](https://github.com/oekit/concurrency/issues/28)）
+- 导出 `DefaultWindow`(10s) / `DefaultBuckets`(40) / `DefaultForcePass`(1s) /
+  `DefaultProbeTimeout`(1m)——此前全部小写未导出，迁移方只能把魔法数字各自固化一份，
+  上游调了缺省、拷贝不会跟着动，而行为差异只在熔断阈值上体现，排查成本很高
+- **刻意不导出**冷却期与计数型触发的缺省：二者缺省是「未配置」（cooldown 回落
+  `DefaultProbeTimeout`、计数型关闭），值为 0，导出 0 值常量反而是陷阱——
+  `WithCooldown(DefaultCooldown)` 会被写成"显式传 0"而 panic。**「用缺省」的正确写法是
+  不传该选项**，无可引用的名字；确需非零阈值/冷却属调用方业务取值，应留在调用方配置里，
+  不应冒充本包缺省。issue 建议的 `DefaultTripThreshold = 3` / `DefaultCooldown = 5m`
+  实为旧 `agentkit/breaker` 的缺省，本包缺省并非如此，照导会凭空打开一条本该关闭的
+  计数型触发器
+- **订正 issue 正文的一处语义误述**：`WithCooldown(0)` 并非「沿用 probeTimeout」而是
+  **panic**（`d <= 0` 一律拒绝，含 0）；回落只发生在配置结构内部的缺省零值上。已在
+  `WithCooldown` doc 与 `doc.go` 迁移注记中写明，并加用例锁定该入参校验不被放宽
+- 迁移注记（doc.go）：旧库 `NewBreakers(trip, cooldown)` 传 0 = 用缺省，本包选项式 API
+  里 cooldown 传 0 = panic、计数型传 0 = 关闭触发——新旧含义相反，直译会编译通过、
+  行为却变；本包无 `NewBreakers(trip, cooldown)` 形态，须按选项改写
+
 ## [v0.14.0] — 2026-10-18
 
 ### feat(syncx)：ctx 感知受限扇出 `FanInLimitCtx`（[#27](https://github.com/oekit/concurrency/issues/27)）
