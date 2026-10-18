@@ -2,6 +2,28 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.11.0] — 2026-10-18
+
+### feat(ratelimit)：防爆破锁 `Lockout`——keyed lockout/penalty 原语（[#21](https://github.com/oekit/concurrency/issues/21)）
+- fail2ban 形态：窗口内失败事件按 key 累计（滑动窗口，样本自然老化）→ 达阈值切入
+  **锁定拒绝态**持续 LockDuration（期间 CheckLocked 返回剩余时长供对外 429 文案）→
+  成功操作 `Reset` 清零（亦可用作管理员解封）；到期自动解除，空闲条目回收
+- 与家族原语的边界（#21 边界声明核实属实）：`KeyedLimiter` 速率型令牌桶表达不了
+  「计数达标后进入持续拒绝态」；`breaker` 是调用方视角的实例级熔断（无 key 隔离）；
+  `budget` 是超限记账存档（无拒绝态与 Reset）
+- 语义细则：锁定不因后续失败延长；锁定到期后旧失败仍在窗口内时首个新失败即重新锁定
+  （重复违规者，对齐 fail2ban findtime）；**锁定条目免于空闲回收**（提前驱逐等于提前
+  解锁）；容量护栏 fail-open——表满丢弃未登记 key 的失败样本并计入 `OverCapHits`
+  （不因内部容量问题拒绝认证尝试）
+- API：泛型 `LockoutOf[K comparable]` + `Lockout = LockoutOf[string]` 别名（对齐
+  `KeyedLimiterOf` 惯例）；结构体配置 `LockoutConfig`（Window/Threshold/LockDuration
+  必填、非法值 panic 启动即暴露；MaxEntries/IdleTTL/Now 可选，时钟注入对齐
+  budget.WithClock）；`RecordFailure`/`CheckLocked` 统一返回 `(locked, lockRemain)` 序
+  （issue 草案的两方法相反顺序经实测为 footgun，刻意修正）；`Len`/`Close` 幂等同
+  `KeyedLimiterOf`。内存版起步，Redis 后端后续按消费方需求另拆
+- 测试 10 例：假时钟确定性（触发/衰减/滑动/老化/Reset/重复违规/不延长/fail-open/
+  泛型 key）+ 清扫判定走注入时钟（真实 ticker 只定节奏）+ -race 并发看门
+
 ## [v0.10.0] — 2026-10-18
 
 ### feat(breaker)：冷却期独立配置 `WithCooldown`（[#19](https://github.com/oekit/concurrency/issues/19)）
