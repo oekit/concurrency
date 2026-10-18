@@ -1,8 +1,24 @@
-# Changelog — oekit/concurrency
+## [v0.16.0] — 2026-10-18
 
-由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
+### feat(ratelimit)：`NewKeyedLimiterByFunc` —— 按 key 定配额（[#31](https://github.com/oekit/concurrency/issues/31)）
+- 新增 `NewKeyedLimiterByFunc[K](factory func(K) Limiter, opts ...KeyedOption[K])`：
+  `NewKeyedLimiterOf` 的 factory 签名 `func() Limiter` 不接受 key，一个管理器内所有 key
+  只能拿到相同配置的限流器。业务上按接口维度分档位（同步类宽松 / 备份类严格 / 导入确认
+  最严）是常见形态，此前只能把限流器实例的键从 `(maxReq, window)` 扩成
+  `(action, maxReq, window)`，即**每个 action 一个管理器**——那样按 key 隔离、空闲回收、
+  容量护栏、`Len()`/`OverCapHits()` 可观测出口这些价值基本被绕过，整体限流状态也没有
+  单一治理点
+- 实现上把内部 `factory` 字段改为 `func(K) Limiter`，`NewKeyedLimiterOf` 包装一层
+  （`func(K) Limiter { return factory() }`）——**对外零破坏**，旧调用方无需改动
+- doc 点名 issue 里的坑：未在配额表登记的 key 会拿到 factory 的兜底返回值，等于**静默按
+  兜底档限流**。这是 API 形状使然（Go 无法泛化"key 不存在"），已写明缺 key 时应让它
+  显式失败或自行判空，别静默降级
+- 测试：4 例——逐档耗尽 + 隔离性断言（最严档耗尽后中档/最宽档仍放行，用有序切片 +
+  额度记账以规避遍历随机与预检消耗导致的假失败）；锁死旧 `NewKeyedLimiterOf` 语义不变
+  （**配置**共享但**计数器按 key 独立**）；factory 拿到的确实是 key 本身；
+  空闲回收/容量护栏/`OverCapHits` 在新构造器上仍生效
 
-## [v0.15.0] — 2026-10-18
+## [v0.15.0] — 2026-10-18## [v0.15.0] — 2026-10-18
 
 ### feat(breaker)：同名共享熔断器配置冲突可观测（[#29](https://github.com/oekit/concurrency/issues/29)）
 - **新增 `WithBreakerConflictHandler(func(name, detail string))`**：`GetBreaker(name, opts...)`
