@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -64,10 +65,13 @@ type HeaderSource interface {
 //   - 其余 → 同 Retryable（5xx true，其余 false）。
 //
 // h 为 nil 时等价 Retryable(status)。头键用规范 MIME 形式——传 http.Header
-// 时经其 Get 规范化，大小写不敏感。
+// 时经其 Get 规范化，大小写不敏感；值先做 OWS 修剪（#26——net/textproto 解析
+// 路径已按 RFC 剥离空白，自造 Header/配置还原等来源的值可能带前导/尾随空白，
+// trim 后统一语义，宁可多判一次可重试也不误判为永久失败）。
 func RetryableWithHeaders(status int, h HeaderSource) bool {
 	if status == 403 && h != nil {
-		if h.Get("Retry-After") != "" || h.Get("X-RateLimit-Remaining") == "0" {
+		remaining := strings.TrimSpace(h.Get("X-RateLimit-Remaining"))
+		if strings.TrimSpace(h.Get("Retry-After")) != "" || remaining == "0" {
 			return true
 		}
 	}

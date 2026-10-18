@@ -2,6 +2,14 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.13.1] — 2026-10-18
+
+### fix(retry/httpx)：`RetryableWithHeaders` 头值 OWS 修剪（[#26](https://github.com/oekit/concurrency/issues/26)）
+- `X-RateLimit-Remaining`/`Retry-After` 判定前套 `strings.TrimSpace`：net/textproto
+  解析路径已按 RFC 剥离空白（主路径零影响），但自造 `http.Header`（测试桩/代理注入/
+  配置还原）与非 textproto 客户端的值可能带前导/尾随空白——trim 后统一语义，
+  宁可多判一次可重试（有 Retry-After/Reset 兜底）也不误判为永久失败
+
 ## [v0.13.0] — 2026-10-18
 
 ### fix(breaker)：熔断期流量收敛到探测级——计数型触发不再被公式短路（[#25](https://github.com/oekit/concurrency/issues/25)）

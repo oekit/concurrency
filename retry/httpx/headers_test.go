@@ -63,6 +63,24 @@ func TestRetryableWithHeaders(t *testing.T) {
 	if !httpx.RetryableWithHeaders(403, h5) {
 		t.Fatal("403 header lookup must be MIME-canonical case-insensitive")
 	}
+
+	// OWS 修剪（#26）：textproto 解析之外的来源（自造 Header/配置还原）值可能带
+	// 前导/尾随空白——trim 后统一语义，宁可多判可重试也不误判永久失败
+	h6 := http.Header{}
+	h6.Set("X-RateLimit-Remaining", " 0 ")
+	if !httpx.RetryableWithHeaders(403, h6) {
+		t.Fatal("403 + Remaining with OWS must be retryable (trimmed)")
+	}
+	h7 := http.Header{}
+	h7.Set("Retry-After", " 30 ")
+	if !httpx.RetryableWithHeaders(403, h7) {
+		t.Fatal("403 + Retry-After with OWS must be retryable")
+	}
+	h8 := http.Header{}
+	h8.Set("X-RateLimit-Remaining", " 12 ")
+	if httpx.RetryableWithHeaders(403, h8) {
+		t.Fatal("403 + Remaining:12 with OWS must not be retryable")
+	}
 }
 
 // mapHeader 是自研客户端 header 类型的替身：实现 Get 即满足 HeaderSource。
