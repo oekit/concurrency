@@ -51,6 +51,35 @@ type (
 		DoWithFallback(ctx context.Context, execute func() error, acceptable func(error) bool,
 			fallback func(err error) error) error
 	}
+
+	// GenBreaker 是带代（generation）的熔断器扩展接口：在 Breaker 之上显式暴露
+	// 放行与回报的代绑定，供「需要精确追踪一次放行的归属」的库形态消费方使用
+	// （典型：多模型降级链里标记探测、丢弃陈旧探测回报）。本包 *circuitBreaker
+	// 同时实现两个接口；持有 Breaker 时按可选扩展惯例类型断言：
+	//
+	//	if gb, ok := b.(breaker.GenBreaker); ok { ... }
+	//
+	// 代仅在探测（半开放行）时自增，普通放行携带当前代；陈旧代（gen < 当前代）
+	// 的回报整体作废——不计窗口统计、不驱动状态迁移。
+	GenBreaker interface {
+		Breaker
+
+		// AllowGen 同 Allow，额外返回本次放行的代；拒绝时返回 (nil, 0, ErrCircuitOpen)。
+		AllowGen(ctx context.Context) (Promise, uint64, error)
+
+		// SuccessGen 按代回填成功：陈旧代作废；命中挂起探测的成功驱动关闸
+		// （half-open → closed + 清窗）。
+		SuccessGen(gen uint64)
+
+		// FailureGen 按代回填失败：ctx 已取消时不消耗统计（与 Allow 的 ctx 门对称）；
+		// 陈旧代作废（冷却不被陈旧探测延长）；命中挂起探测的失败驱动重开并重置计时；
+		// 其余失败只记窗口样本（开放期普通失败不延长冷却）。
+		FailureGen(ctx context.Context, gen uint64)
+
+		// AbandonGen 显式放弃一次放行（探针失联的确定性回收）：仅命中当前挂起探测时
+		// 生效——腾出探测位（冷却已满时下一放行即刻补放新探测），不触碰冷却计时。
+		AbandonGen(gen uint64)
+	}
 )
 
 // breakerConfig 为 Breaker 的内部配置集合，由 BreakerOption 逐项覆写。
@@ -58,6 +87,7 @@ type breakerConfig struct {
 	windowSize     int
 	windowInterval time.Duration
 	forcePass      time.Duration
+	probeTimeout   time.Duration
 	clock          func() time.Time
 	onReject       func(name, reason string)
 }
@@ -83,12 +113,26 @@ func WithBreakerWindow(size int, interval time.Duration) BreakerOption {
 
 // WithForcePass 定制强制探活间隔：熔断期内每隔 d 强制放行一次请求探测服务是否恢复，
 // 恢复即自动愈合。缺省 1s（对齐上游）；d <= 0 时 panic。
+// 该探活属于 open 态放行策略的一部分（探测结果只进窗口统计）；显式三态的半开探测
+// 由 WithProbeTimeout 调度，两者互补。
 func WithForcePass(d time.Duration) BreakerOption {
 	if d <= 0 {
 		panic("breaker: force pass duration must be greater than 0")
 	}
 	return func(c *breakerConfig) {
 		c.forcePass = d
+	}
+}
+
+// WithProbeTimeout 定制探测时限（缺省 1m）：open 态自进入/重开起冷却 d 后放行半开探测
+// （探测成功关闸、失败重开重置计时）；挂起探测超 d 未回报视为失联，回收探测位放行新探测。
+// d <= 0 时 panic。
+func WithProbeTimeout(d time.Duration) BreakerOption {
+	if d <= 0 {
+		panic("breaker: probe timeout must be greater than 0")
+	}
+	return func(c *breakerConfig) {
+		c.probeTimeout = d
 	}
 }
 
@@ -122,13 +166,14 @@ type circuitBreaker struct {
 	onReject func(name, reason string)
 }
 
-// NewBreaker 返回以 name 标识的 Google SRE 自适应熔断器，
-// opts 定制窗口/探活间隔/时间源/拒绝回调。
+// NewBreaker 返回以 name 标识的 Google SRE 自适应熔断器（显式 closed/open/half-open
+// 三态），opts 定制窗口/探活间隔/探测时限/时间源/拒绝回调。
 func NewBreaker(name string, opts ...BreakerOption) Breaker {
 	cfg := breakerConfig{
 		windowSize:     defaultBuckets,
 		windowInterval: defaultWindow / defaultBuckets,
 		forcePass:      defaultForcePass,
+		probeTimeout:   defaultProbeTimeout,
 		clock:          time.Now,
 	}
 	for _, opt := range opts {
@@ -185,6 +230,37 @@ func (cb *circuitBreaker) Allow(ctx context.Context) (Promise, error) {
 		cb.reportReject()
 	}
 	return p, err
+}
+
+// AllowGen 同 Allow，额外返回本次放行的代（GenBreaker 扩展接口）；
+// 拒绝时返回 (nil, 0, ErrCircuitOpen)。
+func (cb *circuitBreaker) AllowGen(ctx context.Context) (Promise, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	p, gen, err := cb.gb.allowGen()
+	if err != nil {
+		cb.reportReject()
+	}
+	return p, gen, err
+}
+
+// SuccessGen 按代回填成功（GenBreaker 扩展接口）。
+func (cb *circuitBreaker) SuccessGen(gen uint64) {
+	cb.gb.successGen(gen)
+}
+
+// FailureGen 按代回填失败；ctx 已取消时不消耗统计（GenBreaker 扩展接口）。
+func (cb *circuitBreaker) FailureGen(ctx context.Context, gen uint64) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	cb.gb.failureGen(gen)
+}
+
+// AbandonGen 显式放弃一次放行（GenBreaker 扩展接口）。
+func (cb *circuitBreaker) AbandonGen(gen uint64) {
+	cb.gb.abandonGen(gen)
 }
 
 // Do 放行时执行 execute 并按默认 acceptable（err == nil）回填成败；

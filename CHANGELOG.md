@@ -2,8 +2,32 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
-## [- feat(singleflight): `Flight.DoShared`（#18）——折叠可观测形态，额外返回 Shared（自己是 waiter 而非 leader）；Do 保持 (T, error) 不动；`Result.Waiters` 新增——本轮折叠掉的并发调用方数（近似值，观测口径）。#17（breaker 三态状态机）评估后挂起：等价于核心原语状态机重构，实施大纲已评论，保持 open
-v0.7.0] — 2026-10-18
+## [v0.9.0] — 2026-10-18
+
+### feat(breaker)：显式三态状态机 + 代绑定——closed/open/half-open（[#17](https://github.com/oekit/concurrency/issues/17)）
+- 显式三态取代「窗口统计隐式推导」：错误率超阈值（SRE 公式丢弃概率 > 0，即接受预算耗尽）
+  切入 open；open 放行策略 = 原 Google SRE 概率丢弃 + forcePass 强制探活
+  （**现有自适应丢弃行为不变**）；冷却（`WithProbeTimeout`，缺省 1m）期满后首个放行请求
+  即半开探测——绕过概率公式必达、携带新代 generation
+- 探测配对语义：成功关闸（half-open → closed + 清窗，旧失败样本不得触发立即重开）；
+  失败重开并重置计时；超 probeTimeout 未回报视为失联自动回收、放行新探测；
+  `AbandonGen` 支持调用方显式放弃失联探针
+- 代绑定 `GenBreaker` 扩展接口（可选类型断言，`Breaker` 接口零改动）：`AllowGen` /
+  `SuccessGen` / `FailureGen` / `AbandonGen`——代仅在探测放行时自增、普通放行携带当前代，
+  陈旧代（gen < 当前代）回报整体作废：不计窗口、不迁移（一次调用的结果不会被算进
+  另一次调用的账；陈旧探测不再延长冷却）
+- 开放期普通失败只记窗口样本、不触碰冷却计时——冷却不被开放期失败后移，恢复时间可预测
+- 兼容性：`Allow` / `Do` / `DoWithAcceptable` / `DoWithFallback` / `NewBreaker` / `GetBreaker`
+  签名与行为不变（Do 家族经内部 Allow 透传代绑定，命中半开的 Do 调用即探测）；
+  `window.RollingWindow` 新增显式 `Reset`（探测关闸清窗复用）。两处行为微变已文档化：
+  关闸后全量放行（窗口清空、重新累计）；探测纪元边界的在途回报按陈旧代作废
+
+## [v0.8.0] — 2026-10-18
+
+### feat(singleflight)：`Flight.DoShared` + `Result.Waiters`（[#18](https://github.com/oekit/concurrency/issues/18)）
+- `DoShared` 折叠可观测形态，额外返回 Shared（自己是 waiter 而非 leader）；Do 保持 (T, error) 不动
+- `Result.Waiters` 新增——本轮折叠掉的并发调用方数（近似值，观测口径）
+- 注：#17（breaker 三态状态机）当时评估后挂起，实施大纲已评论（后续轮次处理）
 
 ### feat(async)：panic 收编统一 typed *PanicError（[#12](https://github.com/oekit/concurrency/issues/12)）
 - 新增 `async.PanicError{Value, Stack, Task}`——`RunSafeErr`/`RunSafeRet`/`RunSafeRetLabeled` 的

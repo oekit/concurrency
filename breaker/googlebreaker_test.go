@@ -28,12 +28,13 @@ func (c *fakeClock) Set(t time.Time) {
 	c.nanos.Store(t.UnixNano())
 }
 
-// newTestGoogleBreaker 按缺省参数（40×250ms）构造注入假时钟的熔断核心。
+// newTestGoogleBreaker 按缺省参数（40×250ms、探测时限 1m）构造注入假时钟的熔断核心。
 func newTestGoogleBreaker(clock *fakeClock) *googleBreaker {
 	return newGoogleBreaker(breakerConfig{
 		windowSize:     defaultBuckets,
 		windowInterval: testInterval,
 		forcePass:      defaultForcePass,
+		probeTimeout:   defaultProbeTimeout,
 		clock:          clock.Now,
 	})
 }

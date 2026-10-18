@@ -93,6 +93,14 @@ func (rw *RollingWindow[T, B]) Reduce(fn func(b B)) {
 	}
 }
 
+// Reset 显式清空全部桶数据（区别于跨桶惰性重置）。时间簿记（offset/lastTime）保留，
+// 后续 Add 沿用原时间对齐，行为与新建窗口一致。并发安全。
+func (rw *RollingWindow[T, B]) Reset() {
+	rw.lock.Lock()
+	defer rw.lock.Unlock()
+	rw.win.reset()
+}
+
 // span 返回自 lastTime 以来跨过的桶数；超出窗口长度按整窗处理。
 func (rw *RollingWindow[T, B]) span() int {
 	offset := int((rw.now() - rw.lastTime) / rw.interval)
@@ -168,6 +176,12 @@ func (w *window[T, B]) add(offset int, v T) {
 func (w *window[T, B]) reduce(start, count int, fn func(b B)) {
 	for i := 0; i < count; i++ {
 		fn(w.buckets[(start+i)%w.size])
+	}
+}
+
+func (w *window[T, B]) reset() {
+	for i := range w.buckets {
+		w.buckets[i].Reset()
 	}
 }
 

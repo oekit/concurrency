@@ -322,3 +322,40 @@ func equalValues[T comparable](got, want []T) bool {
 	}
 	return true
 }
+
+// TestRollingWindow_ExplicitReset 显式 Reset 清空全部桶数据：Reduce 立即为空，
+// 时间簿记（offset/lastTime）保留——Reset 后继续 Add/跨桶推进语义与新建窗口一致。
+func TestRollingWindow_ExplicitReset(t *testing.T) {
+	const size = 3
+	clk := &fakeClock{}
+	r := NewRollingWindow[float64, *Bucket[float64]](newTestBucket, size, bucketInterval,
+		WithWindowClock[float64, *Bucket[float64]](clk.Now))
+	sum := func() float64 {
+		var total float64
+		r.Reduce(func(b *Bucket[float64]) { total += b.Sum })
+		return total
+	}
+
+	r.Add(1)
+	r.Add(2)
+	if got := sum(); got != 3 {
+		t.Fatalf("sum before reset = %v, want 3", got)
+	}
+
+	r.Reset()
+	if got := sum(); got != 0 {
+		t.Fatalf("sum after reset = %v, want 0", got)
+	}
+
+	// Reset 后继续写入、跨桶推进：行为与新建窗口一致
+	r.Add(5)
+	clk.Advance(bucketInterval)
+	r.Add(7)
+	if got := sum(); got != 12 {
+		t.Fatalf("sum after post-reset writes = %v, want 12", got)
+	}
+	clk.Advance(bucketInterval * 10) // 整窗滚出
+	if got := sum(); got != 0 {
+		t.Fatalf("sum after window expiry = %v, want 0", got)
+	}
+}
