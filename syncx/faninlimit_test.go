@@ -1,7 +1,9 @@
 package syncx
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,6 +80,121 @@ func TestFanInLimit_PanicSlotAndEdges(t *testing.T) {
 	for i, s := range over {
 		if s.Val != i*10 {
 			t.Fatalf("over-limit slot %d = %v, want %d", i, s.Val, i*10)
+		}
+	}
+}
+
+// TestFanInLimitCtx_PreCanceled 预取消契约（#27）：ctx 已取消时一次 fn 都不调，
+// 全部槽快速排空为 context.Canceled。
+func TestFanInLimitCtx_PreCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var calls atomic.Int64
+	slots := FanInLimitCtx(ctx, 10, 4, func(ctx context.Context, i int) (int, error) {
+		calls.Add(1)
+		return i, nil
+	})
+	if calls.Load() != 0 {
+		t.Fatalf("fn calls = %d, want 0 (no work after cancel)", calls.Load())
+	}
+	for i, s := range slots {
+		if !errors.Is(s.Err, context.Canceled) {
+			t.Fatalf("slot %d err = %v, want context.Canceled", i, s.Err)
+		}
+	}
+}
+
+// TestFanInLimitCtx_MidwayCancel 中途取消三契约：在飞项跑完正常落槽；
+// 未启动项 fn 一次不调、整批一次遍历快速排空为 Canceled。
+func TestFanInLimitCtx_MidwayCancel(t *testing.T) {
+	const n, limit = 10, 2
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 前两个 item（limit 数量）阻塞在 barrier：保证它们已在飞
+	started := make(chan struct{}, limit)
+	release := make(chan struct{})
+	var lateCalls atomic.Int64
+	// 引擎在 goroutine 里跑：主线程负责「等在飞 → 取消 → 放行」的时序编排
+	// （引擎返回即 wg.Wait 结束，编排必须发生在它返回之前）
+	var slots []Slot[int]
+	done := make(chan struct{})
+	go func() {
+		slots = FanInLimitCtx(ctx, n, limit, func(ctx context.Context, i int) (int, error) {
+			if i < limit {
+				started <- struct{}{}
+				<-release
+				return i, nil
+			}
+			lateCalls.Add(1)
+			return i, nil
+		})
+		close(done)
+	}()
+
+	for i := 0; i < limit; i++ {
+		<-started // 两个在飞 item 已启动
+	}
+	cancel()       // 引擎取消
+	close(release) // 放行在飞 item（跑完、照常落槽）
+	<-done
+
+	for i := 0; i < limit; i++ {
+		if slots[i].Err != nil || slots[i].Val != i {
+			t.Fatalf("in-flight slot %d = (%v, %v), want normal result", i, slots[i].Val, slots[i].Err)
+		}
+	}
+	for i := limit; i < n; i++ {
+		if !errors.Is(slots[i].Err, context.Canceled) {
+			t.Fatalf("slot %d err = %v, want context.Canceled (fail-fast drain)", i, slots[i].Err)
+		}
+	}
+	if lateCalls.Load() != 0 {
+		t.Fatalf("late fn calls = %d, want 0 (cancel must stop new work)", lateCalls.Load())
+	}
+}
+
+// TestFanInLimitCtx_PanicAndEdges panic 进槽照旧；n<=0 → nil；limit<=0 不设上限；
+// nil ctx 按 Background 处理；fn 携带的 ctx 与传入同一。
+func TestFanInLimitCtx_PanicAndEdges(t *testing.T) {
+	var mu sync.Mutex
+	var gotCtx context.Context
+	slots := FanInLimitCtx(context.Background(), 3, 2, func(ctx context.Context, i int) (int, error) {
+		mu.Lock()
+		gotCtx = ctx
+		mu.Unlock()
+		if i == 1 {
+			panic("boom")
+		}
+		return i, nil
+	})
+	var pe *async.PanicError
+	if !errors.As(slots[1].Err, &pe) {
+		t.Fatalf("slot 1 err = %v, want *async.PanicError", slots[1].Err)
+	}
+	if slots[1].Panicked == nil || slots[1].Val != 0 {
+		t.Fatalf("panic slot mismatch: %+v", slots[1])
+	}
+	if slots[0].Val != 0 || slots[2].Val != 2 {
+		t.Fatalf("healthy slots corrupted: %+v %+v", slots[0], slots[2])
+	}
+	mu.Lock()
+	ctxOk := gotCtx != nil
+	mu.Unlock()
+	if !ctxOk {
+		t.Fatal("fn must receive the caller ctx")
+	}
+
+	if got := FanInLimitCtx(context.Background(), 0, 4, func(ctx context.Context, i int) (int, error) { return i, nil }); got != nil {
+		t.Fatalf("n=0 = %v, want nil", got)
+	}
+	// nil ctx：不 panic、正常完成（兜底 Background 是文档化契约，故意传 nil 验证）
+	//nolint:staticcheck // SA1012: 故意传 nil 验证引擎的 nil 兜底契约
+	ok := FanInLimitCtx(nil, 2, 1, func(ctx context.Context, i int) (int, error) { return i * 2, nil })
+	for i, s := range ok {
+		if s.Val != i*2 || s.Err != nil {
+			t.Fatalf("nil-ctx slot %d = (%v, %v)", i, s.Val, s.Err)
 		}
 	}
 }

@@ -2,6 +2,17 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.14.0] — 2026-10-18
+
+### feat(syncx)：ctx 感知受限扇出 `FanInLimitCtx`（[#27](https://github.com/oekit/concurrency/issues/27)）
+- `FanInLimitCtx[T](ctx, n, limit, fn func(ctx, i) (T, error)) []Slot[T]`——fn 携带 ctx 供
+  单项内部使用；引擎级取消语义（三条契约，contract 测试锁定）：ctx 已取消时未启动项
+  **fn 一次都不调**、当前及剩余槽一次遍历快速排空为 `context.Canceled`（worker 内缓存
+  取消态，排空零额外锁开销）、已在飞 item 跑完照常落槽
+- 其余语义与 FanInLimit 一致（panic 进槽 `*async.PanicError` 并上报、limit<=0 = 不设
+  上限、n<=0 = nil）；ctx 为 nil 按 Background 处理；家族惯例加变体不改旧签名
+  （FanIn/FanInErr/FanInLimit 无 ctx 需求场景继续用）
+
 ## [v0.13.1] — 2026-10-18
 
 ### fix(retry/httpx)：`RetryableWithHeaders` 头值 OWS 修剪（[#26](https://github.com/oekit/concurrency/issues/26)）

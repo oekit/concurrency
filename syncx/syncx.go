@@ -169,3 +169,60 @@ func FanInLimit[T any](n, limit int, fn func(i int) (T, error)) []Slot[T] {
 	wg.Wait()
 	return slots
 }
+
+// FanInLimitCtx 是 FanInLimit 的 ctx 感知变体（#27）：fn 携带 ctx 供单项内部
+// 使用；引擎级取消语义——worker 每轮拉取 index 前先查 ctx.Err()（worker 内
+// 缓存，取消后零额外锁开销），命中即不再启动新工作（fn 一次都不调），当前及
+// 剩余槽一次遍历快速排空为该错误（context.Canceled）；已在飞 item 跑完、结果
+// 照常落槽。其余语义与 FanInLimit 一致（panic 进槽并上报、limit<=0 = 不设上限、
+// n<=0 = nil；ctx 为 nil 时按 context.Background() 处理）。
+func FanInLimitCtx[T any](ctx context.Context, n, limit int, fn func(ctx context.Context, i int) (T, error)) []Slot[T] {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if n <= 0 {
+		return nil
+	}
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	slots := make([]Slot[T], n)
+	var (
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	wg.Add(limit)
+	for w := 0; w < limit; w++ {
+		async.GoSafe(func() {
+			defer wg.Done()
+			var cancelErr error // worker 内缓存：取消后一次锁调用，排空零额外开销
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				if cancelErr == nil {
+					cancelErr = ctx.Err()
+				}
+				if cancelErr != nil {
+					// 引擎级 fail-fast：不再启动新工作，剩余槽快速排空
+					slots[i].Err = cancelErr
+					continue
+				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slots[i].Panicked = r
+							slots[i].Err = async.NewPanicError(r)
+							async.ReportPanic(r)
+						}
+					}()
+					v, err := fn(ctx, i)
+					slots[i].Val, slots[i].Err = v, err
+				}()
+			}
+		})
+	}
+	wg.Wait()
+	return slots
+}
