@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/concurrency
 
 > 并发与流控原语（async/gopool/group/singleflight/progress/syncx/ratelimit/retry）+ window 滑动窗口 / breaker 自适应熔断（规范哨兵 ErrCircuitOpen）/ shedding CPU 自适应降载 / batch 攒批执行器（满条数/满字节/窗口去重）/ timewheel 单级时间轮
-> 当前版本：`v0.11.0` · module：`github.com/oekit/concurrency` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.12.0` · module：`github.com/oekit/concurrency` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `async/`、`batch/`、`breaker/`、`gopool/`、`group/`、`loop/`、`progress/`、`ratelimit/`、`retry/`、`shedding/`、`singleflight/`、`syncx/`、`timewheel/`、`window/`
@@ -31,7 +31,7 @@
 
 ### 生命周期
 - 组件 Close 统一 `Close(ctx) error` 签名 + sync.Once 幂等
-- 应用骨架用 `github.com/oekit/bootstrap/bootstrap.Run`；**userFn 返回即服务结束，
+- 应用骨架用 `github.com/oekit/bootstrap（New + Run(fn)，v0.4.0 起无 Run(Config)）`；**userFn 返回即服务结束，
   长驻服务必须 `<-app.Context().Done()` 阻塞**
 
 ### Option 与命名

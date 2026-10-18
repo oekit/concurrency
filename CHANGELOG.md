@@ -2,6 +2,31 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.12.0] — 2026-10-18
+
+### feat(retry/httpx)：403 头感知判定 `RetryableWithHeaders`（[#22](https://github.com/oekit/concurrency/issues/22)）
+- GitHub 次级限流/滥用检测走 403 而非 429，裸状态码判定会把「等恢复窗口即可成功」的
+  限流耗尽误判为永久失败：403 + `Retry-After` → 重试（次级限流）；403 +
+  `X-RateLimit-Remaining: 0` → 重试（主限流耗尽）；403 无头 → 权限拒绝不重试；
+  其余状态码同 `Retryable`（429/5xx）
+- 新增最小 header 抽象 `HeaderSource`（`Get(key) string`）：`http.Header` 天然满足
+  （MIME 规范键查找、大小写不敏感），自研客户端 header 类型实现同名方法即接入——
+  包保持零依赖（不 import net/http）
+
+### feat(syncx)：受限并发扇出 `FanInLimit`（[#23](https://github.com/oekit/concurrency/issues/23)）
+- `FanInLimit[T](n, limit, fn)`：n 槽结果语义与 FanInErr 一致（按 index 序、panic 进槽
+  `*async.PanicError` 并上报），内部固定 `min(limit, n)` 个 worker 经原子计数器拉取
+  index——goroutine O(w)，供「n 大、fn 是有成本 IO」的 fan-out 防下游过载，收编消费方
+  手写 channel 信号量样板；limit<=0 = 不设上限（等价 FanInErr）
+
+### feat(ratelimit)：令牌桶时钟注入 `WithTokenClock`（[#24](https://github.com/oekit/concurrency/issues/24)）
+- `NewTokenBucket(rps, burst, opts...)` 可变参选项（既有调用方零改动），`WithTokenClock`
+  注入时钟（nil 回落 time.Now）：Allow/AllowN/Reserve/RetryAfter 全链路路由注入时钟
+  （ReserveN/DelayFrom/CancelAt 显式时间结算）——假时钟下「1 秒后应恢复配额」与
+  「Retry-After 精确回填」确定性断言，无 sleep 无 flake；KeyedLimiter 工厂闭包共享假
+  时钟即可整表确定性测试，per-IP 限流手搓实现（map+锁+阈值清理）可整体收编为
+  `KeyedLimiterOf` + `WithIdleTTL` + `WithMaxEntries`
+
 ## [v0.11.0] — 2026-10-18
 
 ### feat(ratelimit)：防爆破锁 `Lockout`——keyed lockout/penalty 原语（[#21](https://github.com/oekit/concurrency/issues/21)）

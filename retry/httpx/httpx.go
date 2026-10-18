@@ -13,6 +13,10 @@
 //	    DelayHint: httpx.RetryAfterHint(),
 //	    Exponential: true,
 //	}
+//
+// 拿得到响应头的调用方（平台限流语义平台化，如 GitHub 403 次级限流）用
+// RetryableWithHeaders(status, header) 做头感知判定，平台特化逻辑只留
+// 方法门控/body rewind 等传输层关注点。
 package httpx
 
 import (
@@ -34,8 +38,40 @@ type retryAfterCarrier interface {
 
 // Retryable 判定 HTTP 状态码是否值得重试：429（限流）与 5xx（服务端故障）
 // 重试；其余（2xx 非 error、3xx、4xx 接收端明确拒收）不重试。
+//
+// 注意 403 恒不重试——需要区分「限流耗尽的 403」（GitHub 次级限流/主限流耗尽，
+// 带响应头可重试）的场景改用 RetryableWithHeaders。
 func Retryable(status int) bool {
 	return status == 429 || (status >= 500 && status <= 599)
+}
+
+// HeaderSource 是响应头的最小抽象（#22）：判定只需 Get 读取单个键。
+// http.Header 天然满足（Get 做 MIME 规范键查找）；自研客户端的 header 类型
+// 实现同名方法即可接入，包保持零依赖（不 import net/http）。
+type HeaderSource interface {
+	// Get 返回键对应的第一个值；无该键返回空串。键为规范 MIME 形式
+	// （"Retry-After"、"X-RateLimit-Remaining"）。
+	Get(key string) string
+}
+
+// RetryableWithHeaders 按「状态码 + 响应头」联合判定可重试性，是 Retryable
+// 的头感知超集（#22——GitHub 次级限流/滥用检测走 403 而非 429，裸状态码判定
+// 会把「等恢复窗口即可成功」的限流耗尽误判为永久失败）：
+//   - 429 → true；
+//   - 403 + Retry-After 头 → true（次级限流/滥用检测，按建议退避后重试）；
+//   - 403 + X-RateLimit-Remaining: "0" → true（主限流耗尽，等 reset 窗口）；
+//   - 403（两头部皆无，如权限拒绝）→ false——重试永远失败；
+//   - 其余 → 同 Retryable（5xx true，其余 false）。
+//
+// h 为 nil 时等价 Retryable(status)。头键用规范 MIME 形式——传 http.Header
+// 时经其 Get 规范化，大小写不敏感。
+func RetryableWithHeaders(status int, h HeaderSource) bool {
+	if status == 403 && h != nil {
+		if h.Get("Retry-After") != "" || h.Get("X-RateLimit-Remaining") == "0" {
+			return true
+		}
+	}
+	return Retryable(status)
 }
 
 // HTTPError 携带 HTTP 状态码的错误（Unwrap 保留底层错误链）。

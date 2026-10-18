@@ -6,6 +6,7 @@ package syncx
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/oekit/concurrency/async"
 )
@@ -118,6 +119,51 @@ func FanInErr[T any](n int, fn func(i int) (T, error)) []Slot[T] {
 				v, err := fn(i)
 				slots[i].Val, slots[i].Err = v, err
 			}()
+		})
+	}
+	wg.Wait()
+	return slots
+}
+
+// FanInLimit 是 FanInErr 的受限并发变体（#23）：n 槽结果语义不变，内部固定
+// w = min(limit, n) 个 worker 经原子计数器拉取 index 执行——goroutine O(w)，
+// 供「n 可达数十以上、fn 是有成本 IO（DB/远端查询）」的 fan-out 限并发，
+// 防下游过载（收编消费方手写的 channel 信号量样板）。其余语义与 FanInErr
+// 一致：按 index 序返回逐槽结果、panic 进该槽 Err（*async.PanicError）并
+// ReportPanic 上报。limit<=0 = 不设上限（等价 FanInErr 行为）。
+func FanInLimit[T any](n, limit int, fn func(i int) (T, error)) []Slot[T] {
+	if n <= 0 {
+		return nil
+	}
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	slots := make([]Slot[T], n)
+	var (
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	wg.Add(limit)
+	for w := 0; w < limit; w++ {
+		async.GoSafe(func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slots[i].Panicked = r
+							slots[i].Err = async.NewPanicError(r)
+							async.ReportPanic(r)
+						}
+					}()
+					v, err := fn(i)
+					slots[i].Val, slots[i].Err = v, err
+				}()
+			}
 		})
 	}
 	wg.Wait()
