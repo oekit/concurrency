@@ -45,6 +45,23 @@
 //   - 统计容器复用本仓 window.RollingWindow（自定义桶 bucket 实现
 //     BucketInterface[int64]），不镜像上游 bucket 布局。
 //
+// 缺省值与「用缺省」的写法（#28）：缺省值已导出为 DefaultWindow / DefaultBuckets /
+// DefaultForcePass / DefaultProbeTimeout，下游应**引用**而非复制魔法数字（上游调了缺省，
+// 拷贝不会跟着动，而行为差异只在熔断阈值上体现，排查成本很高）。
+// 冷却期与计数型触发的缺省**没有**对应导出常量——二者的缺省是「未配置」
+// （cooldown 回落 DefaultProbeTimeout、计数型关闭），值为 0，导出一个 0 值常量是陷阱。
+// **「用缺省」的正确写法是不传该选项**，不存在传 0 走缺省的形式：
+//
+//	breaker.NewBreaker("x")                                  // 冷却期 = DefaultProbeTimeout
+//	breaker.NewBreaker("x", breaker.WithCooldown(5*time.Minute))
+//	breaker.NewBreaker("x", breaker.WithCooldown(0))         // panic：d <= 0 一律拒绝
+//	breaker.NewBreaker("x", breaker.WithConsecutiveFailures(0)) // 合法：显式关闭计数型触发
+//
+// 从旧 agentkit/breaker 迁移的语义反转（#28 实测）：旧库 `NewBreakers(trip, cooldown)`
+// 形参传 0 表示"用缺省"，本包的选项式 API 里 **cooldown 传 0 是 panic**，
+// 计数型传 0 则是"关闭触发"——两者在新旧 API 中含义相反，直译会编译通过、行为却变。
+// 本包无 NewBreakers(trip, cooldown) 形态；请按上表改写为选项。
+//
 // 用法:
 //
 //	b := breaker.GetBreaker("user-rpc")
@@ -52,6 +69,10 @@
 //	if errors.Is(err, breaker.ErrCircuitOpen) {
 //	    // 熔断打开，快速失败/走降级
 //	}
+//
+// ⚠️ GetBreaker 是进程级单例，opts 仅在首次创建该名字时生效：同名再传不同 opts 会被
+// 静默丢弃（#29）。需要不同参数请把参数编进名字做命名空间隔离，或用 NewBreaker 显式自建；
+// 想让静默失效可被发现，注册 WithBreakerConflictHandler（同名异参时回调一次）。
 //
 // 需要精确代绑定的库形态消费方：
 //

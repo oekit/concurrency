@@ -31,10 +31,10 @@ func (c *fakeClock) Set(t time.Time) {
 // newTestGoogleBreaker 按缺省参数（40×250ms、探测时限 1m）构造注入假时钟的熔断核心。
 func newTestGoogleBreaker(clock *fakeClock) *googleBreaker {
 	return newGoogleBreaker(breakerConfig{
-		windowSize:     defaultBuckets,
+		windowSize:     DefaultBuckets,
 		windowInterval: testInterval,
-		forcePass:      defaultForcePass,
-		probeTimeout:   defaultProbeTimeout,
+		forcePass:      DefaultForcePass,
+		probeTimeout:   DefaultProbeTimeout,
 		clock:          clock.Now,
 	})
 }
@@ -234,7 +234,7 @@ func TestGoogleBreaker_WindowExpiryNoTrafficResume(t *testing.T) {
 	for i := 0; i < 100000; i++ {
 		_, _ = b.doReq(func() error { return boom }, defaultAcceptable)
 	}
-	clock.Advance(defaultBuckets*testInterval + testInterval) // 整窗滚出，dropRatio ≤ 0
+	clock.Advance(DefaultBuckets*testInterval + testInterval) // 整窗滚出，dropRatio ≤ 0
 
 	// 自熔断进入已 >forcePass：首个请求为强制探活（熔断期唯一放行通道）
 	ran := false

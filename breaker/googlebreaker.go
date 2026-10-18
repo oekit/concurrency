@@ -8,17 +8,28 @@ import (
 	"github.com/oekit/concurrency/window"
 )
 
+// 缺省值导出（#28）：此前全部小写未导出，下游只能把魔法数字各自复制一份——
+// 上游哪天调了缺省，三处拷贝不会跟着动，而行为差异只在熔断阈值上体现，排查成本很高。
+// 现导出供调用方**引用**而非复制。
+//
+// 注意本组只含「本包真实缺省」的四项。**刻意不导出**冷却期与计数型触发的缺省：
+// 二者的缺省是「未配置」（cooldown 回落 DefaultProbeTimeout、计数型关闭），对应值为 0，
+// 导出一个 0 值常量反而是陷阱——`WithCooldown(DefaultCooldown)` /
+// `WithConsecutiveFailures(DefaultTripThreshold)` 会写成"显式传 0"，而这两个选项对 0 是
+// panic（WithConsecutiveFailures(0) 例外 = 显式关闭计数型）。**"用缺省"的正确写法是
+// 不传该选项**，没有可引用的名字可写。若确需一个非零的触发阈值或冷却，那是调用方的
+// 业务取值，应留在调用方自己的配置里，不应冒充本包缺省。
 const (
-	// defaultWindow 为缺省统计窗口总长（10s，对齐上游 googleBreaker）。
-	defaultWindow = time.Second * 10
-	// defaultBuckets 为缺省桶数（40），单桶宽度 defaultWindow/defaultBuckets = 250ms。
-	defaultBuckets = 40
-	// defaultForcePass 为缺省强制探活间隔（1s）。
-	defaultForcePass = time.Second
-	// defaultProbeTimeout 为缺省探测时限：open 态冷却期满放行半开探测的等待时长，
-	// 同时是挂起探测未回报的回收上限（默认 1m，WithProbeTimeout 可调；冷却期缺省与本值
+	// DefaultWindow 为缺省统计窗口总长（10s，对齐上游 googleBreaker）。
+	DefaultWindow = time.Second * 10
+	// DefaultBuckets 为缺省桶数（40），单桶宽度 DefaultWindow/DefaultBuckets = 250ms。
+	DefaultBuckets = 40
+	// DefaultForcePass 为缺省强制探活间隔（1s）。
+	DefaultForcePass = time.Second
+	// DefaultProbeTimeout 为缺省探测时限：open 态冷却期满放行半开探测的等待时长，
+	// 同时是挂起探测未回报的回收上限（缺省 1m，WithProbeTimeout 可调；冷却期缺省与本值
 	// 一致，可经 WithCooldown 独立覆盖——两者是业务冷却与在途上界两个独立决策）。
-	defaultProbeTimeout = time.Minute
+	DefaultProbeTimeout = time.Minute
 	// k 为 Google SRE 自适应熔断的接受率放大系数（Client-Side Throttling 公式），
 	// 客户端在服务端可承受量之上仍保留 k 倍的请求尝试。
 	k = 1.5
