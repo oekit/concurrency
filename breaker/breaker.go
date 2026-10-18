@@ -3,8 +3,10 @@ package breaker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -121,6 +123,56 @@ type breakerConfig struct {
 	consecutive    int
 	clock          func() time.Time
 	onReject       func(name, reason string)
+	onConflict     func(name, detail string)
+}
+
+// configFingerprint 是 breakerConfig 中**值语义**字段的指纹：用于同名共享熔断器判定
+// 「本次 opts 是否与首次创建不同」（#29）。刻意排除三个函数字段（clock / onReject /
+// onConflict）——函数值不可比较，且钩子属每调用方的私有接线，差异不构成"参数冲突"
+// （否则先注册 reject handler 的调用方会被后续每个调用方无谓地告警一次）。
+type configFingerprint struct {
+	windowSize     int
+	windowInterval time.Duration
+	forcePass      time.Duration
+	probeTimeout   time.Duration
+	cooldown       time.Duration
+	consecutive    int
+}
+
+// fingerprint 提取可比较的配置指纹。
+func (c *breakerConfig) fingerprint() configFingerprint {
+	return configFingerprint{
+		windowSize:     c.windowSize,
+		windowInterval: c.windowInterval,
+		forcePass:      c.forcePass,
+		probeTimeout:   c.probeTimeout,
+		cooldown:       c.cooldown,
+		consecutive:    c.consecutive,
+	}
+}
+
+// String 渲染指纹为可读串，供冲突告警的 detail 直接引用。
+func (f configFingerprint) String() string {
+	return fmt.Sprintf("window=%d桶/%v, forcePass=%v, probeTimeout=%v, cooldown=%v, consecutive=%d",
+		f.windowSize, f.windowInterval, f.forcePass, f.probeTimeout, f.cooldown, f.consecutive)
+}
+
+// newBreakerConfig 按缺省值铺底后逐项应用 opts，是 Breaker 配置的唯一构造入口
+// （NewBreaker 与 GetBreaker 的冲突指纹共用同一条路径，保证指纹与实际生效配置同源）。
+func newBreakerConfig(opts ...BreakerOption) breakerConfig {
+	cfg := breakerConfig{
+		windowSize:     DefaultBuckets,
+		windowInterval: DefaultWindow / DefaultBuckets,
+		forcePass:      DefaultForcePass,
+		probeTimeout:   DefaultProbeTimeout,
+		clock:          time.Now,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
 }
 
 // BreakerOption 用于定制 Breaker（函数选项模式；按本仓命名硬规则为 XxxOption，
@@ -128,7 +180,8 @@ type breakerConfig struct {
 type BreakerOption func(*breakerConfig)
 
 // WithBreakerWindow 定制统计窗口：size 个桶、单桶时间宽度 interval。
-// 缺省 40 桶 × 250ms（10s 窗口，对齐上游）；size < 1 或 interval <= 0 时 panic。
+// 缺省 DefaultBuckets 桶 × 250ms（DefaultWindow 窗口，对齐上游）；
+// size < 1 或 interval <= 0 时 panic。
 func WithBreakerWindow(size int, interval time.Duration) BreakerOption {
 	if size < 1 {
 		panic("breaker: window size must be greater than 0")
@@ -143,7 +196,7 @@ func WithBreakerWindow(size int, interval time.Duration) BreakerOption {
 }
 
 // WithForcePass 定制强制探活间隔：熔断期内每隔 d 强制放行一次请求探测服务是否恢复，
-// 恢复即自动愈合。缺省 1s（对齐上游）；d <= 0 时 panic。
+// 恢复即自动愈合。缺省 DefaultForcePass（对齐上游）；d <= 0 时 panic。
 // 该探活属于 open 态放行策略的一部分（探测结果只进窗口统计）；显式三态的半开探测
 // 由 WithProbeTimeout 调度，两者互补。
 func WithForcePass(d time.Duration) BreakerOption {
@@ -155,9 +208,9 @@ func WithForcePass(d time.Duration) BreakerOption {
 	}
 }
 
-// WithProbeTimeout 定制探测时限（缺省 1m）：open 态自进入/重开起冷却 d 后放行半开探测
-// （探测成功关闸、失败重开重置计时）；挂起探测超 d 未回报视为失联，回收探测位放行新探测。
-// d <= 0 时 panic。
+// WithProbeTimeout 定制探测时限（缺省 DefaultProbeTimeout）：open 态自进入/重开起冷却 d 后
+// 放行半开探测（探测成功关闸、失败重开重置计时）；挂起探测超 d 未回报视为失联，回收探测位
+// 放行新探测。d <= 0 时 panic。
 func WithProbeTimeout(d time.Duration) BreakerOption {
 	if d <= 0 {
 		panic("breaker: probe timeout must be greater than 0")
@@ -170,7 +223,11 @@ func WithProbeTimeout(d time.Duration) BreakerOption {
 // WithCooldown 定制冷却期：open 态自进入/重开起冷却 d 后放行半开探测。
 // 冷却期（业务决策：熔断后多久才敢再试）与探测失联时限（调用侧在途时间上界，
 // WithProbeTimeout）是两个独立决策，缺省不设时回落 probeTimeout——保持既有绑定行为不变，
-// 典型量级差场景（冷却 5m + 在途上界 60s）可各自表达。d <= 0 时 panic。
+// 典型量级差场景（冷却 5m + 在途上界 60s）可各自表达。
+//
+// d <= 0 时 panic（**包括 d == 0**）："不配置"只能用「不传本选项」表达，
+// 不存在传 0 走缺省的写法。回落发生在配置结构内部（缺省零值），而非本选项的入参校验——
+// 这是与旧 agentkit/breaker 迁移时最容易踩的语义反转之一（#28），详见 doc.go 迁移注记。
 func WithCooldown(d time.Duration) BreakerOption {
 	if d <= 0 {
 		panic("breaker: cooldown must be greater than 0")
@@ -215,6 +272,32 @@ func WithBreakerRejectHandler(handler func(name, reason string)) BreakerOption {
 	}
 }
 
+// WithBreakerConflictHandler 注册**同名共享配置冲突**回调（缺省 no-op，#29）。
+//
+// GetBreaker(name, opts...) 是进程级单例：opts 仅在首次创建该名字时生效。若后续又以
+// 同一 name 传入**不同的** opts，本次 opts 会被静默丢弃——不报错也不告警，表现为阈值
+// 与传入的不一致（"该断的时候没断 / 不该断的时候断了"），往往只在生产某时段才暴露。
+// 本回调把这一静默失效变成可观测事件：
+//
+//	name 为熔断器标识；detail 为首次生效配置与本次传入配置的对照串。
+//
+// 触发条件（三者同时满足）：同名已存在、本次 opts 非空、生效配置指纹与首次不同。
+// 因此 `GetBreaker(name)` 纯复用、以及传入与首次等价的 opts，都不会误报。
+// 每个 name 最多触发一次（热路径去重），回调在锁外触发——回调是消费方代码，
+// 可能反过来调 GetBreaker。
+//
+// 注意：冲突信号走独立回调而非复用 WithBreakerRejectHandler——拒绝回调的语义是
+// "熔断拒绝了一次请求"，把配置冲突混进去会污染消费方按 reject 计数的看板。
+// 未注册本回调时不产生任何日志或告警（与本包不强制接 logx/metrics 的定位一致），
+// 冲突只表现为文档所述的"opts 被静默丢弃"。
+func WithBreakerConflictHandler(handler func(name, detail string)) BreakerOption {
+	return func(c *breakerConfig) {
+		if handler != nil {
+			c.onConflict = handler
+		}
+	}
+}
+
 // circuitBreaker 是 Breaker 的公开实现：googleBreaker 核心之上的薄包装，
 // 负责 ctx 检查、失败原因收集与拒绝回调分发（对齐上游 loggedThrottle 的职责）。
 type circuitBreaker struct {
@@ -225,20 +308,14 @@ type circuitBreaker struct {
 }
 
 // NewBreaker 返回以 name 标识的 Google SRE 自适应熔断器（显式 closed/open/half-open
-// 三态），opts 定制窗口/探活间隔/探测时限/时间源/拒绝回调。
+// 三态），opts 定制窗口/探活间隔/探测时限/时间源/拒绝回调。每次调用都是独立新实例
+// （无按名共享语义，故不存在 GetBreaker 的同名异参问题）。
 func NewBreaker(name string, opts ...BreakerOption) Breaker {
-	cfg := breakerConfig{
-		windowSize:     defaultBuckets,
-		windowInterval: defaultWindow / defaultBuckets,
-		forcePass:      defaultForcePass,
-		probeTimeout:   defaultProbeTimeout,
-		clock:          time.Now,
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
+	return newCircuitBreaker(name, newBreakerConfig(opts...))
+}
+
+// newCircuitBreaker 按已构造好的 cfg 组装公开实现。
+func newCircuitBreaker(name string, cfg breakerConfig) *circuitBreaker {
 	return &circuitBreaker{
 		name:     name,
 		gb:       newGoogleBreaker(cfg),
@@ -247,29 +324,82 @@ func NewBreaker(name string, opts ...BreakerOption) Breaker {
 	}
 }
 
+// sharedEntry 是共享表的一项：实例本体 + 首建配置指纹 + 冲突回调（#29）。
+// sig/onConflict 创建后不再变更，可无锁读取；warned 为冲突去重的 CAS 闸。
+type sharedEntry struct {
+	Breaker
+	sig        configFingerprint
+	onConflict func(name, detail string)
+	warned     atomic.Bool
+}
+
 var (
 	breakerMu      sync.RWMutex
-	sharedBreakers = make(map[string]Breaker)
+	sharedBreakers = make(map[string]*sharedEntry)
 )
 
 // GetBreaker 返回按 name 共享的 Breaker（RWMutex 懒创建，上游 breakers.go 模式）。
-// 同名返回同一实例（并发安全）；opts 仅在首次创建该名字时生效，后续调用既有实例。
+// 同名返回同一实例（并发安全）；**opts 仅在首次创建该名字时生效**，后续调用既有实例。
+//
+// ⚠️ 同名 + 不同 opts = 本次 opts 被静默丢弃（#29）。典型踩法：为不同调用方各建一组
+// 熔断器，名字共用业务标识（插件名 / 模型名 / 服务名）但阈值不同
+// （trip=3, cooldown=2m vs trip=10, cooldown=30s），第二组会沿用第一组的参数，
+// 且不报错、不告警。要真正拿到不同参数，有两条路：
+//
+//	// 路线 A（推荐）：把参数编进名字做命名空间隔离——名字即配置的一部分
+//	brkNS := fmt.Sprintf("argus.d%d.plugin.", dispatcherSeq.Add(1))
+//	gb := breaker.GetBreaker(brkNS+pluginName, opts...)
+//
+//	// 路线 B：显式自建，不走共享表（每次都是新实例）
+//	gb := breaker.NewBreaker(brkNS+pluginName, opts...)
+//
+// 不想改名字又怕踩坑，可注册 WithBreakerConflictHandler 让静默失效变成可观测事件——
+// 同名异参时回调一次 detail 对照串；不注册则该问题依旧静默。
 func GetBreaker(name string, opts ...BreakerOption) Breaker {
-	breakerMu.RLock()
-	b, ok := sharedBreakers[name]
-	breakerMu.RUnlock()
-	if ok {
-		return b
+	// 无 opts = 纯复用既有实例，不可能构成冲突，走无分配快路径
+	if len(opts) == 0 {
+		breakerMu.RLock()
+		e, ok := sharedBreakers[name]
+		breakerMu.RUnlock()
+		if ok {
+			return e.Breaker
+		}
 	}
 
+	cfg := newBreakerConfig(opts...)
+	fp := cfg.fingerprint()
+
 	breakerMu.Lock()
-	defer breakerMu.Unlock()
-	b, ok = sharedBreakers[name]
-	if !ok {
-		b = NewBreaker(name, opts...)
-		sharedBreakers[name] = b
+	e, existed := sharedBreakers[name]
+	if !existed {
+		e = &sharedEntry{
+			Breaker:    newCircuitBreaker(name, cfg),
+			sig:        fp,
+			onConflict: cfg.onConflict,
+		}
+		sharedBreakers[name] = e
 	}
-	return b
+	breakerMu.Unlock()
+
+	// 冲突告警在锁外触发：回调是消费方代码，可能反过来调 GetBreaker（RWMutex 不可重入）
+	if existed && len(opts) > 0 && fp != e.sig {
+		e.warnConflict(name, fp)
+	}
+	return e.Breaker
+}
+
+// warnConflict 上报同名异参冲突，每个 name 只报一次（热路径去重，避免每次
+// GetBreaker 都刷一遍）；未注册回调时静默跳过。
+func (e *sharedEntry) warnConflict(name string, got configFingerprint) {
+	if e.onConflict == nil {
+		return
+	}
+	if !e.warned.CompareAndSwap(false, true) {
+		return
+	}
+	e.onConflict(name, fmt.Sprintf("同名熔断器 %q 已存在，本次传入的 opts 被静默丢弃（仅首次创建生效）；"+
+		"首次生效配置 = %v，本次传入配置 = %v。请把参数编进名字做命名空间隔离，或改用 NewBreaker 显式自建。",
+		name, e.sig, got))
 }
 
 // Name 返回熔断器标识。
