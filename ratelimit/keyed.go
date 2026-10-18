@@ -249,6 +249,34 @@ func (kl *KeyedLimiterOf[K]) Replace(key K, l Limiter) {
 	kl.limiters[key] = entry
 }
 
+// Create 在容量护栏内原子登记新 key 的限流器（[#33](https://github.com/oekit/concurrency/issues/33)）：
+// 表满先回收空闲条目（与 Allow 建桶路径同一 sweep-on-pressure），仍满返回 false 并计一次
+// OverCapHits。已登记的 key 返回 false 且**不覆盖**——速率热更请走 Replace（换桶不该被
+// 护栏卡住）。l 为 nil 返回 false。
+//
+// 与 NewKeyedLimiterByFunc 互补：ByFunc 的 factory 在库内锁内被调用，消费方若在
+// factory 里读自持锁的速率状态会形成「库锁→消费方锁」与正常路径「消费方锁→库锁」的
+// 锁序倒置；「每次调用传入当前配置速率」的消费方（Nacos/DB 热更即时生效）应外部构造
+// 桶后用 Create 登记 / Replace 热更，配额回收与护栏都留在库内。
+func (kl *KeyedLimiterOf[K]) Create(key K, l Limiter) bool {
+	if l == nil {
+		return false
+	}
+	kl.mu.Lock()
+	defer kl.mu.Unlock()
+	if _, exists := kl.limiters[key]; exists {
+		return false
+	}
+	if !kl.allowNew(time.Now()) {
+		kl.overCapHits.Add(1)
+		return false
+	}
+	entry := &limiterEntry{limiter: l}
+	entry.lastSeen.Store(time.Now().UnixNano())
+	kl.limiters[key] = entry
+	return true
+}
+
 // Delete 删除指定 key 的限流器。
 func (kl *KeyedLimiterOf[K]) Delete(key K) {
 	kl.mu.Lock()
