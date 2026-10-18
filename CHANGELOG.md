@@ -1,3 +1,17 @@
+## [v0.17.0] — 2026-10-18
+
+### feat(ratelimit)：`KeyedLimiter.Create` 护栏内原子登记（[#33](https://github.com/oekit/concurrency/issues/33)）
+- `Create(key K, l Limiter) bool`：显式登记外部构造的限流器——表满先回收空闲条目
+  （与 Allow 建桶路径同一 sweep-on-pressure），仍满返回 false 并计一次 `OverCapHits`；
+  已登记 key 返回 false **不覆盖**（速率热更走 `Replace`，换桶不该被护栏卡住）；
+  `l == nil` 返回 false
+- 动机：`NewKeyedLimiterByFunc` 的 factory 在库内锁内被调用——消费方在 factory 里读
+  自持锁的速率状态会形成「库锁→消费方锁」与正常路径「消费方锁→库锁」的锁序倒置；
+  「每次调用传入当前配置速率」的消费方此前只能手动 `Len()` 预检 + `Replace` 直插
+  （护栏漏出库外、且绕过 sweep-on-pressure 回收）。`Create` 与 `Replace` 组合即可表达
+  「新 key 原子登记（含护栏与回收）、已登记 key 热更」的完整语义
+- 测试：护栏/不覆盖/nil/回收/满拒绝/Replace 不判满 + 并发同 key 恰好一次成功
+
 ## [v0.16.0] — 2026-10-18
 
 ### feat(ratelimit)：`NewKeyedLimiterByFunc` —— 按 key 定配额（[#31](https://github.com/oekit/concurrency/issues/31)）
