@@ -13,7 +13,7 @@ import (
 type KeyedLimiterOf[K comparable] struct {
 	mu          sync.RWMutex
 	limiters    map[K]*limiterEntry
-	factory     func() Limiter
+	factory     func(K) Limiter
 	ttl         time.Duration // 空闲过期；<=0 用 defaultTTL
 	maxEntries  int           // 0 = 不限
 	retryAfter  time.Duration // 容量护栏拒绝时建议的 Retry-After
@@ -78,7 +78,10 @@ func NewKeyedLimiter(factory func() Limiter, ttl time.Duration) *KeyedLimiter {
 	return NewKeyedLimiterOf[string](factory, WithIdleTTL[string](ttl))
 }
 
-// NewKeyedLimiterOf 创建按 key 隔离的限流器管理器（key 任意 comparable 类型）。
+// NewKeyedLimiterOf 创建按 key 隔离的限流器管理器（key 任意 comparable 类型），
+// 所有 key 共用同一份限流配额。
+//
+// 需要**按 key 给不同配额**（不同接口不同档位）请用 NewKeyedLimiterByFunc（#31）。
 //
 // 用法:
 //
@@ -88,6 +91,39 @@ func NewKeyedLimiter(factory func() Limiter, ttl time.Duration) *KeyedLimiter {
 //	    ratelimit.WithMaxEntries[uint](10_000),
 //	)
 func NewKeyedLimiterOf[K comparable](factory func() Limiter, opts ...KeyedOption[K]) *KeyedLimiterOf[K] {
+	// 统一到按 key 的 factory（内部表示），旧 API 忽略 key 即共用配额
+	return NewKeyedLimiterByFunc[K](func(K) Limiter { return factory() }, opts...)
+}
+
+// NewKeyedLimiterByFunc 创建按 key 隔离、且**配额由 key 决定**的限流器管理器（#31）。
+//
+// NewKeyedLimiterOf 的 factory 签名是 func() Limiter —— 不接受 key，因此一个管理器内
+// 所有 key 只能共享同一份配额。业务上按接口维度分档位（同步类宽松 / 备份类严格 /
+// 导入确认最严）是常见形态，此前只能把限流器实例的键从 (maxReq, window) 扩成
+// (action, maxReq, window)，即每个 action 一个管理器 —— 那样按 key 隔离、空闲回收、
+// 容量护栏、Len()/OverCapHits() 可观测出口这些价值基本被绕过，整体限流状态也没有
+// 单一治理点。本构造函数是它的正解：一个管理器，按 key 定配额。
+//
+// 用法:
+//
+//	quota := map[string]struct {
+//	    maxReq  int
+//	    window  time.Duration
+//	}{
+//	    "backup/import/confirm": {2, 900 * time.Second},
+//	    "car/syncAllTripData":   {3, 300 * time.Second},
+//	}
+//	keyed := ratelimit.NewKeyedLimiterByFunc[string](func(k string) ratelimit.Limiter {
+//	    q := quota[k]
+//	    return ratelimit.NewSlidingWindow(q.window, q.maxReq)
+//	}, ratelimit.WithIdleTTL[string](10*time.Minute))
+//	ok := keyed.Allow("car/syncAllTripData")   // 该 key 用自己那档配额
+//
+// ⚠️ 未在配额表里登记的 key 会拿到 factory 返回的值（若 factory 写了兜底默认值，
+// 就是静默按兜底档限流）。这是 API 形状使然，不是库的 bug——但它曾导致一次迁移中
+// 未登记的接口被按默认档限流。**配额表缺 key 时应让它显式失败**（返回 nil 会让
+// Allow 返回 false，见 Get 的容量护栏说明），或在 Allow 处自行判空，避免静默降级。
+func NewKeyedLimiterByFunc[K comparable](factory func(K) Limiter, opts ...KeyedOption[K]) *KeyedLimiterOf[K] {
 	cfg := keyedConfig[K]{
 		ttl:        defaultTTL,
 		retryAfter: defaultOverCapRetryAfter,
@@ -157,7 +193,7 @@ func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
 		return nil
 	}
 
-	limiter := kl.factory()
+	limiter := kl.factory(key)
 	entry = &limiterEntry{limiter: limiter}
 	entry.lastSeen.Store(time.Now().UnixNano())
 	kl.limiters[key] = entry
