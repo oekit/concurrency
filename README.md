@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/concurrency@v0.12.0
+go get github.com/oekit/concurrency@v0.13.0
 ```
 
 ## 这个仓库做什么
@@ -27,7 +27,7 @@ go get github.com/oekit/concurrency@v0.12.0
 | `syncx` | 键控闸门（同一 key 串行）、扇出收集 `FanIn`/`FanInErr`（按 index 写槽免锁、panic 进槽 `*async.PanicError`）+ 受限并发变体 `FanInLimit`（n 槽 w worker，goroutine O(w) 防下游过载；v0.12.0 起） |
 | `ratelimit` | 令牌桶/滑动窗口限流 + 按 key 隔离的 `KeyedLimiter`（泛型 key、容量护栏 `WithMaxEntries`、空闲回收、`AllowWithRetryAfter` 不消耗探测、`Replace` 速率热更、令牌桶时钟可注入 `WithTokenClock`——假时钟确定性测试与 Retry-After 精确回填）+ 防爆破锁 `Lockout`（fail2ban 形态：滑窗失败计数达阈值 → 锁定 L 秒拒绝态（剩余秒可查）→ 成功 `Reset` 清零；时钟可注入、容量护栏 fail-open + `OverCapHits` 观测、锁定条目免于空闲回收；v0.11.0 起）——登录/API Key 防爆破与匿名接口防枚举的收编件 |
 | `window` | **滑动窗口统计容器**（v0.3.0 移植自 go-zero collection.RollingWindow）：泛型桶 `BucketInterface` + 默认 `Bucket{Sum, Count}`、惰性重置、`Reduce` 聚合、`IgnoreCurrentBucket`；时间源可注入 `WithWindowClock`——熔断/降载的数据源 |
-| `breaker` | **自适应熔断 + 显式三态状态机**（v0.3.0 移植自 go-zero googleBreaker；v0.9.0 起 closed/open/half-open；v0.10.0 起冷却/计数双扩展）：Google SRE 概率丢弃为 open 态放行策略（40×250ms 窗口 + forcePass 强制探活，自适应丢弃行为不变）；冷却期满放行半开探测——成功关闸清窗、失败重开重置计时、超时自动回收，冷却期（`WithCooldown`）与探测失联时限（`WithProbeTimeout`）可独立配置（缺省同值保持 v0.9.0 行为）；可选计数型触发 `WithConsecutiveFailures`（连续失败 n 次即熔断，缺省关闭，与速率型并联补足低 QPS 信号）；`GenBreaker` 代绑定扩展接口（`AllowGen`/`SuccessGen`/`FailureGen`/`AbandonGen`，陈旧探测回报作废、冷却不被开放期失败延长），panic 记失败后 re-panic；`ErrCircuitOpen` 全库规范哨兵（httpx/nns-endpoint 别名共用）——下游保护的执行件 |
+| `breaker` | **自适应熔断 + 显式三态状态机**（v0.3.0 移植自 go-zero googleBreaker；v0.9.0 起 closed/open/half-open；v0.10.0 起冷却/计数双扩展；v0.13.0 起熔断期收敛到探测级）：SRE 公式为 closed→open 触发器（40×250ms 窗口）；open 态 = forcePass 强制探活（缺省 1s）+ 冷却期满半开探测，其余一律拒绝——公式愈合不再恢复放行，状态与流量不再失配；冷却期（`WithCooldown`）与探测失联时限（`WithProbeTimeout`）可独立配置（缺省同值）；可选计数型触发 `WithConsecutiveFailures`（连续失败 n 次即熔断，缺省关闭，与速率型并联补足低 QPS 信号）；`State()`/State 枚举可观测出口；`GenBreaker` 代绑定扩展接口（陈旧探测回报作废、冷却不被开放期失败延长），panic 记失败后 re-panic；`ErrCircuitOpen` 全库规范哨兵（httpx/nns-endpoint 别名共用）——下游保护的执行件 |
 | `shedding` | **CPU 自适应降载**（v0.3.0 移植自 go-zero adaptiveshedder）：maxPass×minRt 的 Little's Law 并发上限、CPU 过载因子夹 [0.1,1]、avgFlying 滞后 EMA、1s 冷却期；CPU 采样纯标准库（/proc/stat + cgroup v1/v2 配额感知），非 linux 自动禁用全放行；`ErrServiceOverloaded` 哨兵——本机过载保护的入口件 |
 | `singleflight` | 并发去重（同 key 合并为一次调用） |
 | `group` | 并发分组编排 |

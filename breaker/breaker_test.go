@@ -19,9 +19,9 @@ func newSmallClockBreaker(clock *fakeClock, opts ...BreakerOption) *circuitBreak
 	return NewBreaker("breaker-test", all...).(*circuitBreaker)
 }
 
-// openBreaker 用连续失败把熔断器打到打开状态（冻结时钟禁用强制探活，
-// dropRatio → (total-5)/(total+1)。预热 5 万次后单次调用漏过的概率 ≈ 6/50001 ≈ 1.2e-4，
-// 使后续"必被拒绝"的单发断言抖动可忽略；纯内存操作，毫秒级完成。
+// openBreaker 用连续失败把熔断器打到打开状态（冻结时钟下 forcePass 不到期；
+// v0.13.0 起触发后除 forcePass 外一律拒绝——预热循环前几次执行失败即触发，
+// 后续全量拒绝，单发"必被拒绝"断言完全确定；纯内存操作，毫秒级完成）。
 func openBreaker(t *testing.T, cb *circuitBreaker) {
 	t.Helper()
 	boom := errors.New("boom")
@@ -77,28 +77,41 @@ func TestBreakerOption_Validation(t *testing.T) {
 	}
 }
 
-// TestBreaker_WithBreakerWindow 小窗口打满后打开，跨过整窗后确定性恢复。
+// TestBreaker_WithBreakerWindow 小窗口快速打满触发熔断；跨过整窗不恢复流量（#25），
+// 冷却期满探测成功后才恢复放行——窗口滚动与状态机恢复一并覆盖。
 func TestBreaker_WithBreakerWindow(t *testing.T) {
 	clock := &fakeClock{}
+	clock.Set(stateTestStart)
 	b := newSmallClockBreaker(clock)
 	openBreaker(t, b)
 
 	ctx := context.Background()
-	opened := 0
-	for i := 0; i < 100; i++ {
-		if err := b.Do(ctx, func() error { return nil }); errors.Is(err, ErrCircuitOpen) {
-			opened++
-		}
-	}
-	if opened == 0 {
-		t.Fatal("breaker should open after sustained failures")
+	if b.State() != StateOpen {
+		t.Fatalf("State() = %v, want StateOpen", b.State())
 	}
 
-	// 推进超过整窗（10 桶 × 10ms），历史清空 → 恢复放行
+	// 推进超过整窗（10 桶 × 10ms）：历史滚空也不恢复流量——熔断期收敛到探测级
 	clock.Advance(11 * 10 * time.Millisecond)
 	for i := 0; i < 5; i++ {
+		if err := b.Do(ctx, func() error { return nil }); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("call %d after window expiry err = %v, want ErrCircuitOpen", i, err)
+		}
+	}
+	if b.State() != StateOpen {
+		t.Fatalf("State() after window expiry = %v, want StateOpen", b.State())
+	}
+
+	// 冷却期满（缺省 1m）：首个放行即半开探测，成功关闸后恢复全量放行
+	clock.Advance(time.Minute)
+	if err := b.Do(ctx, func() error { return nil }); err != nil {
+		t.Fatalf("probe Do err = %v, want nil", err)
+	}
+	if b.State() != StateClosed {
+		t.Fatalf("State() after probe success = %v, want StateClosed", b.State())
+	}
+	for i := 0; i < 5; i++ {
 		if err := b.Do(ctx, func() error { return nil }); err != nil {
-			t.Fatalf("call %d after window expiry err = %v, want nil", i, err)
+			t.Fatalf("call %d after close err = %v, want nil", i, err)
 		}
 	}
 }

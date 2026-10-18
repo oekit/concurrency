@@ -377,8 +377,9 @@ func TestState_AbandonGen(t *testing.T) {
 	}
 }
 
-// TestState_FormulaHealDoesNotAutoClose 公式愈合不自动关闸：open 态窗口滚空后全量放行
-// （放行策略与历史行为一致），但状态保持 open、探测照常调度——关闸只由探测成功驱动。
+// TestState_FormulaHealDoesNotAutoClose 公式愈合不自动关闸、也不恢复放行（#25）：
+// open 态窗口滚空（dropRatio ≤ 0）后请求一律拒绝——熔断期流量收敛到探测级，
+// 旧版「公式愈合全量放行」会形成状态 open 而流量照旧的失配；关闸只由探测成功驱动。
 func TestState_FormulaHealDoesNotAutoClose(t *testing.T) {
 	clock := &fakeClock{}
 	clock.Set(stateTestStart)
@@ -391,16 +392,12 @@ func TestState_FormulaHealDoesNotAutoClose(t *testing.T) {
 	if b.gb.probeGen != 0 {
 		t.Fatalf("probeGen = %d, want 0 before deadline", b.gb.probeGen)
 	}
-	// 整窗滚出（10 桶 × 10ms = 100ms < 500ms，窗口已空）：公式愈合 → 全量放行
+	// 整窗滚出（10 桶 × 10ms = 100ms < 500ms，窗口已空）：公式愈合 → 拒绝（确定性，
+	// forcePass 未到期），不再全量放行
 	for i := 0; i < 10; i++ {
-		p, gen, err := b.AllowGen(ctx)
-		if err != nil {
-			t.Fatalf("call %d after window expiry err = %v, want pass", i, err)
+		if _, _, err := b.AllowGen(ctx); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("call %d after window expiry err = %v, want reject (probe-level traffic)", i, err)
 		}
-		if gen != 0 || b.gb.probeGen != 0 {
-			t.Fatalf("call %d gen=%d probeGen=%d, want 0/0 (healed formula passes, no probe yet)", i, gen, b.gb.probeGen)
-		}
-		p.Pass()
 	}
 	if b.gb.state != stateOpen {
 		t.Fatalf("state = %v, want open (formula heal must not auto-close)", b.gb.state)
@@ -854,4 +851,81 @@ func TestState_ConcurrentAllowReport(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+// TestState_ConsecutiveTripStopsTraffic #25 复现场景回归：WithConsecutiveFailures(3)
+// 触发后，放行决策必须跟随状态——第 4 次起全部拒绝（旧版 dropRatio<=0 短路放行，
+// 实测第 12 次才开始拒绝，计数型触发形同虚设）。
+func TestState_ConsecutiveTripStopsTraffic(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute,
+		WithConsecutiveFailures(3), WithCooldown(5*time.Minute))
+	ctx := context.Background()
+
+	for i := 1; i <= 30; i++ {
+		_, gen, err := b.AllowGen(ctx)
+		if err != nil {
+			if i < 4 {
+				t.Fatalf("request %d rejected before threshold: %v", i, err)
+			}
+			if !errors.Is(err, ErrCircuitOpen) {
+				t.Fatalf("request %d err = %v, want bare ErrCircuitOpen", i, err)
+			}
+			continue
+		}
+		if i > 3 {
+			t.Fatalf("request %d granted after trip — traffic must stop", i)
+		}
+		b.FailureGen(ctx, gen)
+	}
+	if b.State() != StateOpen {
+		t.Fatalf("State() = %v, want StateOpen", b.State())
+	}
+	if b.gb.openSince != stateTestStart.UnixNano() {
+		t.Fatalf("openSince = %d, want trip time %d", b.gb.openSince, stateTestStart.UnixNano())
+	}
+}
+
+// TestBreaker_StateObservability State() 可观测出口（#25 附带建议）：
+// closed → 触发 open → 半开探测 → 探测成功关闸 的全生命周期可观测。
+func TestBreaker_StateObservability(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithConsecutiveFailures(2))
+	ctx := context.Background()
+
+	if b.State() != StateClosed {
+		t.Fatalf("fresh State() = %v, want StateClosed", b.State())
+	}
+	if s := StateOpen.String(); s != "open" {
+		t.Fatalf("StateOpen.String() = %q, want %q", s, "open")
+	}
+	if s := StateHalfOpen.String(); s != "half-open" {
+		t.Fatalf("StateHalfOpen.String() = %q, want %q", s, "half-open")
+	}
+
+	boom := errors.New("boom")
+	fail := func() error { return boom }
+	_ = b.Do(ctx, fail)
+	if b.State() != StateClosed {
+		t.Fatalf("State() below threshold = %v, want StateClosed", b.State())
+	}
+	_ = b.Do(ctx, fail)
+	if b.State() != StateOpen {
+		t.Fatalf("State() after trip = %v, want StateOpen", b.State())
+	}
+
+	clock.Advance(time.Minute)
+	p, _, err := b.AllowGen(ctx)
+	if err != nil {
+		t.Fatalf("probe grant err = %v", err)
+	}
+	if b.State() != StateHalfOpen {
+		t.Fatalf("State() with pending probe = %v, want StateHalfOpen", b.State())
+	}
+	p.Pass()
+	if b.State() != StateClosed {
+		t.Fatalf("State() after probe success = %v, want StateClosed", b.State())
+	}
 }

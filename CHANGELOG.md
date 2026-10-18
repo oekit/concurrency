@@ -2,6 +2,26 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.13.0] — 2026-10-18
+
+### fix(breaker)：熔断期流量收敛到探测级——计数型触发不再被公式短路（[#25](https://github.com/oekit/concurrency/issues/25)）
+- **行为变更**：open/half-open 态放行策略改为「forcePass 强制探活（缺省 1s）+ 冷却期满
+  半开探测，其余一律拒绝（记丢弃样本）」；**不再按 SRE 公式概率丢弃、公式愈合
+  （dropRatio≤0）不再恢复放行**——旧版 `dropRatio<=0` 在状态判定之后短路放行，导致
+  `WithConsecutiveFailures(3)` 触发后流量照旧（纯失败低样本场景实测第 12 次才开始拒绝，
+  配了熔断等于没配）。SRE 公式退役为 closed→open 触发器，「状态」与「流量」不再失配
+- 进入/重开 open 时初始化 `lastPass`：forcePass 通道自熔断进入起算，不再因零值失效
+  （旧版 lastPass=0 时探活不生效，纯失败场景下熔断期首秒无任何放行通道）
+- 评估附注：issue 方案 B（触发时清窗使 dropRatio 转正）数学上不成立——清窗后 total=0、
+  dropRatio=(0-5)/1=-5 更负更放行；且仅去掉短路仍不够（概率通道在 dropRatio 自 0 爬升期
+  漏过率高达 75%→30%），故采纳方案 A 并收敛到探测级
+- **feat(breaker)**：`State()`/State 枚举可观测出口（`StateClosed`/`StateOpen`/
+  `StateHalfOpen` + `String()`）——mu 内快照，仅供监控/日志/调试，放行判定仍以
+  Allow/Do 返回结果为准。**Breaker 接口新增方法**：外部自行实现该接口的代码需补上
+- 测试：#25 复现场景回归（30 连发第 4 次起全拒）+ State 全生命周期 + 窗口滚空不恢复
+  流量 + forcePass 探活通道；受行为变更波及的 3 个旧契约测试按新语义重写（全确定，
+  不再依赖概率断言）
+
 ## [v0.12.0] — 2026-10-18
 
 ### feat(retry/httpx)：403 头感知判定 `RetryableWithHeaders`（[#22](https://github.com/oekit/concurrency/issues/22)）

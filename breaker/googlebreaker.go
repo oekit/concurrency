@@ -1,7 +1,6 @@
 package breaker
 
 import (
-	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,9 +84,11 @@ func (b *bucket) Reset() {
 //
 //   - closed：请求全量放行；窗口统计超阈值（丢弃概率 > 0，即接受预算耗尽）或
 //     计数型触发（WithConsecutiveFailures 连续失败达阈值）切入 open；
-//   - open：放行策略 = 原 SRE 概率丢弃 + 每隔 forcePass 强制探活（自适应丢弃行为不变）；
-//     冷却（自进入/重开 open 起冷却期——WithCooldown 可独立配置，缺省沿用 probeTimeout）
-//     期满后，首个放行请求即半开探测（绕过概率公式必达，携带新代 generation）；
+//   - open：流量收敛到探测级——每隔 forcePass 强制放行一次探活，其余一律拒绝
+//     （#25：不再按 SRE 公式概率丢弃/愈合放行——公式退役为 closed→open 触发器，
+//     熔断期内不放流量）；冷却（自进入/重开 open 起冷却期——WithCooldown 可独立
+//     配置，缺省沿用 probeTimeout）期满后，首个放行请求即半开探测
+//     （携带新代 generation）；
 //   - half-open：挂起探测等待回报——成功关闸（closed + 清窗，旧失败样本不得触发立即重开）；
 //     失败重开并重置计时；超 probeTimeout 未回报视为失联回收，放行新探测；
 //     陈旧代（gen < 当前代）回报整体作废，不计窗口、不迁移。
@@ -109,8 +110,9 @@ type googleBreaker struct {
 	// consecFails 为当前连续失败计数，与状态机字段同受 mu 串行化。
 	consecutive int
 	consecFails int
-	// lastPass 记录最近一次概率放行/强制探活的时刻（clock 的 UnixNano）；
-	// 0 表示尚无任何概率放行——此时强制探活不生效（与上游 syncx.AtomicDuration 零值语义一致）。
+	// lastPass 记录最近一次强制探活放行的时刻（clock 的 UnixNano）；
+	// 0 表示尚无任何放行——每次进入/重开 open 时初始化为进入时刻（#25：
+	// forcePass 是熔断期唯一放行通道，不得因零值而失效）。
 	lastPass atomic.Int64
 
 	// 状态机字段由 mu 串行化（窗口统计走 RollingWindow 自身锁，两锁无嵌套）。
@@ -122,12 +124,12 @@ type googleBreaker struct {
 	openSince int64  // 进入/重开 open 的时刻（clock 的 UnixNano）
 }
 
-// windowResult 为一次窗口聚合的结果。
+// windowResult 为一次窗口聚合的结果（速率型触发判定的输入；
+// #25 起公式退役为 closed→open 触发器，不再参与 open 态放行）。
 type windowResult struct {
 	accepts        int64
 	total          int64
 	failingBuckets int64
-	workingBuckets int64
 }
 
 // newGoogleBreaker 按 cfg 构造熔断核心；窗口、强制探活与探测调度共用 cfg.clock。
@@ -180,7 +182,8 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	st := b.state
 	b.mu.Unlock()
 
-	// 窗口聚合一次：closed→open 阈值判定与 open 放行策略共用
+	// 窗口聚合一次：速率型触发判定（closed→open）的唯一输入
+	// （#25 起公式退役为触发器——open 态放行只走 forcePass 与半开探测）
 	history := b.history()
 	w := k - (k-minK)*float64(history.failingBuckets)/float64(b.windowSize)
 	if w < minK {
@@ -191,41 +194,38 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	// for better performance, no need to care about the negative ratio
 	dropRatio := (float64(history.total-protection) - weightedAccepts) / float64(history.total+1)
 
-	// closed 态接受预算耗尽（错误率超阈值）→ 切入 open，本请求即按 open 策略判定
-	// （首个丢弃请求与历史概率丢弃行为一致）；锁内复核——状态可能已被并发的探测
-	// 回报/回收迁移
+	// closed 态接受预算耗尽（错误率超阈值）→ 切入 open，本请求即按 open 策略判定；
+	// 锁内复核——状态可能已被并发的探测回报/回收迁移
+	open := st != stateClosed
 	if st == stateClosed && dropRatio > 0 {
 		b.mu.Lock()
 		if b.state == stateClosed {
 			b.state = stateOpen
 			b.openSince = now
 			b.probeGen = 0
-			b.consecFails = 0 // 进入 open：连续失败计数归零
+			b.consecFails = 0     // 进入 open：连续失败计数归零
+			b.lastPass.Store(now) // open 期 forcePass 自进入起算
 		}
+		open = b.state != stateClosed
 		b.mu.Unlock()
 	}
 
-	// 预算内放行：closed 正常放行；open 公式愈合时同样全量放行
-	// （状态保持 open，关闸只由探测成功驱动，见类型注释）
-	if dropRatio <= 0 {
+	// closed 态：预算内全量放行（速率型触发已由上面的判定接管）
+	if !open {
 		return googlePromise{b: b, gen: gen}, gen, nil
 	}
 
-	// open 态放行策略（与历史行为逐字一致）：熔断期内每隔 forcePass 强制放行一次探活；
-	// 其余按 dropRatio×(空闲桶占比) 概率丢弃
+	// open/half-open 放行策略（#25 语义修正）：熔断期流量收敛到探测级——
+	// 每隔 forcePass 强制放行一次探活（恢复观察哨 + 样本通道），其余一律拒绝
+	// 并记丢弃样本。dropRatio<=0 的公式愈合不再短路放行（旧版在此全量放行，
+	// 计数型触发在低样本场景形同虚设——状态已 open 而流量照旧）；关闸只由
+	// 半开探测成功驱动，熔断期内不放流量
 	if lastPass := b.lastPass.Load(); lastPass > 0 && time.Duration(now-lastPass) > b.forcePass {
 		b.lastPass.Store(now)
 		return googlePromise{b: b, gen: gen}, gen, nil
 	}
-
-	dropRatio *= float64(int64(b.windowSize)-history.workingBuckets) / float64(b.windowSize)
-	if trueOnProba(dropRatio) {
-		b.markDrop()
-		return googlePromise{}, 0, ErrCircuitOpen
-	}
-
-	b.lastPass.Store(now)
-	return googlePromise{b: b, gen: gen}, gen, nil
+	b.markDrop()
+	return googlePromise{}, 0, ErrCircuitOpen
 }
 
 // allow 判定放行并返回承诺；拒绝时返回 ErrCircuitOpen。等价于 AllowGen 丢弃返回的代。
@@ -310,7 +310,8 @@ func (b *googleBreaker) report(gen uint64, ok bool) {
 	} else {
 		b.state = stateOpen
 		b.openSince = b.clock().UnixNano()
-		b.consecFails = 0 // 重开：连续失败计数归零
+		b.consecFails = 0             // 重开：连续失败计数归零
+		b.lastPass.Store(b.openSince) // open 期 forcePass 自重开起算（#25）
 		b.mu.Unlock()
 		b.markFailure()
 	}
@@ -357,6 +358,7 @@ func (b *googleBreaker) accountConsec(ok bool) {
 		b.openSince = b.clock().UnixNano()
 		b.probeGen = 0
 		b.consecFails = 0
+		b.lastPass.Store(b.openSince) // open 期 forcePass 自进入起算（#25）
 	}
 }
 
@@ -381,20 +383,15 @@ func (b *googleBreaker) markSuccess() {
 	b.stat.Add(success)
 }
 
-// history 聚合窗口内全部有效桶；failingBuckets/workingBuckets 为从旧到新
-// 扫描时"连续纯失败/纯成功桶"的尾部长度（遇相反样本或混合桶清零，空桶延续），
-// 语义与上游 googlebreaker.go 保持一致。
+// history 聚合窗口内全部有效桶；failingBuckets 为从旧到新扫描时"连续纯失败桶"
+// 的尾部长度（遇成功样本或混合桶清零，空桶延续），语义与上游 googlebreaker.go
+// 保持一致。
 func (b *googleBreaker) history() windowResult {
 	var result windowResult
 
 	b.stat.Reduce(func(bk *bucket) {
 		result.accepts += bk.Success
 		result.total += bk.Sum
-		if bk.Failure > 0 {
-			result.workingBuckets = 0
-		} else if bk.Success > 0 {
-			result.workingBuckets++
-		}
 		if bk.Success > 0 {
 			result.failingBuckets = 0
 		} else if bk.Failure > 0 {
@@ -419,10 +416,4 @@ func (p googlePromise) Pass() {
 // Fail 告知熔断器本次调用失败（按代回报）。
 func (p googlePromise) Fail() {
 	p.b.report(p.gen, false)
-}
-
-// trueOnProba 以概率 proba 返回 true（上游 mathx.Proba.TrueOnProba 的就地实现，
-// 不为一个函数引依赖）。math/rand/v2 顶层函数并发安全，无需上游的互斥锁包装。
-func trueOnProba(proba float64) bool {
-	return rand.Float64() < proba
 }

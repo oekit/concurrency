@@ -13,6 +13,30 @@ import (
 // nns-endpoint 经 httpx 别名链共用同一 sentinel）。判定一律用 errors.Is。
 var ErrCircuitOpen = errors.New("circuit breaker is open")
 
+// State 为熔断器状态（可观测出口，#25 附带建议——此前消费方只能靠 Allow 报错反推）。
+type State uint8
+
+const (
+	// StateClosed 正常放行。
+	StateClosed State = iota
+	// StateOpen 熔断期：forcePass 节奏的强制探活 + 冷却期满的半开探测，其余拒绝。
+	StateOpen
+	// StateHalfOpen 半开：挂起探测等待回报（成功关闸/失败重开）。
+	StateHalfOpen
+)
+
+// String 返回状态名（"closed"/"open"/"half-open"，供日志与监控打点）。
+func (s State) String() string {
+	switch s {
+	case StateOpen:
+		return "open"
+	case StateHalfOpen:
+		return "half-open"
+	default:
+		return "closed"
+	}
+}
+
 // numHistoryReasons 为拒绝回调 reason 保留的最近失败原因条数（对齐上游 errorWindow）。
 const numHistoryReasons = 5
 
@@ -50,6 +74,11 @@ type (
 		// fallback 为 nil 时拒绝错误原样返回。
 		DoWithFallback(ctx context.Context, execute func() error, acceptable func(error) bool,
 			fallback func(err error) error) error
+
+		// State 返回当前熔断状态快照（读取瞬间值，仅供监控/日志/调试；
+		// 放行判定一律以 Allow/Do 的返回结果为准）。v0.13.0 新增——
+		// 外部自行实现 Breaker 接口的代码需同步补上该方法。
+		State() State
 	}
 
 	// GenBreaker 是带代（generation）的熔断器扩展接口：在 Breaker 之上显式暴露
@@ -246,6 +275,20 @@ func GetBreaker(name string, opts ...BreakerOption) Breaker {
 // Name 返回熔断器标识。
 func (cb *circuitBreaker) Name() string {
 	return cb.name
+}
+
+// State 返回当前熔断状态快照（mu 内读取；监控/日志/调试用途）。
+func (cb *circuitBreaker) State() State {
+	cb.gb.mu.Lock()
+	defer cb.gb.mu.Unlock()
+	switch cb.gb.state {
+	case stateOpen:
+		return StateOpen
+	case stateHalfOpen:
+		return StateHalfOpen
+	default:
+		return StateClosed
+	}
 }
 
 // Allow 判断请求是否放行：放行返回 Promise 供调用方回填 Pass/Fail，

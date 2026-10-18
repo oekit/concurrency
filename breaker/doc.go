@@ -6,12 +6,12 @@
 //   - closed：请求全量放行，滚动窗口（缺省 40 桶 × 250ms）持续统计；
 //     错误率超阈值（SRE 公式丢弃概率 > 0，即接受预算耗尽）或计数型触发
 //     （WithConsecutiveFailures 连续失败 n 次，缺省关闭，与速率型并联）切入 open；
-//   - open：放行策略 = Google SRE Client-Side Throttling 概率丢弃（请求量超出
-//     服务端可承受量 k=1.5 倍接受率、退化下限 minK=1.1 越多，丢弃概率越高；
-//     protection=5 保护窗口样本不足）+ 每隔 forcePass（缺省 1s）强制放行一次探活，
-//     过载呈概率衰减而非硬切换；自进入/重开起冷却期满后，首个放行请求即半开探测
-//     （绕过概率公式必达，携带新代 generation）——冷却期经 WithCooldown 独立配置，
-//     缺省沿用 probeTimeout；
+//   - open：流量收敛到探测级——每隔 forcePass（缺省 1s）强制放行一次探活
+//     （恢复观察哨 + 样本通道），其余一律拒绝并记丢弃样本；自进入/重开起冷却期满后，
+//     首个放行请求即半开探测（携带新代 generation）——冷却期经 WithCooldown 独立
+//     配置，缺省沿用 probeTimeout；v0.13.0 起不再按 SRE 公式概率丢弃/愈合放行
+//     （#25：公式退役为 closed→open 触发器，熔断期内不放流量——旧版 dropRatio<=0
+//     短路全量放行会使计数型触发形同虚设）；
 //   - half-open：挂起探测等待回报——成功关闸（closed + 清空窗口，旧失败样本不得
 //     触发立即重开）；失败重开并重置计时；超 probeTimeout 未回报视为失联回收，
 //     放行新探测；陈旧代（gen < 当前代）回报整体作废，不计窗口、不迁移。
@@ -37,7 +37,11 @@
 //   - 时间源可注入 WithBreakerClock（缺省 time.Now），窗口推进、强制探活与
 //     探测调度共用，测试注入假时钟即可完全确定地驱动状态机；
 //   - 可观测性零强制注入：拒绝走可选钩子 WithBreakerRejectHandler（缺省 no-op），
-//     由上层显式接 logx/metrics；
+//     由上层显式接 logx/metrics；State()/State 枚举（closed/open/half-open）供
+//     监控与日志打点（v0.13.0 起，放行判定仍以 Allow/Do 返回结果为准）；
+//   - 与上游 go-zero 的关键语义分叉（v0.13.0 起）：上游 open 态按 SRE 公式概率
+//     丢弃、窗口滚空即全量放行；本仓三态化后熔断期收敛到探测级（forcePass +
+//     半开探测），恢复只由探测成功驱动——「状态」与「流量」不再失配；
 //   - 统计容器复用本仓 window.RollingWindow（自定义桶 bucket 实现
 //     BucketInterface[int64]），不镜像上游 bucket 布局。
 //

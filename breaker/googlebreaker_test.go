@@ -126,7 +126,8 @@ func TestGoogleBreaker_HighFailureDrops(t *testing.T) {
 }
 
 // TestGoogleBreaker_ForcePass 白盒控制 lastPass 驱动强制探活：
-// 距上次放行超过 forcePass 时恰好放行一次（确定性），同刻后续请求回到概率丢弃。
+// 距上次放行超过 forcePass 时恰好放行一次，同刻后续请求全部拒绝（#25 起
+// open 态唯一放行通道 = forcePass + 冷却期满的半开探测，行为全确定）。
 func TestGoogleBreaker_ForcePass(t *testing.T) {
 	clock := &fakeClock{}
 	// lastPass 语义为“clock 的 UnixNano > 0 才有效”（上游 AtomicDuration 零值同语义），
@@ -135,12 +136,12 @@ func TestGoogleBreaker_ForcePass(t *testing.T) {
 	b := newTestGoogleBreaker(clock)
 	boom := errors.New("boom")
 
-	// 打满失败使 dropRatio → 1（冻结时钟下强制探活不触发）
+	// 打满失败触发熔断（open 态冻结时钟下除强制探活外一律拒绝）
 	for i := 0; i < 50000; i++ {
 		_, _ = b.doReq(func() error { return boom }, defaultAcceptable)
 	}
 
-	// 未到期不放行：lastPass 距今 500ms < 1s，走概率丢弃（p_pass ≈ 1e-4）
+	// 未到期不放行：lastPass 距今 500ms < 1s，拒绝（确定性）
 	now := clock.Now().UnixNano()
 	b.lastPass.Store(now - int64(500*time.Millisecond))
 	if err, _ := b.doReq(func() error { return nil }, defaultAcceptable); !errors.Is(err, ErrCircuitOpen) {
@@ -163,15 +164,11 @@ func TestGoogleBreaker_ForcePass(t *testing.T) {
 		t.Fatalf("force pass should refresh lastPass to now, got %d", got)
 	}
 
-	// 同一刻后续请求回到概率丢弃：20 次至多 1 次概率放行（P(≥2) ≈ 1.5e-6）
-	passes := 0
+	// 同一刻后续请求全部拒绝：每 forcePass 间隔恰一次放行
 	for i := 0; i < 20; i++ {
 		if _, rejected := b.doReq(func() error { return boom }, defaultAcceptable); !rejected {
-			passes++
+			t.Fatalf("request %d after force pass must be rejected (probe-level traffic only)", i+1)
 		}
-	}
-	if passes > 1 {
-		t.Fatalf("force pass should happen once per interval, got %d passes in 20", passes)
 	}
 }
 
@@ -225,32 +222,47 @@ func TestGoogleBreaker_PromiseMarking(t *testing.T) {
 
 // TestGoogleBreaker_WindowExpiryRecovers 整窗滚出后历史清空、丢弃概率归零，
 // 服务恢复即自动全量放行（确定性恢复路径）。
-func TestGoogleBreaker_WindowExpiryRecovers(t *testing.T) {
+// TestGoogleBreaker_WindowExpiryNoTrafficResume open 态窗口滚空（公式愈合）
+// 不再恢复流量（#25）：旧版在此全量放行导致「状态 open 而流量照旧」；新版
+// 熔断期流量收敛到探测级——拒绝、状态保持 open，恢复只由 forcePass 与探测驱动。
+func TestGoogleBreaker_WindowExpiryNoTrafficResume(t *testing.T) {
 	clock := &fakeClock{}
+	clock.Set(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	b := newTestGoogleBreaker(clock)
 	boom := errors.New("boom")
 
 	for i := 0; i < 100000; i++ {
 		_, _ = b.doReq(func() error { return boom }, defaultAcceptable)
 	}
-	clock.Advance(defaultBuckets*testInterval + testInterval)
+	clock.Advance(defaultBuckets*testInterval + testInterval) // 整窗滚出，dropRatio ≤ 0
 
+	// 自熔断进入已 >forcePass：首个请求为强制探活（熔断期唯一放行通道）
+	ran := false
+	if err, rejected := b.doReq(func() error {
+		ran = true
+		return nil
+	}, defaultAcceptable); err != nil || rejected || !ran {
+		t.Fatalf("force pass must execute after window expiry: err=%v rejected=%v ran=%v", err, rejected, ran)
+	}
+
+	// 其余请求一律拒绝：公式愈合不恢复流量（旧版在此全量放行）
 	for i := 0; i < 10; i++ {
 		err, rejected := b.doReq(func() error { return nil }, defaultAcceptable)
-		if rejected || err != nil {
-			t.Fatalf("call %d after window expiry: err=%v rejected=%v, want pass", i, err, rejected)
+		if !errors.Is(err, ErrCircuitOpen) || !rejected {
+			t.Fatalf("call %d after window expiry: err=%v rejected=%v, want reject (open must not resume)", i, err, rejected)
 		}
 	}
-}
+	if b.state != stateOpen {
+		t.Fatalf("state = %v, want open (formula heal must not auto-close)", b.state)
+	}
 
-// TestTrueOnProba 边界：0 恒 false，1 恒 true（p < proba 语义）。
-func TestTrueOnProba(t *testing.T) {
-	for i := 0; i < 1000; i++ {
-		if trueOnProba(0) {
-			t.Fatal("trueOnProba(0) should never be true")
-		}
-		if !trueOnProba(1) {
-			t.Fatal("trueOnProba(1) should always be true")
-		}
+	// forcePass 再次到期（白盒回拨 lastPass）：探活通道照常工作
+	b.lastPass.Store(clock.Now().UnixNano() - int64(2*time.Second))
+	ran = false
+	if err, rejected := b.doReq(func() error {
+		ran = true
+		return nil
+	}, defaultAcceptable); err != nil || rejected || !ran {
+		t.Fatalf("force pass must execute: err=%v rejected=%v ran=%v", err, rejected, ran)
 	}
 }
