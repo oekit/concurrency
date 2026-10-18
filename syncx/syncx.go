@@ -94,8 +94,9 @@ type Slot[T any] struct {
 
 // FanInErr 逐槽错误变体：并行执行 fn(0..n-1)（fn 可返回 error），全部完成后
 // 按 index 序返回逐槽结果。fn 正常返回 → Val/Err 如实记录；fn panic → 该槽
-// Panicked=payload、Val 零值、Err nil——不再静默（FanIn 契约保留不动，供无
-// error 形态的轻量路径）。n<=0 返回空切片。
+// Err=*async.PanicError（v0.7.0 起统一收编，errors.As 可辨、携带栈；Panicked
+// 同写原始 payload，已 Deprecated）、Val 零值，并经 ReportPanic 上报——不再
+// 静默（FanIn 契约保留不动，供无 error 形态的轻量路径）。n<=0 返回空切片。
 func FanInErr[T any](n int, fn func(i int) (T, error)) []Slot[T] {
 	if n <= 0 {
 		return nil
