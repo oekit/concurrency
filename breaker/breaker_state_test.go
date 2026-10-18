@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// 状态机测试：假时钟确定性驱动 closed/open/half-open 迁移、代绑定、探测时限。
+// 状态机测试：假时钟确定性驱动 closed/open/half-open 迁移、代绑定、探测时限、
+// 冷却期独立配置（WithCooldown）与计数型触发（WithConsecutiveFailures）。
 // 全部断言确定性（探测放行绕过公式必达；窗口打满后概率丢弃的单发漏过概率 ≈ 1.2e-4，
 // 仅用于"预期被拒"的统计裕量场景，与既有 openBreaker 口径一致）。
 
@@ -506,6 +507,294 @@ func TestWithProbeTimeout_Validation(t *testing.T) {
 			}()
 			WithProbeTimeout(d)
 		}()
+	}
+}
+
+// TestWithCooldown_Validation 冷却期非法值 panic，与 WithProbeTimeout 同口径；
+// 0 不是合法冷却期（缺省不设即回落 probeTimeout，无需显式 0）。
+func TestWithCooldown_Validation(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("WithCooldown(%v) should panic", d)
+				}
+			}()
+			WithCooldown(d)
+		}()
+	}
+}
+
+// TestState_CooldownOverridesProbeTimeout 冷却期独立于探测失联时限（#19）：
+// WithCooldown(10ms) < probeTimeout(1m) 时，探测按冷却期放行（10ms 即达，而非 1m）；
+// 探测失败重开后冷却重新起算，probeTimeout 不再充当冷却。
+func TestState_CooldownOverridesProbeTimeout(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithCooldown(10*time.Millisecond))
+	ctx := context.Background()
+
+	fillFailures(t, b)
+
+	// 冷却期 10ms 期满：放行探测（若仍绑定 probeTimeout 此处拿不到探测）
+	clock.Advance(10 * time.Millisecond)
+	p1, gen1, err := b.AllowGen(ctx)
+	if err != nil || gen1 != 1 {
+		t.Fatalf("first probe = (%v, %d), want grant gen 1 at cooldown expiry", err, gen1)
+	}
+	p1.Fail()
+	if b.gb.state != stateOpen || b.gb.probeGen != 0 {
+		t.Fatalf("state=%v probeGen=%d, want open/0 after probe failure", b.gb.state, b.gb.probeGen)
+	}
+
+	// 重开后新冷却期内不探测（刚过 5ms < 10ms）
+	clock.Advance(5 * time.Millisecond)
+	if _, _, err = b.AllowGen(ctx); err != nil && !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("AllowGen within new cooldown err = %v", err)
+	}
+	if b.gb.probeGen != 0 {
+		t.Fatalf("probeGen = %d, want 0 within new cooldown", b.gb.probeGen)
+	}
+
+	// 新冷却期满（重开起 10ms）：放行下一个探测（绑定 probeTimeout 需等 1m）
+	clock.Advance(5 * time.Millisecond)
+	p2, gen2, err := b.AllowGen(ctx)
+	if err != nil || gen2 != 2 {
+		t.Fatalf("second probe = (%v, %d), want grant gen 2 at new cooldown expiry", err, gen2)
+	}
+	p2.Pass()
+	if b.gb.state != stateClosed {
+		t.Fatalf("state = %v, want closed", b.gb.state)
+	}
+}
+
+// TestState_ProbeTimeoutStillBoundsHungProbe 探测失联时限仍由 probeTimeout 把守（#19）：
+// 冷却早已期满但探测位被挂死探测占住时不得补发新探测；probeTimeout 到期回收后放行替换探测。
+func TestState_ProbeTimeoutStillBoundsHungProbe(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithCooldown(10*time.Millisecond))
+	ctx := context.Background()
+
+	fillFailures(t, b)
+	clock.Advance(10 * time.Millisecond)
+	p1, gen1, err := b.AllowGen(ctx)
+	if err != nil || gen1 != 1 {
+		t.Fatalf("first probe = (%v, %d), want grant gen 1", err, gen1)
+	}
+	_ = p1 // 挂死：永不回报
+
+	// 冷却早已期满，但探测位被占：不得按冷却期补发新探测（失联回收只认 probeTimeout）
+	clock.Advance(10 * time.Millisecond)
+	_, _, _ = b.AllowGen(ctx)
+	if b.gb.probeGen != 1 {
+		t.Fatalf("probeGen = %d, want 1 (hung probe holds the slot; cooldown expiry must not grant replacement)", b.gb.probeGen)
+	}
+
+	// probeTimeout 到期（自 probeAt 起 1m）：回收挂死探测并放行替换探测
+	clock.Advance(time.Minute - 10*time.Millisecond)
+	p2, gen2, err := b.AllowGen(ctx)
+	if err != nil || gen2 != 2 {
+		t.Fatalf("replacement probe = (%v, %d), want grant gen 2 after hung-probe recycle", err, gen2)
+	}
+	p2.Pass()
+	if b.gb.state != stateClosed {
+		t.Fatalf("state = %v, want closed", b.gb.state)
+	}
+}
+
+// TestState_CooldownLongerThanProbeTimeout 冷却期长于探测时限（#19 动机场景方向）：
+// 业务冷却 2m 不被 probeTimeout=1m 缩短——1m 时不探测、2m 才探测；探测失败重开后
+// 冷却自重开起重新走满 2m。
+func TestState_CooldownLongerThanProbeTimeout(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithCooldown(2*time.Minute))
+	ctx := context.Background()
+
+	fillFailures(t, b)
+
+	// probeTimeout（1m）先到但冷却 2m 未满：不探测（v0.9.0 绑定行为会在 1m 放行）
+	clock.Advance(time.Minute)
+	if _, _, err := b.AllowGen(ctx); err != nil && !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("AllowGen before cooldown err = %v", err)
+	}
+	if b.gb.probeGen != 0 {
+		t.Fatalf("probeGen = %d, want 0 (cooldown 2m governs, probeTimeout must not shorten it)", b.gb.probeGen)
+	}
+
+	// 冷却期满：放行探测
+	clock.Advance(time.Minute)
+	p1, gen1, err := b.AllowGen(ctx)
+	if err != nil || gen1 != 1 {
+		t.Fatalf("first probe = (%v, %d), want grant gen 1 at 2m cooldown", err, gen1)
+	}
+	p1.Fail()
+
+	// 重开后冷却重新起算 2m：1m 处不探测
+	clock.Advance(time.Minute)
+	if _, _, err = b.AllowGen(ctx); err != nil && !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("AllowGen within reopened cooldown err = %v", err)
+	}
+	if b.gb.probeGen != 0 {
+		t.Fatalf("probeGen = %d, want 0 within reopened cooldown", b.gb.probeGen)
+	}
+
+	// 重开起 2m 期满：放行下一个探测
+	clock.Advance(time.Minute)
+	p2, gen2, err := b.AllowGen(ctx)
+	if err != nil || gen2 != 2 {
+		t.Fatalf("second probe = (%v, %d), want grant gen 2", err, gen2)
+	}
+	p2.Pass()
+}
+
+// TestWithConsecutiveFailures_Validation 计数型触发阈值校验：负值 panic；
+// 0 合法（= 关闭，缺省即 0）。
+func TestWithConsecutiveFailures_Validation(t *testing.T) {
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("WithConsecutiveFailures(-1) should panic")
+			}
+		}()
+		WithConsecutiveFailures(-1)
+	}()
+	WithConsecutiveFailures(0) // 不 panic 即通过
+}
+
+// TestState_ConsecutiveFailuresTrip 计数型触发（#20）：连续失败达阈值切入 open——
+// 窗口 total=3 < protection=5，速率型不可能先触发，证明触发来自计数型；
+// 进入 open 时计数归零、openSince 自触发失败起算。
+func TestState_ConsecutiveFailuresTrip(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithConsecutiveFailures(3))
+	ctx := context.Background()
+	boom := errors.New("boom")
+	fail := func() error { return boom }
+
+	if err := b.Do(ctx, fail); !errors.Is(err, boom) {
+		t.Fatalf("call 1 err = %v, want boom", err)
+	}
+	if err := b.Do(ctx, fail); !errors.Is(err, boom) {
+		t.Fatalf("call 2 err = %v, want boom", err)
+	}
+	if b.gb.state != stateClosed || b.gb.consecFails != 2 {
+		t.Fatalf("state=%v consecFails=%d, want closed/2 after 2 failures", b.gb.state, b.gb.consecFails)
+	}
+
+	if err := b.Do(ctx, fail); !errors.Is(err, boom) {
+		t.Fatalf("call 3 err = %v, want boom", err)
+	}
+	if b.gb.state != stateOpen {
+		t.Fatalf("state = %v, want open on 3rd consecutive failure", b.gb.state)
+	}
+	if b.gb.openSince != clock.Now().UnixNano() {
+		t.Fatalf("openSince = %d, want %d (trip failure time)", b.gb.openSince, clock.Now().UnixNano())
+	}
+	if b.gb.consecFails != 0 {
+		t.Fatalf("consecFails = %d, want 0 (reset on entering open)", b.gb.consecFails)
+	}
+	if b.gb.gen != 0 || b.gb.probeGen != 0 {
+		t.Fatalf("gen=%d probeGen=%d, want 0/0 (trip must not grant a probe)", b.gb.gen, b.gb.probeGen)
+	}
+	total, failure := sumBucket(b.gb)
+	if total != 3 || failure != 3 {
+		t.Fatalf("window total=%d failure=%d, want 3/3 (samples still recorded)", total, failure)
+	}
+}
+
+// TestState_ConsecutiveFailuresResetOnSuccess 连续失败计数清零：成功回报（SuccessGen/
+// 可接受的 Do）清零计数，重新累计后才可能触发。
+func TestState_ConsecutiveFailuresResetOnSuccess(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithConsecutiveFailures(3))
+	ctx := context.Background()
+	boom := errors.New("boom")
+
+	// FailureGen 路径同样计数
+	b.FailureGen(ctx, 0)
+	b.FailureGen(ctx, 0)
+	if b.gb.consecFails != 2 {
+		t.Fatalf("consecFails = %d, want 2 (FailureGen must count)", b.gb.consecFails)
+	}
+	b.SuccessGen(0)
+	if b.gb.consecFails != 0 || b.gb.state != stateClosed {
+		t.Fatalf("consecFails=%d state=%v, want 0/closed after success", b.gb.consecFails, b.gb.state)
+	}
+
+	// 重新累计：2 次失败不触发，第 3 次触发
+	fail := func() error { return boom }
+	_ = b.Do(ctx, fail)
+	_ = b.Do(ctx, fail)
+	if b.gb.state != stateClosed || b.gb.consecFails != 2 {
+		t.Fatalf("state=%v consecFails=%d, want closed/2", b.gb.state, b.gb.consecFails)
+	}
+	_ = b.Do(ctx, fail)
+	if b.gb.state != stateOpen {
+		t.Fatalf("state = %v, want open on 3rd consecutive failure", b.gb.state)
+	}
+}
+
+// TestState_ConsecutiveFailuresDisabledByDefault 缺省关闭（#20 兼容性）：
+// 不设 WithConsecutiveFailures 时连续失败 3 次不触发（窗口 total=3 < protection=5，
+// 速率型同样沉默——行为与 v0.9.0 一致）。
+func TestState_ConsecutiveFailuresDisabledByDefault(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute)
+	ctx := context.Background()
+	boom := errors.New("boom")
+
+	for i := 0; i < 3; i++ {
+		if err := b.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
+			t.Fatalf("call %d err = %v, want boom", i+1, err)
+		}
+	}
+	if b.gb.state != stateClosed {
+		t.Fatalf("state = %v, want closed (consecutive trigger is off by default)", b.gb.state)
+	}
+}
+
+// TestState_ConsecutiveTripProbeCycle 计数型触发的完整生命周期：触发 open → 冷却期满
+// 半开探测成功关闸（计数归零）→ 关闸后计数从零起算，需重新累计满阈值才再次触发。
+func TestState_ConsecutiveTripProbeCycle(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute, WithConsecutiveFailures(3))
+	ctx := context.Background()
+	boom := errors.New("boom")
+	fail := func() error { return boom }
+
+	for i := 0; i < 3; i++ {
+		_ = b.Do(ctx, fail)
+	}
+	if b.gb.state != stateOpen {
+		t.Fatalf("state = %v, want open after trip", b.gb.state)
+	}
+
+	// 冷却期满：半开探测（Do nil 即探测）成功关闸
+	clock.Advance(time.Minute)
+	if err := b.Do(ctx, func() error { return nil }); err != nil {
+		t.Fatalf("probe Do err = %v, want nil", err)
+	}
+	if b.gb.state != stateClosed || b.gb.consecFails != 0 {
+		t.Fatalf("state=%v consecFails=%d, want closed/0 after probe success", b.gb.state, b.gb.consecFails)
+	}
+
+	// 关闸后计数从零起算：2 次失败不重开
+	_ = b.Do(ctx, fail)
+	_ = b.Do(ctx, fail)
+	if b.gb.state != stateClosed {
+		t.Fatalf("state = %v, want closed (counter restarted from 0 after close)", b.gb.state)
+	}
+
+	// 第 3 次失败重新触发
+	_ = b.Do(ctx, fail)
+	if b.gb.state != stateOpen {
+		t.Fatalf("state = %v, want open on fresh 3rd consecutive failure", b.gb.state)
 	}
 }
 

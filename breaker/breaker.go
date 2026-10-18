@@ -88,6 +88,8 @@ type breakerConfig struct {
 	windowInterval time.Duration
 	forcePass      time.Duration
 	probeTimeout   time.Duration
+	cooldown       time.Duration
+	consecutive    int
 	clock          func() time.Time
 	onReject       func(name, reason string)
 }
@@ -133,6 +135,33 @@ func WithProbeTimeout(d time.Duration) BreakerOption {
 	}
 	return func(c *breakerConfig) {
 		c.probeTimeout = d
+	}
+}
+
+// WithCooldown 定制冷却期：open 态自进入/重开起冷却 d 后放行半开探测。
+// 冷却期（业务决策：熔断后多久才敢再试）与探测失联时限（调用侧在途时间上界，
+// WithProbeTimeout）是两个独立决策，缺省不设时回落 probeTimeout——保持既有绑定行为不变，
+// 典型量级差场景（冷却 5m + 在途上界 60s）可各自表达。d <= 0 时 panic。
+func WithCooldown(d time.Duration) BreakerOption {
+	if d <= 0 {
+		panic("breaker: cooldown must be greater than 0")
+	}
+	return func(c *breakerConfig) {
+		c.cooldown = d
+	}
+}
+
+// WithConsecutiveFailures 定制「连续失败 n 次即熔断」的计数型触发（缺省 0 = 关闭，
+// 保持纯速率型触发不变），与速率型并联：任一命中即切入 open。成功/可接受回报清零计数，
+// 进入 open / half-open 时归零，陈旧代回报不计数。速率型受 protection 保护阈值制约，
+// 低 QPS 下可能永不触发；计数型补足「最近有没有连挂」这一正交信号（对齐 Envoy
+// consecutive_5xx 语义）。n < 0 时 panic。
+func WithConsecutiveFailures(n int) BreakerOption {
+	if n < 0 {
+		panic("breaker: consecutive failures must not be negative")
+	}
+	return func(c *breakerConfig) {
+		c.consecutive = n
 	}
 }
 

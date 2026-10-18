@@ -2,6 +2,26 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.10.0] — 2026-10-18
+
+### feat(breaker)：冷却期独立配置 `WithCooldown`（[#19](https://github.com/oekit/concurrency/issues/19)）
+- 冷却期（自进入/重开 open 起多久放半开探测）与探测失联时限（挂起探测回收上限，
+  `WithProbeTimeout`）拆分为两个独立决策：前者是业务决策（熔断后多久才敢再试），
+  后者是调用侧在途时间上界——绑死只能取大值，要么恢复太慢、要么半开探测位被单次
+  长尾调用长期占住（典型量级差：业务冷却 5m vs LLM 在途上界 60s）
+- `WithCooldown(d)` 纯增量：缺省不设时回落 `probeTimeout`，**与 v0.9.0 行为逐位一致**；
+  挂死探测的失联回收始终由 probeTimeout 把守，不受冷却期影响。d <= 0 时 panic
+
+### feat(breaker)：计数型触发 `WithConsecutiveFailures`（[#20](https://github.com/oekit/concurrency/issues/20)）
+- 新增「连续失败 n 次即熔断」触发，与速率型**并联**（任一命中即切入 open）；
+  缺省 0 = 关闭，不设时**与 v0.9.0 行为逐位一致**
+- 速率型回答「最近整体错误率多高」，受 protection=5 保护阈值制约：低 QPS 下连续
+  连挂可能永不触发；计数型回答「最近有没有连挂」，补足低 QPS 触发与高成功率
+  偶发连挂两类信号（对齐 Envoy consecutive_5xx 语义）
+- 计数语义：非陈旧、非探测回报成功清零/失败 +1（FailureGen/panic 路径同样计数）；
+  进入 open（任一触发）/ half-open / 关闸时归零，陈旧代回报不计数；
+  触发不产生探测（gen/probeGen 不动），openSince 自触发失败起算。n < 0 时 panic
+
 ## [v0.9.0] — 2026-10-18
 
 ### feat(breaker)：显式三态状态机 + 代绑定——closed/open/half-open（[#17](https://github.com/oekit/concurrency/issues/17)）
