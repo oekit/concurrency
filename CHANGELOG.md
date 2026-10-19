@@ -12,6 +12,10 @@
   「新 key 原子登记（含护栏与回收）、已登记 key 热更」的完整语义
 - 测试：护栏/不覆盖/nil/回收/满拒绝/Replace 不判满 + 并发同 key 恰好一次成功
 
+## [v0.17.1] — 2026-10-19
+
+- build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.11.0 → v0.15.1
+
 ## [v0.16.0] — 2026-10-18
 
 ### feat(ratelimit)：`NewKeyedLimiterByFunc` —— 按 key 定配额（[#31](https://github.com/oekit/concurrency/issues/31)）
