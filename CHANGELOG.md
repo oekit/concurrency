@@ -1,3 +1,7 @@
+## [v0.17.1] — 2026-10-19
+
+- build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.11.0 → v0.15.1
+
 ## [v0.17.0] — 2026-10-18
 
 ### feat(ratelimit)：`KeyedLimiter.Create` 护栏内原子登记（[#33](https://github.com/oekit/concurrency/issues/33)）
