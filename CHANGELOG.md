@@ -1,3 +1,19 @@
+## [v0.18.0] — 2026-10-20
+
+### feat(retry)：`DoValue` 泛型伴生——带返回值的重试（[#48](https://github.com/oekit/concurrency/issues/48)）
+- `DoValue[T](ctx, cfg, fn func(attempt int) (T, error)) (T, error)`：`Do` 的泛型伴生，
+  供「重试并返回结果」的装饰器型调用方使用（此前这类调用方只能自己重写一遍
+  退避+抖动，且常丢掉 `DelayHint` 语义）。
+- **`Do` 改为委托给 `DoValue`**——退避序列、抖动比例、`MaxDelay` 封顶、`DelayHint`
+  优先、`Retryable` 门控、ctx 取消全部**只有一份实现**。这是本条的关键：若 `DoValue`
+  另写一份循环，等于在包内又造出「同一个仓里两份实现」，正是 #48 的根因。
+- 契约：成功返回 fn 的结果与 nil；失败返回**零值**与最后一次错误（失败那次的中间
+  结果不可用，返回它会诱导调用方误用未成功的产物）；退避等待期间 ctx 取消返回
+  零值与 `ctx.Err()`；`cfg.Retryable` 判为不可重试时立即返回。
+- 测试：首次成功 / 重试后取成功值 / 耗尽后返回零值 / 不可重试即停 /
+  `DelayHint` 优先 / ctx 取消 / 零值配置只跑一次 / **Do 与 DoValue 的尝试次数与
+  退避节奏一致性**（同源实现的证据）。
+
 ## [v0.17.1] — 2026-10-19
 
 - build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.11.0 → v0.15.1

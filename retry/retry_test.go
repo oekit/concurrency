@@ -287,3 +287,173 @@ func TestDo_JitterRatioStaysAboveBase(t *testing.T) {
 		t.Fatalf("2 waits with 20ms base should be >= 40ms, got %v", elapsed)
 	}
 }
+
+// ---- DoValue：#48「带返回值的重试」 ----
+
+func TestDoValueReturnsValueOnFirstSuccess(t *testing.T) {
+	calls := 0
+	got, err := DoValue(context.Background(), Config{Attempts: 3, Delay: time.Millisecond},
+		func(attempt int) (string, error) {
+			calls++
+			return "ok", nil
+		})
+	if err != nil {
+		t.Fatalf("期望成功，得到 %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("期望值 ok，实际 %q", got)
+	}
+	if calls != 1 {
+		t.Fatalf("期望调用 1 次，实际 %d", calls)
+	}
+}
+
+func TestDoValueRetriesAndReturnsSuccessfulValue(t *testing.T) {
+	calls := 0
+	got, err := DoValue(context.Background(), Config{Attempts: 3, Delay: time.Millisecond, Linear: true},
+		func(attempt int) (int, error) {
+			calls++
+			if attempt < 3 {
+				return 0, errors.New("busy")
+			}
+			return 42, nil
+		})
+	if err != nil {
+		t.Fatalf("期望成功，得到 %v", err)
+	}
+	if got != 42 {
+		t.Fatalf("期望值 42，实际 %d", got)
+	}
+	if calls != 3 {
+		t.Fatalf("期望调用 3 次，实际 %d", calls)
+	}
+}
+
+func TestDoValueReturnsZeroValueAfterExhausted(t *testing.T) {
+	sentinel := errors.New("boom")
+	got, err := DoValue(context.Background(), Config{Attempts: 2, Delay: time.Millisecond},
+		func(attempt int) (string, error) {
+			return "partial", sentinel
+		})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("期望错误 %v，实际 %v", sentinel, err)
+	}
+	// 失败时必须返回**零值**——失败那次的中间结果不可用，返回它会诱导调用方误用
+	if got != "" {
+		t.Fatalf("失败时应返回零值，实际 %q", got)
+	}
+}
+
+func TestDoValueStopsOnNonRetryable(t *testing.T) {
+	calls := 0
+	sentinel := errors.New("fatal")
+	got, err := DoValue(context.Background(), Config{Attempts: 5, Delay: time.Millisecond,
+		Retryable: func(err error) bool { return !errors.Is(err, sentinel) }},
+		func(attempt int) (int, error) {
+			calls++
+			return 7, sentinel
+		})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("期望错误 %v，实际 %v", sentinel, err)
+	}
+	if calls != 1 {
+		t.Fatalf("不可重试错误应只调用 1 次，实际 %d", calls)
+	}
+	if got != 0 {
+		t.Fatalf("失败时应返回零值，实际 %d", got)
+	}
+}
+
+func TestDoValueDelayHintTakesPrecedence(t *testing.T) {
+	// DelayHint 建议值应取代计算退避——这是 #48 点名的「自造那份往往只实现了
+	// 指数退避+抖动」而丢掉的语义。DoValue 必须与 Do 一致地采信它。
+	var hintUsed bool
+	start := time.Now()
+	_, err := DoValue(context.Background(), Config{
+		Attempts:  2,
+		Delay:     time.Hour, // 计算退避极长，若采信建议则应很快返回
+		MaxDelay:  time.Second,
+		DelayHint: func(error) (time.Duration, bool) { hintUsed = true; return 10 * time.Millisecond, true },
+		Retryable: func(error) bool { return true },
+	}, func(attempt int) (int, error) {
+		if attempt == 1 {
+			return 0, errors.New("rate limited")
+		}
+		return 1, nil
+	})
+	if err != nil {
+		t.Fatalf("期望成功，得到 %v", err)
+	}
+	if !hintUsed {
+		t.Fatalf("DelayHint 未被采信")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("未按 DelayHint 退避，耗时 %v", elapsed)
+	}
+}
+
+func TestDoValueContextCanceledDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	got, err := DoValue(ctx, Config{Attempts: 5, Delay: 200 * time.Millisecond},
+		func(attempt int) (string, error) {
+			return "", errors.New("busy")
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("期望 context.Canceled，实际 %v", err)
+	}
+	if got != "" {
+		t.Fatalf("取消时应返回零值，实际 %q", got)
+	}
+}
+
+func TestDoValueZeroConfigRunsOnce(t *testing.T) {
+	calls := 0
+	_, err := DoValue(context.Background(), Config{}, func(attempt int) (int, error) {
+		calls++
+		return 0, errors.New("x")
+	})
+	if err == nil {
+		t.Fatalf("期望错误")
+	}
+	if calls != 1 {
+		t.Fatalf("零值配置应只调用 1 次，实际 %d", calls)
+	}
+}
+
+// TestDoAndDoValueParity 是「同一份实现」的关键证据：Do 委托给 DoValue，
+// 因此两者的尝试次数、退避节奏、错误返回必须完全一致。
+func TestDoAndDoValueParity(t *testing.T) {
+	run := func(do func() error) (int, time.Duration, error) {
+		calls := 0
+		start := time.Now()
+		err := do()
+		return calls, time.Since(start), err
+	}
+	doCalls, doElapsed, doErr := run(func() error {
+		return Do(context.Background(), Config{Attempts: 3, Delay: 10 * time.Millisecond, Linear: true},
+			func(attempt int) error {
+				return errors.New("busy")
+			})
+	})
+	dvCalls, dvElapsed, dvErr := run(func() error {
+		_, err := DoValue(context.Background(), Config{Attempts: 3, Delay: 10 * time.Millisecond, Linear: true},
+			func(attempt int) (int, error) {
+				return 0, errors.New("busy")
+			})
+		return err
+	})
+	if doCalls != dvCalls {
+		t.Fatalf("尝试次数不一致：Do=%d DoValue=%d", doCalls, dvCalls)
+	}
+	if (doErr == nil) != (dvErr == nil) {
+		t.Fatalf("错误返回不一致：Do=%v DoValue=%v", doErr, dvErr)
+	}
+	// 退避节奏：线性退避 10ms + 20ms = 30ms，两侧都应 ≥ 25ms
+	if doElapsed < 25*time.Millisecond || dvElapsed < 25*time.Millisecond {
+		t.Fatalf("退避未生效：Do=%v DoValue=%v", doElapsed, dvElapsed)
+	}
+}
