@@ -48,7 +48,37 @@ type Config struct {
 
 // Do 执行 fn 至多 Attempts 次，失败按 Config 退避后重试；返回最后一次错误。
 // 退避等待感知 ctx 取消（nil 视为 context.Background()）。
+//
+// 实现上**委托给 DoValue**——退避序列、抖动比例、MaxDelay 封顶、DelayHint 优先、
+// Retryable 门控只有一份实现。若这里另写一份循环，任何退避规则的改动都要改两处，
+// 早晚会漏（#48 的根因正是「同一个仓里两份实现」）。
 func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
+	_, err := DoValue(ctx, cfg, func(attempt int) (struct{}, error) {
+		return struct{}{}, fn(attempt)
+	})
+	return err
+}
+
+// DoValue 是 Do 的泛型伴生：执行 fn 至多 Attempts 次，失败按 Config 退避后重试；
+// 成功返回 fn 的结果与 nil，失败返回**零值**与最后一次错误。
+//
+// 与 Do 同源——Do 即本函数的薄包装，因此「调用方自己重写一遍退避+抖动」导致的
+// 语义漂移（#48 的诉求）不会发生：DelayHint 优先、MaxDelay 封顶、比例抖动、
+// Retryable 门控、ctx 取消，全部只有一份实现。
+//
+// 典型用法（装饰器型：重试并返回结果）：
+//
+//	msg, err := retry.DoValue(ctx, cfg, func(attempt int) (*Message, error) {
+//		return callModel(ctx, prompt)
+//	})
+//
+// 契约：
+//   - err == nil 时返回值有效；err != nil 时返回**零值**——失败那次的中间结果
+//     不可用，返回它会诱导调用方误用未成功的产物。
+//   - 退避等待期间 ctx 取消 → 返回零值与 ctx.Err()。
+//   - cfg.Retryable 判为不可重试 → 立即返回零值与该错误。
+//   - cfg 零值 = 只执行一次（同 Do）。
+func DoValue[T any](ctx context.Context, cfg Config, fn func(attempt int) (T, error)) (T, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -56,17 +86,19 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 	if attempts < 1 {
 		attempts = 1
 	}
-	var err error
+	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err = fn(attempt)
+		v, err := fn(attempt)
 		if err == nil {
-			return nil
+			return v, nil
 		}
+		lastErr = err
 		if attempt == attempts {
 			break
 		}
 		if cfg.Retryable != nil && !cfg.Retryable(err) {
-			return err
+			var zero T
+			return zero, err
 		}
 		delay := backoff(cfg, attempt, err)
 		if delay <= 0 {
@@ -74,11 +106,13 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			var zero T
+			return zero, ctx.Err()
 		case <-time.After(delay):
 		}
 	}
-	return err
+	var zero T
+	return zero, lastErr
 }
 
 // backoff 计算第 attempt 次失败后的实际退避时长。
