@@ -1,3 +1,7 @@
+## [v0.19.0] — 2026-10-21
+
+- feat(syncx): 全局在飞闸门原语 Gate——现有原语都不覆盖「这个进程总共最多 N 个在飞」：KeyedGate 按 key 隔离（用固定 key 硬凑可行，但那是把多档位闸门原语当单档位闸门用，语义与命名都不对）、gopool.Pool 是弹性 worker 池（MaxIdleWorkers 是常驻 worker 上限而非并发上限，任务队列满则回退为独立 goroutine 直跑、任务永不因并发数被拒，与硬配额语义正好相反）、ratelimit.KeyedLimiter 是速率型令牌桶不是并发闸门；Gate 是单一全局配额：整个实例最多 cap 个在飞，超出的调用方排队等待（ctx 取消即返回 ctx.Err()），不会像弹性池那样被偷偷放行；与 KeyedGate API 同形（Acquire 返回 release 函数、ctx 感知、release 幂等）消费方迁移成本低，release 幂等用 atomic CAS 实现（重复调用只归还一次，否则会把名额多放出去、突破配额，并发调用也安全），cap<=0 为不限（Acquire 直通零开销），ctx 为 nil 时按 context.Background() 处理（#56）
+
 ## [v0.18.1] — 2026-10-21
 
 - fix(retry): 比例抖动在退避幅度为 0 时 panic（rand.Int63n(0)）——cfg.Delay 零值与 DelayHint 返回 0（服务端 Retry-After: 0）两条生产可达路径下，抖动幅度算成 0 触发 rand.Int63n(0) panic，库内 panic 逃逸到调用方；抖动幅度改为自己钳到 (0, n]，float64→int64 溢出与 delay+抖动溢出一并饱和封顶（#55）
