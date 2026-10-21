@@ -1,3 +1,7 @@
+## [v0.20.0] — 2026-10-22
+
+- feat(syncx): Gate 补非阻塞取名额 TryAcquire——满额即拒，不排队。Gate 原先是排队语义（Acquire 满额时等 ctx 取消才返回 ctx.Err()），而「重活并发上限用满就该立刻拒绝」这类闸门（图片全量解码、ffmpeg 子进程、模型推理）排队等待会把「内存被并发占满」换成「请求堆积在队列里」，是另一种 DoS 形态；现有原语都对不上——KeyedGate 按 key 隔离同样排队、gopool.Pool 的 MaxIdleWorkers 是常驻 worker 上限不是并发上限（任务队列满即回退为独立 goroutine 直跑，任务永不因并发数被拒）、ratelimit.KeyedLimiter 是速率型令牌桶不是并发闸门，消费方只能手搓裸 channel 信号量。新增 TryAcquire() (release func(), ok bool)：满额立即返回 ok=false，不等待、不占名额；ok=false 只有一个含义（名额已满，非阻塞取名额没有别的失败原因），调用方可据此回 429/503 而不是泛化成 500；release 幂等（与 Acquire 一致，重复调用只归还一次），用 atomic CAS 实现，并发调用安全；cap<=0 视为不限，恒返回 ok=true；与 Acquire 并存、命名区分（Acquire=排队、TryAcquire=即拒）
+
 ## [v0.19.0] — 2026-10-21
 
 - feat(syncx): 全局在飞闸门原语 Gate——现有原语都不覆盖「这个进程总共最多 N 个在飞」：KeyedGate 按 key 隔离（用固定 key 硬凑可行，但那是把多档位闸门原语当单档位闸门用，语义与命名都不对）、gopool.Pool 是弹性 worker 池（MaxIdleWorkers 是常驻 worker 上限而非并发上限，任务队列满则回退为独立 goroutine 直跑、任务永不因并发数被拒，与硬配额语义正好相反）、ratelimit.KeyedLimiter 是速率型令牌桶不是并发闸门；Gate 是单一全局配额：整个实例最多 cap 个在飞，超出的调用方排队等待（ctx 取消即返回 ctx.Err()），不会像弹性池那样被偷偷放行；与 KeyedGate API 同形（Acquire 返回 release 函数、ctx 感知、release 幂等）消费方迁移成本低，release 幂等用 atomic CAS 实现（重复调用只归还一次，否则会把名额多放出去、突破配额，并发调用也安全），cap<=0 为不限（Acquire 直通零开销），ctx 为 nil 时按 context.Background() 处理（#56）
