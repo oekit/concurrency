@@ -1,3 +1,7 @@
+## [v0.18.1] — 2026-10-21
+
+- fix(retry): 比例抖动在退避幅度为 0 时 panic（rand.Int63n(0)）——cfg.Delay 零值与 DelayHint 返回 0（服务端 Retry-After: 0）两条生产可达路径下，抖动幅度算成 0 触发 rand.Int63n(0) panic，库内 panic 逃逸到调用方；抖动幅度改为自己钳到 (0, n]，float64→int64 溢出与 delay+抖动溢出一并饱和封顶（#55）
+
 ## [v0.18.0] — 2026-10-20
 
 ### feat(retry)：`DoValue` 泛型伴生——带返回值的重试（[#48](https://github.com/oekit/concurrency/issues/48)）
