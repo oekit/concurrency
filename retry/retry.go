@@ -6,6 +6,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"math"
 	"math/rand"
 	"time"
 )
@@ -155,12 +156,53 @@ func backoff(cfg Config, attempt int, err error) time.Duration {
 	}
 
 	// 抖动：比例抖动（单边向上 [d, d*(1+ratio))）优先于固定 Jitter
+	//
+	// 抖动幅度必须自己钳到 (0, n]：rand.Int63n 的契约是 n > 0，传 0 或负数
+	// **直接 panic**。而「退避幅度为 0」是生产可达路径（#55）——
+	// cfg.Delay=0（固定/线性/指数三种模式都是 0）、DelayHint 返回 0
+	// （服务端 Retry-After: 0）；另有 float64 → int64 溢出成负数的那条路。
 	if cfg.JitterRatio > 0 {
-		delay += time.Duration(rand.Int63n(int64(float64(delay) * cfg.JitterRatio)))
+		delay = addJitter(delay, jitterSpanRatio(delay, cfg.JitterRatio))
 	} else if cfg.Jitter > 0 {
-		delay += time.Duration(rand.Int63n(int64(cfg.Jitter)))
+		delay = addJitter(delay, int64(cfg.Jitter))
 	}
 	return delay
+}
+
+// jitterSpanRatio 算比例抖动的幅度 int64(delay*ratio)，钳到 [0, math.MaxInt64]。
+//
+// float64 → int64 的溢出在 Go 里是实现定义的（amd64 上得到负数），
+// 而 rand.Int63n(负数) 同样 panic——一并钳掉。
+//
+// 幅度算出来为 0（delay*ratio < 1ns，如 1ns×0.5）时返回 0 = 不抖动，
+// 不抬成 1ns——那会破坏「按比例」的口径（1ns 的退避不该被抖成 2ns）。
+//
+// 不用 pkg/mathx.UpwardDuration 的原因：它不承诺饱和（d 接近 MaxInt64 时
+// float64 往返会溢出成负延迟），且本包承诺 stdlib-only（见包注释）。
+func jitterSpanRatio(delay time.Duration, ratio float64) int64 {
+	f := float64(delay) * ratio
+	if !(f > 0) { // 0 / 负数 / NaN
+		return 0
+	}
+	if f >= float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(f)
+}
+
+// addJitter 给 delay 加一段 [0, n) 的随机抖动，**饱和**而非回绕成负数。
+//
+// 「delay + 抖动」本身也会溢出：delay 已接近 MaxInt64 时相加得到负 duration
+// → time.After(负数) 立刻返回 → 退避形同虚设（与 pkg/httpjson#45 同源的
+// 失效形态：负延迟既绕开封顶又让该轮零等待）。
+func addJitter(delay time.Duration, n int64) time.Duration {
+	if n <= 0 {
+		return delay
+	}
+	if delay > time.Duration(math.MaxInt64)-time.Duration(n-1) {
+		return time.Duration(math.MaxInt64)
+	}
+	return delay + time.Duration(rand.Int63n(n))
 }
 
 // Poll 按 interval 间隔轮询 cond 直到返回 done 或超过 timeout：cond 返回错误
