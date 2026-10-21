@@ -3,6 +3,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -455,5 +456,88 @@ func TestDoAndDoValueParity(t *testing.T) {
 	// 退避节奏：线性退避 10ms + 20ms = 30ms，两侧都应 ≥ 25ms
 	if doElapsed < 25*time.Millisecond || dvElapsed < 25*time.Millisecond {
 		t.Fatalf("退避未生效：Do=%v DoValue=%v", doElapsed, dvElapsed)
+	}
+}
+
+// ---- #55：比例抖动在退避幅度为 0 时 panic ----
+
+// TestBackoff_ZeroAmplitudeJitterDoesNotPanic 回归 #55：抖动幅度算成 0 时
+// rand.Int63n(0) 直接 panic（库内 panic 逃逸到调用方，HTTP handler 被打断）。
+// 覆盖 issue 列出的全部生产可达路径 + 一条溢出路径。
+func TestBackoff_ZeroAmplitudeJitterDoesNotPanic(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{"Delay 零值（未设）+ 比例抖动", Config{Attempts: 2, JitterRatio: 0.2}},
+		{"Delay=0 + 比例抖动", Config{Attempts: 2, Delay: 0, JitterRatio: 0.2}},
+		{"Delay=0 + 比例抖动 + 指数", Config{Attempts: 2, Delay: 0, JitterRatio: 0.2, Exponential: true}},
+		{"Delay=0 + 比例抖动 + 线性", Config{Attempts: 2, Delay: 0, JitterRatio: 0.2, Linear: true}},
+		{"Delay=1ns + 比例抖动（乘积截断为 0）", Config{Attempts: 2, Delay: time.Nanosecond, JitterRatio: 0.5}},
+		{"Delay=0 + 固定抖动", Config{Attempts: 2, Delay: 0, Jitter: time.Millisecond}},
+		{"DelayHint 返回 0 + 比例抖动", Config{Attempts: 2, Delay: time.Second, JitterRatio: 0.5,
+			DelayHint: func(error) (time.Duration, bool) { return 0, true }}},
+		{"幅度溢出 int64 + 比例抖动", Config{Attempts: 2, Delay: time.Duration(math.MaxInt64), JitterRatio: 1.0}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := backoff(c.cfg, 1, errors.New("busy"))
+			if d < 0 {
+				t.Fatalf("退避不应为负：%v", d)
+			}
+		})
+	}
+}
+
+// TestDo_ZeroAmplitudeJitterDoesNotPanic 从公开 API 走一遍：panic 必须被
+// 彻底消除（retry.Do 自身不做 recover，panic 会逃逸到调用方）。
+func TestDo_ZeroAmplitudeJitterDoesNotPanic(t *testing.T) {
+	cfg := Config{Attempts: 3, JitterRatio: 0.2} // 注意：Delay 未设 = 0
+	err := Do(context.Background(), cfg, func(int) error { return errors.New("x") })
+	if err == nil {
+		t.Fatal("应返回最后一次错误")
+	}
+}
+
+// TestBackoff_JitterStillAddsNoise 钉住「钳制不能把抖动整体掐掉」：
+// 幅度正常的比例抖动必须真的加噪声，且仍在 [d, d*(1+ratio)] 内。
+func TestBackoff_JitterStillAddsNoise(t *testing.T) {
+	cfg := Config{Delay: 100 * time.Millisecond, JitterRatio: 0.5}
+	seen := false
+	for i := 0; i < 50; i++ {
+		d := backoff(cfg, 1, errors.New("busy"))
+		if d < cfg.Delay || d > cfg.Delay*3/2 {
+			t.Fatalf("退避越界：%v 不在 [%v, %v]", d, cfg.Delay, cfg.Delay*3/2)
+		}
+		if d != cfg.Delay {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatal("抖动未生效：50 次采样全部等于基准退避")
+	}
+}
+
+// TestBackoff_FixedJitterStaysInRange 固定抖动的幅度口径不变：仍在 [d, d+Jitter)。
+func TestBackoff_FixedJitterStaysInRange(t *testing.T) {
+	cfg := Config{Delay: 100 * time.Millisecond, Jitter: 20 * time.Millisecond}
+	for i := 0; i < 50; i++ {
+		d := backoff(cfg, 1, errors.New("busy"))
+		if d < cfg.Delay || d > cfg.Delay+cfg.Jitter {
+			t.Fatalf("退避越界：%v 不在 [%v, %v]", d, cfg.Delay, cfg.Delay+cfg.Jitter)
+		}
+	}
+}
+
+// TestBackoff_SaturatesInsteadOfOverflowing 退避 + 抖动不得回绕成负数：
+// 负 duration 传给 time.After 会立刻返回，退避形同虚设。
+func TestBackoff_SaturatesInsteadOfOverflowing(t *testing.T) {
+	cfg := Config{Delay: time.Duration(math.MaxInt64), Jitter: time.Duration(math.MaxInt64)}
+	d := backoff(cfg, 1, errors.New("busy"))
+	if d < 0 {
+		t.Fatalf("退避不应为负：%v", d)
+	}
+	if d != time.Duration(math.MaxInt64) {
+		t.Fatalf("退避应饱和到 MaxInt64：%v", d)
 	}
 }
