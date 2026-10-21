@@ -46,7 +46,7 @@ func TestGate_TryAcquire_ReleaseFreesSlot(t *testing.T) {
 	if !ok {
 		t.Fatalf("第 1 次 TryAcquire 应成功")
 	}
-	if _, ok := g.TryAcquire(); ok {
+	if _, got := g.TryAcquire(); got {
 		t.Fatalf("满额时 TryAcquire 应返回 ok=false")
 	}
 
@@ -86,7 +86,7 @@ func TestGate_TryAcquire_ReleaseIdempotent(t *testing.T) {
 	if !ok {
 		t.Fatalf("归还后 TryAcquire 应成功")
 	}
-	if _, ok := g.TryAcquire(); ok {
+	if _, got := g.TryAcquire(); got {
 		t.Fatalf("名额被多放了：TryAcquire 应返回 ok=false")
 	}
 	rel2()
@@ -167,7 +167,7 @@ func TestGate_TryAcquire_VsAcquire(t *testing.T) {
 
 	// ……而 TryAcquire 立刻拒，不等。
 	start := time.Now()
-	if _, ok := g.TryAcquire(); ok {
+	if _, got := g.TryAcquire(); got {
 		t.Fatalf("满额时 TryAcquire 应返回 ok=false")
 	}
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
