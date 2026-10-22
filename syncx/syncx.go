@@ -41,19 +41,29 @@ func (g *KeyedGate) slot(key string) chan struct{} {
 
 // Acquire 取一个键下在飞名额；ctx 取消（排队等待中）返回 ctx.Err()。
 // 返回的 release 归还名额，幂等可重复调用。
+//
+// 幂等标记用 atomic.Bool + CompareAndSwap（同包 Gate 的做法）：裸 bool 在
+// 两个 goroutine 并发调用同一个 release 时是 data race，且两者都可能读到
+// "未归还" 而各执行一次 <-ch —— 名额被归还两次，该 key 的在飞数突破 cap
+// 上限（cap=1 时可同时有 2 个在飞）。按 key 分档位的闸门正是最容易被并发
+// 释放的场景（超时清理路径与正常返回路径同时释放同一个 key）。
+//
+// ctx 为 nil 时按 context.Background() 处理（永不取消），与 Gate 一致。
 func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
 	if g.cap <= 0 {
 		return func() {}, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ch := g.slot(key)
 	select {
 	case ch <- struct{}{}:
-		released := false
+		var released atomic.Bool
 		return func() {
-			if released {
+			if !released.CompareAndSwap(false, true) {
 				return
 			}
-			released = true
 			<-ch
 		}, nil
 	case <-ctx.Done():
