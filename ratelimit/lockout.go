@@ -25,6 +25,8 @@ type LockoutConfig struct {
 	// （提前驱逐等于提前解锁）；窗口内仍有有效失败样本的条目同样免于回收
 	// （#83：空闲回收线不得短于失败窗口，否则滑窗语义被截短，阈值可被
 	// 「间隔 > IdleTTL」的分布式攻击绕过）；回收不改变锁定到期语义。
+	// 小于 2ns 的值不会让后台清扫 panic——清扫节奏有 1s 下限（见 cleanupInterval），
+	// 空闲判定仍按本值走。
 	IdleTTL time.Duration
 	// Now 为时钟注入（nil = time.Now；与 budget.WithClock 同款，
 	// 假时钟测试完全确定）。清扫节奏仍走真实 ticker，到期/空闲判定一律用本时钟。
@@ -219,7 +221,7 @@ func (l *LockoutOf[K]) Close() {
 // （假时钟下真实 ticker 的时间戳不可比）。锁定中的条目免于回收，
 // 窗口内仍有有效失败样本的条目同样免于回收（#83：空闲回收线不得短于失败窗口）。
 func (l *LockoutOf[K]) cleanup() {
-	ticker := time.NewTicker(l.ttl / 2)
+	ticker := time.NewTicker(cleanupInterval(l.ttl))
 	defer ticker.Stop()
 
 	for {
