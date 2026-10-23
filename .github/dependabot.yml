@@ -6,6 +6,24 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # 地板约束：基础层地板硬钉 1.24（口径以 matrix-tools/matrix.py 的
+    # GO_FLOOR_BASE_LAYER / GO_FLOOR_BASE_MAX 为唯一事实源；门禁 audit.py 的
+    # check_go_floor_pairing 会把「基础层地板 > 1.24」判红，因为基础包地板抬高
+    # 会传染全部下游）。
+    # golang.org/x/time 从 v0.15.0 起要求 go>=1.25（v0.16.0 要求 go 1.26），
+    # 而 Go 要求主模块的 go 指令不得低于任何依赖 ⇒ 1.24 地板下**无可采纳版本**。
+    # 实测 2026-10-21：dependabot weekly 的 all-deps PR #61 就因此必然红
+    # （go: go.mod requires go >= 1.26.0 (running go 1.24.13; GOTOOLCHAIN=local)），
+    # 只能人工关单留档——而依据只躺在已关闭 PR 的评论里，下周它还会再来。
+    # 这里显式 ignore 掉越界版本：bot 不再产出按当前口径必然失败的升级，
+    # 其余可兼容依赖照常升级。
+    # 边界取 v0.15.0（首个要求 go>=1.25 的版本），不是 v0.16.0——
+    # v0.15.0 同样超地板，写 ">= 0.16.0" 会让 bot 继续提议 v0.15.0。
+    # 解锁条件：本仓地板抬到 1.25+ 时删除本条 ignore，并同步 CI 的 go-version
+    # （两者必须成对，否则最低支持版本从未被验证）。
+    ignore:
+      - dependency-name: "golang.org/x/time"
+        versions: [">= 0.15.0"]
     groups:
       all-deps:
         patterns:
