@@ -22,7 +22,9 @@ type LockoutConfig struct {
 	// 不因内部容量问题拒绝认证尝试（那会放大成对合法用户的拒绝服务）。
 	MaxEntries int
 	// IdleTTL 为空闲回收周期；<=0 用默认 1 分钟。锁定中的条目免于回收
-	// （提前驱逐等于提前解锁）；回收以空闲计时为准，不改变锁定到期语义。
+	// （提前驱逐等于提前解锁）；窗口内仍有有效失败样本的条目同样免于回收
+	// （#83：空闲回收线不得短于失败窗口，否则滑窗语义被截短，阈值可被
+	// 「间隔 > IdleTTL」的分布式攻击绕过）；回收不改变锁定到期语义。
 	IdleTTL time.Duration
 	// Now 为时钟注入（nil = time.Now；与 budget.WithClock 同款，
 	// 假时钟测试完全确定）。清扫节奏仍走真实 ticker，到期/空闲判定一律用本时钟。
@@ -47,7 +49,9 @@ type lockoutEntry struct {
 //     首个新失败即重新锁定（重复违规者语义，对齐 fail2ban findtime 行为）；
 //   - 锁定期间新失败只入窗口记账（封顶 Threshold 个），不延长当前锁定；
 //   - 容量护栏 fail-open：表满且 key 未登记时丢弃失败样本并计入 OverCapHits；
-//   - 锁定中的条目免于空闲回收（提前驱逐等于提前解锁）。
+//   - 锁定中的条目免于空闲回收（提前驱逐等于提前解锁）；窗口内仍有有效失败
+//     样本的条目同样免于回收——空闲回收只清理「已无窗口内样本」的条目，
+//     否则窗口语义会被 IdleTTL 截短（#83）。
 //
 // 典型用法（登录防爆破）：
 //
@@ -212,7 +216,8 @@ func (l *LockoutOf[K]) Close() {
 }
 
 // cleanup 定期回收空闲条目；ticker 只定节奏，到期/空闲判定一律用注入时钟
-// （假时钟下真实 ticker 的时间戳不可比）。锁定中的条目免于回收。
+// （假时钟下真实 ticker 的时间戳不可比）。锁定中的条目免于回收，
+// 窗口内仍有有效失败样本的条目同样免于回收（#83：空闲回收线不得短于失败窗口）。
 func (l *LockoutOf[K]) cleanup() {
 	ticker := time.NewTicker(l.ttl / 2)
 	defer ticker.Stop()
@@ -225,7 +230,7 @@ func (l *LockoutOf[K]) cleanup() {
 			now := l.now()
 			l.mu.Lock()
 			for key, e := range l.entries {
-				if now.Sub(e.lastSeen) > l.ttl && lockedRemain(e, now) <= 0 {
+				if l.reclaimable(e, now) {
 					delete(l.entries, key)
 				}
 			}
@@ -241,11 +246,39 @@ func (l *LockoutOf[K]) allowNew(now time.Time) bool {
 		return true
 	}
 	for key, e := range l.entries {
-		if now.Sub(e.lastSeen) > l.ttl && lockedRemain(e, now) <= 0 {
+		if l.reclaimable(e, now) {
 			delete(l.entries, key)
 		}
 	}
 	return len(l.entries) < l.maxEntries
+}
+
+// reclaimable 判定条目是否可被空闲回收。三条约束：
+//  1. 锁定中的条目免于回收——提前驱逐等于提前解锁；
+//  2. **窗口内仍有有效失败样本的条目免于回收**（#83）——空闲回收线若短于失败
+//     窗口，会把「窗口内失败事件按 key 累计」的滑窗语义截短成「空闲不超过
+//     IdleTTL 的窗口」：攻击者只要把每次失败间隔拉到 IdleTTL 之上，失败计数
+//     永远归零，防爆破阈值形同虚设；
+//  3. 回收还要求空闲确实超 IdleTTL——IdleTTL 保留「样本全部老化后仍留一段
+//     宽限期」的原语义（纯内存回收，不改变锁定到期语义）。
+func (l *LockoutOf[K]) reclaimable(e *lockoutEntry, now time.Time) bool {
+	if lockedRemain(e, now) > 0 {
+		return false
+	}
+	if l.hasWindowSample(e, now) {
+		return false
+	}
+	return now.Sub(e.lastSeen) > l.ttl
+}
+
+// hasWindowSample 判定条目是否仍有落在 (now-Window, now] 内的失败样本。
+// 样本时间递增（prune 保序），故只看最后一个即可。
+func (l *LockoutOf[K]) hasWindowSample(e *lockoutEntry, now time.Time) bool {
+	if len(e.fails) == 0 {
+		return false
+	}
+	cut := now.Add(-l.window)
+	return e.fails[len(e.fails)-1].After(cut)
 }
 
 // prune 淘汰窗口外的失败样本（滑动窗口；样本时间递增，就地压缩保序）。

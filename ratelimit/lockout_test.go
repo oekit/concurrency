@@ -264,14 +264,76 @@ func TestLockout_LockedEntrySurvivesIdleSweep(t *testing.T) {
 		t.Fatalf("overCapHits = %d, want 1", lo.OverCapHits())
 	}
 
-	// 锁定到期且空闲超时：清扫回收，容量腾出，新 key 正常登记（阈值 1 → 登记即锁定）
-	clock.Advance(time.Minute + 100*time.Millisecond)
+	// 锁定到期 **且样本老化出窗口**：条目既无锁定、窗口内也无有效样本 ⇒
+	// 清扫回收，容量腾出，新 key 正常登记（阈值 1 → 登记即锁定）。
+	// 注意：窗口内仍有有效样本的条目不再被空闲回收（#83），故这里必须把
+	// 时钟推过整个窗口（10m）才能观察到回收。
+	clock.Advance(11 * time.Minute)
 	time.Sleep(80 * time.Millisecond)
 	if locked, _ := lo.RecordFailure("b"); !locked {
 		t.Fatal("b must register after reclaim (threshold=1 locks it immediately)")
 	}
 	if lo.OverCapHits() != 1 {
 		t.Fatalf("overCapHits = %d, want 1 (b must register after reclaim, not drop)", lo.OverCapHits())
+	}
+}
+
+// TestLockout_WindowSurvivesIdleReclaim 回归测试（#83）：失败样本只要仍落在
+// (now-Window, now] 内，空闲回收就不得把条目连同样本一起丢掉。
+//
+// 否则「窗口内失败事件按 key 累计（滑动窗口，半开区间 (now-Window, now]）」的
+// 语义被 IdleTTL 截短为「空闲不超过 IdleTTL 的窗口」——攻击者只要把每次失败
+// 间隔拉到 IdleTTL 之上，失败计数永远归零，防爆破阈值形同虚设（这正是该原语
+// 要防的攻击形态）。
+//
+// 复现手法与 issue 一致：失败间隔 61s（远超 IdleTTL），全部落在 10m 窗口内。
+// IdleTTL 取 200ms 而非缺省 1m，是为了让后台清扫的 ticker（IdleTTL/2 = 100ms）
+// 在测试时限内真的跑起来——空闲判定用注入时钟，与 ticker 的真实节奏无关。
+func TestLockout_WindowSurvivesIdleReclaim(t *testing.T) {
+	clock := &fakeLockClock{t: lockoutStart}
+	lo := newTestLockout(clock, func(c *LockoutConfig) {
+		c.Threshold = 5
+		c.LockDuration = time.Minute
+		c.IdleTTL = 200 * time.Millisecond
+	})
+	defer lo.Close()
+
+	for i := 1; i <= 5; i++ {
+		if i > 1 {
+			// 间隔攻击形态：每次失败间隔 61s > IdleTTL，但仍在 10m 窗口内。
+			clock.Advance(61 * time.Second)
+			time.Sleep(250 * time.Millisecond) // 等清扫 ticker（100ms）真跑几轮
+		}
+		locked, _ := lo.RecordFailure("alice")
+		if i < 5 && locked {
+			t.Fatalf("failure %d locked too early (want lock at 5th)", i)
+		}
+		if i == 5 && !locked {
+			t.Fatal("5 failures inside the 10m window must lock — window semantics truncated by idle reclaim")
+		}
+	}
+}
+
+// TestLockout_AgedOutSampleStillReclaimed 回归测试（#83 配套）：窗口内样本全部
+// 老化后，条目仍应被空闲回收（回收判据不能退化成「永不回收」——否则表只增不减，
+// 容量护栏会被死条目占满）。
+func TestLockout_AgedOutSampleStillReclaimed(t *testing.T) {
+	clock := &fakeLockClock{t: lockoutStart}
+	lo := newTestLockout(clock, func(c *LockoutConfig) {
+		c.Threshold = 5
+		c.IdleTTL = 200 * time.Millisecond
+	})
+	defer lo.Close()
+
+	if locked, _ := lo.RecordFailure("alice"); locked {
+		t.Fatal("failure 1 must not lock")
+	}
+	// 推过整个窗口（10m）：样本老化出窗口，条目可回收。
+	clock.Advance(11 * time.Minute)
+	time.Sleep(250 * time.Millisecond)
+
+	if lo.Len() != 0 {
+		t.Fatalf("len = %d, want 0 (entry with no in-window sample must be reclaimed)", lo.Len())
 	}
 }
 
