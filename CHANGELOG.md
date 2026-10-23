@@ -1,3 +1,7 @@
+## [v0.20.4] — 2026-10-24
+
+- fix(ratelimit): 后台清扫 ticker 间隔下限兜底——ttl/2 在 ttl<2ns 时整除为 0，time.NewTicker(0) panic 被 async.GoSafe 收编后进程不崩但清扫协程当场死亡，空闲条目永不回收（limiters/entries 两张 map 随 key 基数无界增长）、WithMaxEntries 容量护栏永远等不到回收腾位；KeyedLimiterOf 与 LockoutOf 的 cleanup 统一走 cleanupInterval：间隔整除为 0 兜 1s（对齐 pkg/cache 的 LocalCache.cleanup 口径）、ns 级过小间隔兜 1ms 防 ticker 热循环烧核，ttl 语义不变（过期判定仍按原 ttl 走）（#84）
+
 ## [v0.20.3] — 2026-10-24
 
 - fix(ratelimit): Lockout 空闲回收不再截短 Window 滑窗语义——回收判据改为「无窗口内有效样本且空闲超 IdleTTL」，窗口内失败样本不再被连同条目丢弃（间隔攻击绕过阈值）；cleanup 与容量护栏回收共用同一判据，与 Redis 孪生实现 redisx/distlock.Lockout 的窗口裁剪口径对齐（#83）
