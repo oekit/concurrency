@@ -1,3 +1,7 @@
+## [v0.20.2] — 2026-10-23
+
+- build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.15.1 → v0.22.0（#79）
+
 ## [v0.20.1] — 2026-10-22
 
 - fix(syncx): KeyedGate 的 release 幂等标记改用 atomic CAS——裸 bool 在并发释放下竞态并突破 cap 上限（#70）
