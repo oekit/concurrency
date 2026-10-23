@@ -31,6 +31,36 @@ const defaultTTL = time.Minute
 // defaultOverCapRetryAfter 是容量护栏拒绝时建议的 Retry-After。
 const defaultOverCapRetryAfter = time.Minute
 
+// minCleanupInterval 是后台清扫 ticker 的间隔下限（panic 兜底档，对齐 pkg/cache
+// 的 LocalCache.cleanup 口径）。
+const minCleanupInterval = time.Second
+
+// minTickInterval 是 ticker 的最小正间隔（1ms）——比 minCleanupInterval 更细一档：
+// ttl 落在 ns 级时 ttl/2 会算出 1ns 这样的间隔，ticker 会以 GHz 频率空转烧核。
+const minTickInterval = time.Millisecond
+
+// cleanupInterval 返回后台清扫的 ticker 间隔（KeyedLimiterOf 与 LockoutOf 共用）。
+//
+// ttl/2 可能整除为 0（ttl=1ns 时 ttl/2=0），而 time.NewTicker(0) 直接 panic——
+// panic 被 async.GoSafe 收编后进程不崩，但**后台清扫协程当场死亡**：
+// 空闲条目永远不被回收（limiters / entries 两张 map 随 key 基数无界增长），
+// 容量护栏 WithMaxEntries 也永远等不到回收腾位（表满后新 key 全被拒）。
+//
+// 下限兜底分两档：间隔整除为 0 ⇒ 1s（对齐 pkg/cache）；间隔为正但过小（ns 级）
+// ⇒ 1ms（避免热循环烧核）。
+//
+// **ttl 语义不变**：过期/空闲判定仍按调用方给的 ttl 走，被兜底的只是清扫节奏。
+func cleanupInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 2
+	if interval <= 0 {
+		return minCleanupInterval
+	}
+	if interval < minTickInterval {
+		return minTickInterval
+	}
+	return interval
+}
+
 type limiterEntry struct {
 	limiter  Limiter
 	lastSeen atomic.Int64 // UnixNano，无锁更新
@@ -47,6 +77,9 @@ type keyedConfig[K comparable] struct {
 
 // WithIdleTTL 设置空闲回收周期；表满时也先触发回收再判满。
 // <=0 使用默认 1 分钟。
+//
+// 小于 2ns 的值不会让后台清扫 panic——清扫节奏有 1s 下限（见 cleanupInterval），
+// 过期判定仍按本值走。
 func WithIdleTTL[K comparable](ttl time.Duration) KeyedOption[K] {
 	return func(c *keyedConfig[K]) { c.ttl = ttl }
 }
@@ -305,7 +338,7 @@ func (kl *KeyedLimiterOf[K]) Close() {
 
 // cleanup 定期清理过期的限流器。
 func (kl *KeyedLimiterOf[K]) cleanup() {
-	ticker := time.NewTicker(kl.ttl / 2)
+	ticker := time.NewTicker(cleanupInterval(kl.ttl))
 	defer ticker.Stop()
 
 	for {
