@@ -1,3 +1,7 @@
+## [v0.20.3] — 2026-10-24
+
+- fix(ratelimit): Lockout 空闲回收不再截短 Window 滑窗语义——回收判据改为「无窗口内有效样本且空闲超 IdleTTL」，窗口内失败样本不再被连同条目丢弃（间隔攻击绕过阈值）；cleanup 与容量护栏回收共用同一判据，与 Redis 孪生实现 redisx/distlock.Lockout 的窗口裁剪口径对齐（#83）
+
 ## [v0.20.2] — 2026-10-23
 
 - build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.15.1 → v0.22.0（#79）
