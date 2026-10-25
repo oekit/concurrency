@@ -1,3 +1,7 @@
+## [v0.22.0] — 2026-10-25
+
+- feat(fanout): 新增限并发 + 结果保序 + 错误汇总的批量执行原语 fanout.Map——item 口径、失败项带下标汇总（#97）
+
 ## [v0.21.0] — 2026-10-25
 
 - **BREAKING**: ratelimit.Limiter 接口启用 Wait(ctx context.Context) error——此前该行一直处于注释状态：接口上没有阻塞等待这一档，服务端限流中间件要回 X-RateLimit-Remaining 这类响应头拿不到实时令牌数、出站 HTTP 客户端节流要「等到有配额再发请求」也没有对应形态，消费方要么在库外自建第二份令牌桶实现（重复实现 + 各自漂移，上游的时钟注入、Retry-After 探测语义同步不过去），要么退化成「不用上游原语」；启用后**自行实现 Limiter 的调用方需补上 Wait 方法**（接口多了一个方法，旧实现不再满足）——0.x 阶段 minor 允许 breaking；仓内两个实现（TokenBucket / SlidingWindow）均已补齐，全矩阵扫描确认无第三个实现者（middleware 用的是 *TokenBucket）（#92）
