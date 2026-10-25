@@ -71,6 +71,52 @@ func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
 	}
 }
 
+// TryAcquire 尝试取一个键下在飞名额，**不等待**：该 key 档位已满时**立即**返回
+// ok=false（不排队、不占名额）。
+//
+// 与 Acquire 的区别是**排队 vs 即拒**，两者并存、命名区分（同包 Gate 的同款分档）：
+//
+//   - Acquire(ctx, key)：该 key 满额时**排队**等名额，等 ctx 取消才返回 ctx.Err()；
+//   - TryAcquire(key)：该 key 满额时**立刻拒**，一个名都不占。
+//
+// 什么时候要即拒：防重入场景的常见形态——同一个 key 正在处理中就**立刻拒绝**
+// （回 409/429），而不是排队等它做完。此前消费方只能手搓 map[K]*sync.Mutex +
+// TryLock + sync.Once 兜底幂等归还：每仓各写一遍，once 包装又容易漏（漏了就是
+// 双重解锁 panic）。KeyedGate.Acquire 是排队语义，套不上——要「忙即拒」就得上
+// 调用方自己再套一层 goroutine + select，绕开了原语的语义。
+//
+// ok=false 只有一个含义：**该 key 档位已满**（非阻塞取名额没有别的失败原因），
+// 调用方可据此返回 409 / 429，而不是泛化成 500。
+//
+// 返回的 release 归还名额，幂等可重复调用（与 Acquire 一致，atomic CAS 实现）。
+// cap<=0（不限）时恒返回 ok=true——不限额的闸门没有「满」这回事。
+//
+// 用法:
+//
+//	release, ok := gate.TryAcquire("account:42:sync")
+//	if !ok {
+//	    return errBusy // 409 / 429
+//	}
+//	defer release()
+func (g *KeyedGate) TryAcquire(key string) (func(), bool) {
+	if g.cap <= 0 {
+		return func() {}, true
+	}
+	ch := g.slot(key)
+	select {
+	case ch <- struct{}{}:
+		var released atomic.Bool
+		return func() {
+			if !released.CompareAndSwap(false, true) {
+				return
+			}
+			<-ch
+		}, true
+	default:
+		return nil, false
+	}
+}
+
 // FanIn 并行执行 fn(0..n-1)，各 goroutine 只写自己的 results[i] 槽位（免锁），
 // 全部完成后按 index 序返回。fn 经 async.GoSafe 收编（AGENTS.md「禁裸 go func」，
 // v0.2.1 前为裸 go、fn panic 会打死宿主进程）：单个 fn panic 被恢复并走全局
