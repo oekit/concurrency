@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -123,4 +124,45 @@ func (sw *SlidingWindow) Reset() {
 	defer sw.mu.Unlock()
 
 	sw.timestamps = nil
+}
+
+// Wait 阻塞等待直到窗口内腾出空位（或 ctx 取消）。
+//
+// 与 Allow 的区别是**丢弃 vs 等待**：窗口满时 Allow 立刻拒，Wait 等到最早的
+// 记录滑出窗口（腾出空位）再放行——「等到有配额再发请求」这类场景。
+//
+// 语义与 TokenBucket.Wait 对齐：ctx 取消返回 ctx.Err()；ctx 为 nil 时按
+// context.Background() 处理（永不取消）。
+//
+// 等待期间**不预占**槽位：拿到空位的那一刻才计数 ⇒ ctx 取消不会留下
+// 「已占位未放行」的幽灵计数（与 Reserve 的「预留即消费」口径不同，这里刻意
+// 不预占——等待者还没拿到配额，不该占着坑）。
+func (sw *SlidingWindow) Wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		sw.mu.Lock()
+		now := time.Now()
+		sw.cleanOld(now.Add(-sw.window))
+		if len(sw.timestamps) < sw.maxCount {
+			sw.timestamps = append(sw.timestamps, now)
+			sw.mu.Unlock()
+			return nil
+		}
+		// 最早的一条滑出窗口的时刻 = 下一个空位到来的时刻。
+		wait := sw.timestamps[0].Add(sw.window).Sub(now)
+		sw.mu.Unlock()
+
+		if wait <= 0 {
+			wait = time.Millisecond
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
 }
