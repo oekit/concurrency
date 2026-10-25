@@ -1,3 +1,9 @@
+## [v0.21.0] — 2026-10-25
+
+- **BREAKING**: ratelimit.Limiter 接口启用 Wait(ctx context.Context) error——此前该行一直处于注释状态：接口上没有阻塞等待这一档，服务端限流中间件要回 X-RateLimit-Remaining 这类响应头拿不到实时令牌数、出站 HTTP 客户端节流要「等到有配额再发请求」也没有对应形态，消费方要么在库外自建第二份令牌桶实现（重复实现 + 各自漂移，上游的时钟注入、Retry-After 探测语义同步不过去），要么退化成「不用上游原语」；启用后**自行实现 Limiter 的调用方需补上 Wait 方法**（接口多了一个方法，旧实现不再满足）——0.x 阶段 minor 允许 breaking；仓内两个实现（TokenBucket / SlidingWindow）均已补齐，全矩阵扫描确认无第三个实现者（middleware 用的是 *TokenBucket）（#92）
+- feat(ratelimit): TokenBucket 补剩余配额读出口与阻塞等待档——Tokens() float64 实时剩余令牌读出口（**不消耗配额**，按注入时钟结算，与 Allow/Reserve 同一时间源，假时钟下可确定性断言；与 SlidingWindow.Count() 同维度，构成「限流器可观测面」）；Wait(ctx) / WaitN(ctx, n) 阻塞等待档（语义对齐 x/time/rate 的 Limiter.Wait：等到有令牌返回 nil、ctx 取消返回 ctx.Err()，取消时归还已预留的配额——取消不是消费；n 超过 burst 时永远等不到，返回 ErrBurstTooSmall，不是 ctx 取消类失败、重试无用）；NewTokenBucketFloat(rps float64, burst int, ...) 让消费方不必为传一个数字而额外 import golang.org/x/time/rate（rps 是配置项，让它出现在公开签名上会把三方包类型漏进消费方的 import 面）（#92）
+- feat(syncx): KeyedGate 补按 key 即拒档 TryAcquire(key string) (release func(), ok bool)——该 key 档位已满时**立即**返回 ok=false（不排队、不占名额），与同包 Gate.TryAcquire 同款分档，只是按 key 分档位；ok=false 只有一个含义（该 key 档位已满，非阻塞取名额没有别的失败原因），调用方可据此回 409/429 而不是泛化成 500；release 幂等（atomic CAS 实现，与 Acquire/Gate 口径一致）；cap<=0 视为不限恒返回 ok=true。补的是「按 key 即拒档」这个交叉点：Gate 有全局即拒档、KeyedGate 有按 key 排队档，此前消费方防重入只能手搓 map[string]*sync.Mutex + TryLock + sync.Once 兜底幂等归还（每仓各写一遍，once 包装容易漏，漏了就是双重解锁 panic），KeyedGate.Acquire 是排队语义套不上（#93）
+
 ## [v0.20.4] — 2026-10-24
 
 - fix(ratelimit): 后台清扫 ticker 间隔下限兜底——ttl/2 在 ttl<2ns 时整除为 0，time.NewTicker(0) panic 被 async.GoSafe 收编后进程不崩但清扫协程当场死亡，空闲条目永不回收（limiters/entries 两张 map 随 key 基数无界增长）、WithMaxEntries 容量护栏永远等不到回收腾位；KeyedLimiterOf 与 LockoutOf 的 cleanup 统一走 cleanupInterval：间隔整除为 0 兜 1s（对齐 pkg/cache 的 LocalCache.cleanup 口径）、ns 级过小间隔兜 1ms 防 ticker 热循环烧核，ttl 语义不变（过期判定仍按原 ttl 走）（#84）
