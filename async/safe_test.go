@@ -4,30 +4,39 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// waitFor 在超时前轮询 until 返回 true，用于等待 goroutine 完成。
-func waitFor(t *testing.T, until func() bool, timeout time.Duration) {
+// waitSignal 等一个「被触发」的信号（事件驱动）。
+//
+// 为什么不用轮询：panic handler 是在 **recover 之后**才被调用的，而被测 fn 的
+// defer（close(done)）**先于** recover 执行 ⇒ 主协程从 <-done 醒来时，handler
+// 很可能还没把消息写进 atomic.Value ⇒ 后面只能靠轮询兜底。
+//
+// 轮询兜底的代价是**硬超时窗口**：原先只给 1 秒，在 CI runner 负载高时（并发跑
+// 多个 job、容器被抢占）就偶发红——2026-10-29 实测把一个**只改 README** 的 PR
+// 无端挂起（重跑即绿）。
+//
+// ⇒ 改成事件驱动：handler 触发时 close 一个 channel ⇒ 用例等那个 channel
+// ⇒ 没有「值还没写进去」的窗口，也不依赖调度快慢。
+func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if until() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("等待 %s 超时（5s）", what)
 	}
-	t.Fatal("timed out waiting for condition")
 }
 
 func TestGoSafe_NoPanic(t *testing.T) {
-	var ran atomic.Int32
+	ran := make(chan struct{})
 	GoSafe(func() {
-		ran.Store(1)
+		close(ran)
 	})
-	waitFor(t, func() bool { return ran.Load() == 1 }, time.Second)
+	waitSignal(t, ran, "fn 执行")
 }
 
 func TestGoSafe_PanicRecovered(t *testing.T) {
@@ -156,8 +165,11 @@ func TestRunSafeLabeled_PanicMessage(t *testing.T) {
 func TestGoSafeLabeled_PanicMessage(t *testing.T) {
 	orig := panicHandler.Load()
 	var got atomic.Value
+	stored := make(chan struct{})
+	var once sync.Once
 	SetPanicHandler(PanicHandler(func(msg string, stack []byte) {
 		got.Store(msg)
+		once.Do(func() { close(stored) })
 	}))
 	defer func() {
 		if orig != nil {
@@ -165,18 +177,16 @@ func TestGoSafeLabeled_PanicMessage(t *testing.T) {
 		}
 	}()
 
-	done := make(chan struct{})
 	GoSafeLabeled("janitor", func() {
-		defer close(done)
 		panic("kaboom")
 	})
-	<-done
-	// handler 在 recover 闭包内同步调用，close(done) 在 panic 前已 defer，
-	// 但 handler 在 recover 后执行——用 waitFor 兜底
-	waitFor(t, func() bool {
-		msg, ok := got.Load().(string)
-		return ok && msg == "task=janitor: kaboom"
-	}, time.Second)
+	// handler 在 recover 之后才被调用 ⇒ 等 handler 真的触发（事件驱动），
+	// 而不是「等一个可能还没写进去的原子值」。
+	waitSignal(t, stored, "panic handler 被调用")
+	msg, ok := got.Load().(string)
+	if !ok || msg != "task=janitor: kaboom" {
+		t.Fatalf("panic handler 收到的消息 = %q，期望 %q", msg, "task=janitor: kaboom")
+	}
 }
 
 func TestRunSafeLabeled_EmptyTaskFallsBack(t *testing.T) {
@@ -201,8 +211,11 @@ func TestRunSafeLabeled_EmptyTaskFallsBack(t *testing.T) {
 func TestGoSafeWithContextLabeled(t *testing.T) {
 	orig := panicHandler.Load()
 	var got atomic.Value
+	stored := make(chan struct{})
+	var once sync.Once
 	SetPanicHandler(PanicHandler(func(msg string, stack []byte) {
 		got.Store(msg)
+		once.Do(func() { close(stored) })
 	}))
 	defer func() {
 		if orig != nil {
@@ -210,14 +223,13 @@ func TestGoSafeWithContextLabeled(t *testing.T) {
 		}
 	}()
 
-	done := make(chan struct{})
 	GoSafeWithContextLabeled(context.Background(), "heartbeat", func(ctx context.Context) {
-		defer close(done)
 		panic("hb-fail")
 	})
-	<-done
-	waitFor(t, func() bool {
-		msg, ok := got.Load().(string)
-		return ok && msg == "task=heartbeat: hb-fail"
-	}, time.Second)
+	// handler 在 recover 之后才被调用 ⇒ 事件驱动等它触发（不再靠 1 秒轮询兜底）。
+	waitSignal(t, stored, "panic handler 被调用")
+	msg, ok := got.Load().(string)
+	if !ok || msg != "task=heartbeat: hb-fail" {
+		t.Fatalf("panic handler 收到的消息 = %q，期望 %q", msg, "task=heartbeat: hb-fail")
+	}
 }
