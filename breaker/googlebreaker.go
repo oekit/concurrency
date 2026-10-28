@@ -251,7 +251,10 @@ func (b *googleBreaker) allow() (googlePromise, error) {
 func (b *googleBreaker) doReq(req func() error, acceptable func(error) bool) (err error, rejected bool) {
 	p, _, aerr := b.allowGen()
 	if aerr != nil {
-		b.markDrop()
+		// **不重复记 drop**：allowGen 在返回 ErrCircuitOpen 前已经记过一次
+		// （让 Allow 与 Do* 的样本口径一致）。此前这里再记一次 ⇒ 每次拒绝
+		// 记**两个**丢弃样本，而 Allow 只记一个 ⇒ history.total 在整个
+		// 熔断窗口里被灌水（它是 SRE 触发器的输入）。
 		return aerr, true
 	}
 
