@@ -1,3 +1,9 @@
+## [v0.22.1] — 2026-10-28
+
+- fix(gopool): 「检查 closed + `wg.Add(1)`」与 `Close` 的「置 closed」不是原子的 ⇒ 提交方可能在 `Close` 的 `wg.Wait()` 期间 Add ⇒ 运行时 panic（"sync: WaitGroup misuse: Add called concurrently with Wait"）。修法：加 `submitMu` 串起这两步（`Close` 持锁只到置位为止，`wg.Wait()` 在锁外，否则「任务里再提交任务」会与 Close 互等）
+- fix(singleflight): 清理改用 `CompareAndDelete`——此前 `Delete` 无条件删 key，`Forget` 之后注册的同 key **新** call 会被一并删掉 ⇒ 第三个调用方另起一次 fn，「同 key 只执行一次 fn」的承诺被打破
+- fix(breaker): `doReq` 去掉重复的 `markDrop`——`allowGen` 已记过一次，每次拒绝记**两个**丢弃样本而 `Allow` 只记一个 ⇒ `history.total` 在整个熔断窗口里被灌水（它是 SRE 触发器的输入）
+
 ## [v0.22.0] — 2026-10-25
 
 - feat(fanout): 新增限并发 + 结果保序 + 错误汇总的批量执行原语 fanout.Map——item 口径、失败项带下标汇总（#97）
