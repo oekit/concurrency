@@ -180,12 +180,17 @@ func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.
 			if r := recover(); r != nil {
 				c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
 				close(c.ready)
-				f.calls.Delete(key)
+				// 清理用 CompareAndDelete 而非 Delete：与 Do / DoShared 同一口径。
+				// Delete 是**无条件**删除 key，而 Forget(key) 之后可能已经注册了
+				// 同 key 的**新** call ⇒ 本次清理会把那条新记录一起删掉 ⇒
+				// 第三个调用方会另起一次 fn ⇒「同 key 只执行一次 fn」的承诺
+				// 被打破，且两次 fn 并发跑。
+				f.calls.CompareAndDelete(key, c)
 				ch <- Result[T]{Err: c.err}
 				return
 			}
 			close(c.ready)
-			f.calls.Delete(key)
+			f.calls.CompareAndDelete(key, c)
 			ch <- Result[T]{Val: c.val, Err: c.err, Waiters: int(c.waiters.Load())}
 		}()
 		c.val, c.err = fn(innerCtx)

@@ -89,14 +89,35 @@ func (l *Ledger) Consume(d Dimension, n int64, content []byte) (Ref, error) {
 	if !tracked {
 		return 0, nil // 未声明维度不限量
 	}
-	if used := l.used[d]; used+n > cap {
+	// 判据写成不溢出的形式：`n > cap-used`。
+	//
+	// 旧写法是 `used+n > cap`——**int64 上先加后比**，n 接近 MaxInt64 时
+	// 加法回绕成负数 ⇒ 判据恒为「未超限」⇒ 该笔消耗被直接放行（内容既没
+	// 拦截也没存档，调用方却拿到 err==nil），并把 used 写成负数 ⇒ 此后
+	// **所有**后续消耗都无条件放行，预算彻底失效且外部观察不到。
+	//
+	// 改写后的等价性：used 恒在 [0, cap]（只会因为下面这次自增而变，
+	// 且自增前已保证 used+n <= cap），故 cap-used >= 0，
+	// 「used+n > cap」⟺「n > cap-used」，且后者不产生任何溢出。
+	used := l.used[d]
+	if used > cap || n > cap-used {
 		ref := l.next
 		l.next++
 		l.archives[ref] = entry{content: content, at: l.now()}
 		return ref, ErrOverBudget
 	}
-	l.used[d] += n
+	l.used[d] = used + n // 此刻 used+n <= cap ⇒ 不会溢出
 	return 0, nil
+}
+
+// Used 返回某维度已消耗的量（未声明维度恒为 0）。
+//
+// 出口存在的意义：计数器一旦被写坏（例如旧实现的 int64 溢出），
+// 外部**没有任何办法观察**——只能靠「突然所有消耗都不再被拦」反推。
+func (l *Ledger) Used(d Dimension) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.used[d]
 }
 
 // Get 按引用取回存档内容（只读，不删除；清理由 Sweep 负责）。
