@@ -64,15 +64,19 @@ func (f *Flight[T]) Do(ctx context.Context, key string, fn func(ctx context.Cont
 	// caller（首个执行 fn 的 goroutine）
 	// defer 保证：无论 fn 正常返回还是 panic，都关闭 ready 唤醒所有 waiter 并清理 map。
 	// fn panic 时先把 panic 转成 error 存给 waiter，再 re-panic 传播给首个 caller。
+	// 清理用 CompareAndDelete 而非 Delete：Delete 是**无条件**删除 key，
+	// 而 Forget(key) 之后可能已经注册了同 key 的**新** call ⇒ 本次清理会把
+	// 那条新记录一起删掉 ⇒ 第三个调用方会另起一次 fn ⇒ 「同 key 只执行一次
+	// fn」的承诺被打破（x/sync/singleflight 用 `if g.m[key] == c` 判同一）。
 	defer func() {
 		if r := recover(); r != nil {
 			c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
 			close(c.ready)
-			f.calls.Delete(key)
+			f.calls.CompareAndDelete(key, c)
 			panic(r)
 		}
 		close(c.ready)
-		f.calls.Delete(key)
+		f.calls.CompareAndDelete(key, c)
 	}()
 
 	c.val, c.err = fn(ctx)
@@ -116,15 +120,19 @@ func (f *Flight[T]) DoShared(ctx context.Context, key string, fn func(ctx contex
 		}
 	}
 
+	// 清理用 CompareAndDelete 而非 Delete：Delete 是**无条件**删除 key，
+	// 而 Forget(key) 之后可能已经注册了同 key 的**新** call ⇒ 本次清理会把
+	// 那条新记录一起删掉 ⇒ 第三个调用方会另起一次 fn ⇒ 「同 key 只执行一次
+	// fn」的承诺被打破（x/sync/singleflight 用 `if g.m[key] == c` 判同一）。
 	defer func() {
 		if r := recover(); r != nil {
 			c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
 			close(c.ready)
-			f.calls.Delete(key)
+			f.calls.CompareAndDelete(key, c)
 			panic(r)
 		}
 		close(c.ready)
-		f.calls.Delete(key)
+		f.calls.CompareAndDelete(key, c)
 	}()
 
 	val, err := fn(ctx)

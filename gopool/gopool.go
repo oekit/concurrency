@@ -57,6 +57,17 @@ type Pool struct {
 	closed    atomic.Bool
 	closeCh   chan struct{}
 	closeOnce sync.Once
+	// submitMu 串行化「检查 closed + wg.Add(1)」与 Close 的「置 closed」。
+	//
+	// WaitGroup 的规则：计数器为 0 时的 Add 必须发生在 Wait 之前，否则运行时
+	// panic（"sync: WaitGroup misuse: Add called concurrently with Wait"）。
+	// 单靠 closed 标志挡不住——提交方读到 closed==false 与 Close 进入 Wait
+	// 之间仍有窗口 ⇒ 提交方在 Wait 期间 Add ⇒ panic（实测：并发提交 + Close
+	// 偶发崩在提交方 goroutine 上）。
+	//
+	// Close 持锁**只到置位为止**，wg.Wait() 在锁外：否则「任务里再提交任务」
+	// 会与 Close 互等（提交要锁、Close 等任务完成、任务等提交）⇒ 死锁。
+	submitMu sync.Mutex
 }
 
 // NewPool 创建名为 name 的池；opts 为空或字段零值时取默认值。
@@ -93,12 +104,17 @@ func (p *Pool) Go(f func()) {
 // 队列满时回退为独立 goroutine 执行（任务不丢、依然 recover）。
 // wg 计数先于入队，保证 Close 的排空等待不漏任务。
 func (p *Pool) CtxGo(ctx context.Context, f func()) {
+	// 「检查 closed + wg.Add(1)」必须在 submitMu 内：Close 在同一把锁内置位
+	// closed，于是「Add 发生在 Wait 之前」恒成立（WaitGroup 的硬要求）。
+	p.submitMu.Lock()
 	if p.closed.Load() {
+		p.submitMu.Unlock()
 		// Close 后提交的任务不再入池：旁路执行，不排空等待范围
 		goSafe(func() { p.recoverRun(ctx, f) })
 		return
 	}
 	p.wg.Add(1)
+	p.submitMu.Unlock()
 	select {
 	case p.tasks <- task{ctx: ctx, f: f}:
 	default:
@@ -140,7 +156,12 @@ func (p *Pool) Closed() bool { return p.closed.Load() }
 // 并等待所有已提交任务执行完成；ctx 到期返回其错误。
 // 调用方应先停止提交再 Close；Close 可重复调用。
 func (p *Pool) Close(ctx context.Context) error {
+	// 置位在 submitMu 内：与 CtxGo 的「检查 + Add」互斥 ⇒ 不会有 Add 发生在
+	// 随后的 wg.Wait() 期间（否则运行时 panic：WaitGroup misuse）。
+	// wg.Wait() 必须在锁外：任务里再提交任务时要拿这把锁。
+	p.submitMu.Lock()
 	p.closed.Store(true)
+	p.submitMu.Unlock()
 	p.closeOnce.Do(func() { close(p.closeCh) })
 	done := make(chan struct{})
 	goSafe(func() {
