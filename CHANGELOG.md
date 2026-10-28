@@ -1,3 +1,10 @@
+## [v0.23.0] — 2026-10-28
+
+- fix(singleflight): `DoChan` 的收尾仍是无条件 `Delete` ⇒ `Forget` 后同 key 并发跑两次 fn——`Do` / `DoShared` 两条路径**已修**（收尾用 `CompareAndDelete(key, c)` 判同一、只删自己那条），但 `DoChan` 路径漏修 ⇒ `Forget` 之后旧飞行的收尾会把**新**注册的 call 一起删掉 ⇒ 第三个调用方另起一次 fn ⇒「同 key 只执行一次 fn」的承诺被打破，且两次 fn **并发**跑。后果形态最坏：下游请求翻倍 / 缓存回源击穿 / **非幂等写重复执行**，而且**没有任何报错**——`Result.Shared` 还会把复用结果标成 `Shared=true`，调用方更难察觉。修法与 `Do`/`DoShared` 同一口径：收尾改 `CompareAndDelete`（三条路径的清理语义必须一致，否则该承诺只在部分路径上成立）。补回归用例：仓里此前已有针对 `Do` 的同款时序回归测试，而 `DoChan` 的三个用例**没有一个涉及 Forget** ⇒ 该路径完全无覆盖（#105）
+- fix(budget): `Ledger.Consume` 的 `used+n` 先加后比 ⇒ int64 溢出后预算被静默绕过且计数器永久变负——判据 `used+n > cap` 是 int64 上的先加后比，`n` 接近 `math.MaxInt64` 时加法回绕成负数 ⇒ 判据恒为「未超限」⇒ 该笔消耗被**直接放行**并把计数器写成负数 ⇒ 此后**所有**后续消耗都无条件放行。实测（cap=100）：`Consume("bytes", MaxInt64)` 返回 `err=nil`（超限未被拦截！）且 `used = -9223372036854775808` ⇒ 一次 `n ≈ MaxInt64` 的消耗就让这个 Ledger **永久变成「无限制」**。而 `n` 来自上游返回的长度/计数字段，**可被外部影响**（本包用途：LLM 输出预算 / 日志留存配额 / 批量抓取字节配额）；且超限内容**既没被拦截、也没进存档**，调用方却拿到 `err == nil`（=「已通过预算」）⇒ 超额内容被当作合规内容放行。三处修：①判据改成**不溢出的形式** `n > cap-used`（`used<=cap` 时右侧非负，无回绕）；②`used` 改**饱和累加**（钳到 `cap`）⇒ 计数器永不变负，且「`cap-used` 不回绕」这条不变量对后续每次 Consume 都成立；③补 `Used(d Dimension) int64` 观测口——`Ledger` 此前**没有任何出口**能看到计数器，计数器变负这类事故只能靠「突然所有请求都不再被拦」反推。补用例：大数用例（此前 `budget_test.go` 六类用例**没有任何大数用例**）、`used` 永不超过 `cap`、`Used` 反映消耗（#104）
+- feat(budget): 补 `Ledger.Used(d Dimension) int64` 观测口——没有它，计数器异常只能靠「突然所有请求都不再被拦」反推（#104）
+- build: pkg 地板 v0.22.0 → v0.30.0（跟随 pkg 本轮发布）——带回了共享契约套件的「Forget-竞态」用例（`Forget` → 新 call 仍在飞行 → 旧 call 收尾 → 第三个调用方），此前 `concurrency/singleflight` 跑的是旧套件 ⇒ 该时序**不可观测**；零行为改动
+
 ## [v0.22.1] — 2026-10-28
 
 - fix(gopool): 「检查 closed + `wg.Add(1)`」与 `Close` 的「置 closed」不是原子的 ⇒ 提交方可能在 `Close` 的 `wg.Wait()` 期间 Add ⇒ 运行时 panic（"sync: WaitGroup misuse: Add called concurrently with Wait"）。修法：加 `submitMu` 串起这两步（`Close` 持锁只到置位为止，`wg.Wait()` 在锁外，否则「任务里再提交任务」会与 Close 互等）
