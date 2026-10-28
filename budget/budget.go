@@ -78,6 +78,12 @@ func NewLedger(caps map[Dimension]int64, opts ...Option) *Ledger {
 //   - n < 0 返回 (0, ErrInvalidAmount)。
 //
 // 未声明维度不限量，恒返回 (0, nil)。
+//
+// 溢出安全：判据**不用** `used+n > cap`。那是 int64 上的先加后比——n 接近
+// math.MaxInt64 时加法回绕成负数 ⇒ 判据恒为「未超限」⇒ 该笔被直接放行
+// 且计数器被写成负数 ⇒ 此后该维度**永久**变成「无限制」。改用不溢出的形式
+// `n > cap-used`（used<=cap 时 cap-used>=0，不存在回绕），并对累加做饱和
+// 钳制（#104）。
 func (l *Ledger) Consume(d Dimension, n int64, content []byte) (Ref, error) {
 	if n < 0 {
 		return 0, ErrInvalidAmount
@@ -89,14 +95,44 @@ func (l *Ledger) Consume(d Dimension, n int64, content []byte) (Ref, error) {
 	if !tracked {
 		return 0, nil // 未声明维度不限量
 	}
-	if used := l.used[d]; used+n > cap {
+	used := l.used[d]
+	// 不溢出的超限判据：n > cap-used。used<=cap 时右侧非负；used>cap 时
+	// 右侧为负 ⇒ 任何 n>0 都判超限（与旧的 used+n>cap 口径一致）。
+	if n > cap-used {
 		ref := l.next
 		l.next++
 		l.archives[ref] = entry{content: content, at: l.now()}
 		return ref, ErrOverBudget
 	}
-	l.used[d] += n
+	// 饱和累加：钳到 cap ⇒ used 永不超过 cap ⇒ 「cap-used 不回绕」这条
+	// 不变量对后续每一次 Consume 都成立。
+	l.used[d] = saturatingAdd(used, n, cap)
 	return 0, nil
+}
+
+// saturatingAdd 计算 used+n 并钳到上限 cap：溢出或越界时返回 cap。
+//
+// 正常路径上 used+n<=cap 已由调用方的判据保证 ⇒ 这里只是把「即使判据被
+// 改坏也不会写出负数计数器」这条不变量落在代码里。
+func saturatingAdd(used, n, cap int64) int64 {
+	sum := used + n
+	if sum < used { // int64 回绕
+		return cap
+	}
+	if sum > cap {
+		return cap
+	}
+	return sum
+}
+
+// Used 返回某维度当前已消耗量（未声明维度返回 0）。
+//
+// 观测口：没有它，计数器异常（如被写成负数）只能靠「突然所有请求都不再被
+// 拦」反推——而那正是预算已经失效的表现（#104）。
+func (l *Ledger) Used(d Dimension) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.used[d]
 }
 
 // Get 按引用取回存档内容（只读，不删除；清理由 Sweep 负责）。
