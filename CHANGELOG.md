@@ -1,3 +1,15 @@
+## [v0.23.1] — 2026-10-29
+
+- fix(async-test): panic handler 的等待改事件驱动——去掉 1 秒轮询窗口（CI 偶发红）
+
+TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.go:219: timed out waiting for condition），2026-10-29 实测把一个**只改 README** 的 PR 无端挂起（重跑即绿）。
+
+根因不是「慢」，而是**等错了东西**：panic handler 是在 **recover 之后**才被调用的，而被测 fn 的 defer（close(done)）**先于** recover 执行 ⇒ 主协程从 <-done 醒来时，handler 很可能还没把消息写进 atomic.Value ⇒ 只能靠轮询兜底 ⇒ 而轮询的硬超时窗口**只有 1 秒** ⇒ CI runner 负载高时就偶发红。
+
+修法（事件驱动，零窗口）：新增 waitSignal() 等一个「被触发」的 channel；handler 被调用时 close 一个 channel（sync.Once 保护）；三处同款用例一起改；删掉随之没人用的轮询 helper waitFor（否则 unused linter 判红）。
+
+验证：go test -race -count=30 -run TestGoSafe ./async/... 连跑 30 次无一次红；golangci-lint 0 issues。
+
 ## [v0.23.0] — 2026-10-28
 
 - fix(singleflight): `DoChan` 的收尾仍是无条件 `Delete` ⇒ `Forget` 后同 key 并发跑两次 fn——`Do` / `DoShared` 两条路径**已修**（收尾用 `CompareAndDelete(key, c)` 判同一、只删自己那条），但 `DoChan` 路径漏修 ⇒ `Forget` 之后旧飞行的收尾会把**新**注册的 call 一起删掉 ⇒ 第三个调用方另起一次 fn ⇒「同 key 只执行一次 fn」的承诺被打破，且两次 fn **并发**跑。后果形态最坏：下游请求翻倍 / 缓存回源击穿 / **非幂等写重复执行**，而且**没有任何报错**——`Result.Shared` 还会把复用结果标成 `Shared=true`，调用方更难察觉。修法与 `Do`/`DoShared` 同一口径：收尾改 `CompareAndDelete`（三条路径的清理语义必须一致，否则该承诺只在部分路径上成立）。补回归用例：仓里此前已有针对 `Do` 的同款时序回归测试，而 `DoChan` 的三个用例**没有一个涉及 Forget** ⇒ 该路径完全无覆盖（#105）
