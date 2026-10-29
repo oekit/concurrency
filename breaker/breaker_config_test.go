@@ -2,6 +2,7 @@ package breaker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,24 @@ import (
 
 // 共享熔断器是进程级全局单例，本文件所有用例必须用互不相同的 name 命名空间，
 // 否则用例之间会通过 sharedBreakers 相互串扰。
+//
+// ⚠️ 「互不相同」必须覆盖**同一用例的不同轮次**：GetBreaker 的冲突回调只在
+// 「首次创建」时才有对比对象（`existed && fp != e.sig`）——固定 name 在
+// -count>1（Go 在**同一进程内**重复跑用例）时，第二轮起该 name 已存在且
+// 指纹与首次相同 ⇒ **冲突回调不再触发** ⇒ 用例红（实测 -count=12 红 55 次
+// = 11 轮 × 5 用例，第一轮绿）。
+// ⇒ 统一用 uniqBreakerName 生成 name：既保证用例之间不同，也保证轮次之间不同。
+
+// breakerNameSeq 为每个 name 生成唯一后缀（见 uniqBreakerName 的说明）。
+var breakerNameSeq atomic.Int64
+
+// uniqBreakerName 返回带唯一后缀的熔断器 name。
+//
+// 同一个用例内的多次 GetBreaker 调用必须共用**同一个** name（用例要验的
+// 就是「同名两次调用」），所以先取一次 name、后续复用该变量。
+func uniqBreakerName(base string) string {
+	return fmt.Sprintf("%s-%d", base, breakerNameSeq.Add(1))
+}
 
 // ---- #28 导出缺省常量 ----
 
@@ -96,12 +115,13 @@ func (r *conflictRecorder) snapshot() []string {
 func TestGetBreaker_ConflictHandler_Fires(t *testing.T) {
 	rec := &conflictRecorder{}
 
-	first := GetBreaker("conflict-basic",
+	name := uniqBreakerName("conflict-basic")
+	first := GetBreaker(name,
 		WithConsecutiveFailures(3),
 		WithCooldown(2*time.Minute),
 		WithBreakerConflictHandler(rec.handler),
 	)
-	second := GetBreaker("conflict-basic",
+	second := GetBreaker(name,
 		WithConsecutiveFailures(10),
 		WithCooldown(30*time.Second),
 	)
@@ -129,7 +149,7 @@ func TestGetBreaker_ConflictHandler_Fires(t *testing.T) {
 // 等价的 opts、以及仅钩子不同（指纹刻意排除函数字段）。
 func TestGetBreaker_ConflictHandler_NoFalsePositive(t *testing.T) {
 	rec := &conflictRecorder{}
-	name := "conflict-nofalse"
+	name := uniqBreakerName("conflict-nofalse")
 	GetBreaker(name, WithForcePass(2*time.Second), WithBreakerConflictHandler(rec.handler))
 
 	GetBreaker(name)                                                                      // 纯复用
@@ -148,7 +168,7 @@ func TestGetBreaker_ConflictHandler_NoFalsePositive(t *testing.T) {
 // 丢弃（调用方以为拿到缺省、实际拿到首次那套），因此**应当**告警。
 func TestGetBreaker_Conflict_NilOptionMeansDefaults(t *testing.T) {
 	rec := &conflictRecorder{}
-	name := "conflict-nilopt"
+	name := uniqBreakerName("conflict-nilopt")
 	GetBreaker(name, WithForcePass(2*time.Second), WithBreakerConflictHandler(rec.handler))
 
 	GetBreaker(name, nil)
@@ -166,7 +186,7 @@ func TestGetBreaker_Conflict_NilOptionMeansDefaults(t *testing.T) {
 // 避免热路径上每次 GetBreaker 都刷一遍。
 func TestGetBreaker_ConflictHandler_WarnsOnce(t *testing.T) {
 	rec := &conflictRecorder{}
-	name := "conflict-once"
+	name := uniqBreakerName("conflict-once")
 	GetBreaker(name, WithBreakerConflictHandler(rec.handler))
 
 	for i := 0; i < 20; i++ {
@@ -179,8 +199,9 @@ func TestGetBreaker_ConflictHandler_WarnsOnce(t *testing.T) {
 
 // TestGetBreaker_ConflictHandler_NoHandler 锁未注册回调时静默跳过，不 panic。
 func TestGetBreaker_ConflictHandler_NoHandler(t *testing.T) {
-	GetBreaker("conflict-nohandler", WithForcePass(time.Second))
-	_ = GetBreaker("conflict-nohandler", WithForcePass(5*time.Second))
+	nohandler := uniqBreakerName("conflict-nohandler")
+	GetBreaker(nohandler, WithForcePass(time.Second))
+	_ = GetBreaker(nohandler, WithForcePass(5*time.Second))
 }
 
 // TestGetBreaker_ConflictHandler_Reentrant 回调里反过来调 GetBreaker 不得死锁——
@@ -188,10 +209,10 @@ func TestGetBreaker_ConflictHandler_NoHandler(t *testing.T) {
 func TestGetBreaker_ConflictHandler_Reentrant(t *testing.T) {
 	var reentered atomic.Bool
 	var inner atomic.Value
-	name := "conflict-reentrant"
+	name := uniqBreakerName("conflict-reentrant")
 
 	GetBreaker(name, WithBreakerConflictHandler(func(n, detail string) {
-		inner.Store(GetBreaker("conflict-reentrant-inner"))
+		inner.Store(GetBreaker(uniqBreakerName("conflict-reentrant-inner")))
 		reentered.Store(true)
 	}))
 	_ = GetBreaker(name, WithConsecutiveFailures(5))
@@ -208,7 +229,7 @@ func TestGetBreaker_ConflictHandler_Reentrant(t *testing.T) {
 // 配合 -race 覆盖 sharedEntry.warned 的 CAS 与 map 读写。
 func TestGetBreaker_Conflict_Concurrent(t *testing.T) {
 	var fired atomic.Int32
-	name := "conflict-concurrent"
+	name := uniqBreakerName("conflict-concurrent")
 	GetBreaker(name, WithBreakerConflictHandler(func(string, string) { fired.Add(1) }))
 
 	const n = 64
