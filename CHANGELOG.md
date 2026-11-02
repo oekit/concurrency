@@ -92,7 +92,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
 ## [v0.17.0] — 2026-10-18
 
 ### feat(ratelimit)：`KeyedLimiter.Create` 护栏内原子登记（[#33](https://github.com/oekit/concurrency/issues/33)）
-- `Create(key K, l Limiter) bool`：显式登记外部构造的限流器——表满先回收空闲条目
+- `Create(key K, l Limiter) bool`：显式登记外部构造的限流器——表满先回收空闲条目（#33）
   （与 Allow 建桶路径同一 sweep-on-pressure），仍满返回 false 并计一次 `OverCapHits`；
   已登记 key 返回 false **不覆盖**（速率热更走 `Replace`，换桶不该被护栏卡住）；
   `l == nil` 返回 false
@@ -106,7 +106,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
 ## [v0.16.0] — 2026-10-18
 
 ### feat(ratelimit)：`NewKeyedLimiterByFunc` —— 按 key 定配额（[#31](https://github.com/oekit/concurrency/issues/31)）
-- 新增 `NewKeyedLimiterByFunc[K](factory func(K) Limiter, opts ...KeyedOption[K])`：
+- 新增 `NewKeyedLimiterByFunc[K](factory func(K) Limiter, opts ...KeyedOption[K])`（#31）：
   `NewKeyedLimiterOf` 的 factory 签名 `func() Limiter` 不接受 key，一个管理器内所有 key
   只能拿到相同配置的限流器。业务上按接口维度分档位（同步类宽松 / 备份类严格 / 导入确认
   最严）是常见形态，此前只能把限流器实例的键从 `(maxReq, window)` 扩成
@@ -273,7 +273,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
 ## [v0.9.0] — 2026-10-18
 
 ### feat(breaker)：显式三态状态机 + 代绑定——closed/open/half-open（[#17](https://github.com/oekit/concurrency/issues/17)）
-- 显式三态取代「窗口统计隐式推导」：错误率超阈值（SRE 公式丢弃概率 > 0，即接受预算耗尽）
+- 显式三态取代「窗口统计隐式推导」：错误率超阈值（SRE 公式丢弃概率 > 0，即接受预算耗尽）（#17）
   切入 open；open 放行策略 = 原 Google SRE 概率丢弃 + forcePass 强制探活
   （**现有自适应丢弃行为不变**）；冷却（`WithProbeTimeout`，缺省 1m）期满后首个放行请求
   即半开探测——绕过概率公式必达、携带新代 generation
