@@ -333,6 +333,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
 - **feat(singleflight)**：`Flight.DoChan`——channel 交付结果；配合
   `context.WithoutCancel` 实现「leader 免疫取消 + waiter 各自 ctx 退出」
   （[#10](https://github.com/oekit/concurrency/issues/10)）
+- docs: CHANGELOG 版本节按倒序重排（#11）——合并重复的 v0.2.0、补 v0.3.1 占位节
 
 ## [v0.5.4] — 2026-10-17
 
