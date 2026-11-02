@@ -8,7 +8,7 @@
 
 ## [v0.23.1] — 2026-10-29
 
-- fix(async-test): panic handler 的等待改事件驱动——去掉 1 秒轮询窗口（CI 偶发红）
+- fix(async-test): panic handler 的等待改事件驱动（#112）——去掉 1 秒轮询窗口（CI 偶发红）
 
 TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.go:219: timed out waiting for condition），2026-10-29 实测把一个**只改 README** 的 PR 无端挂起（重跑即绿）。
 
@@ -59,7 +59,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
 
 ## [v0.20.0] — 2026-10-22
 
-- feat(syncx): Gate 补非阻塞取名额 TryAcquire——满额即拒，不排队。Gate 原先是排队语义（Acquire 满额时等 ctx 取消才返回 ctx.Err()），而「重活并发上限用满就该立刻拒绝」这类闸门（图片全量解码、ffmpeg 子进程、模型推理）排队等待会把「内存被并发占满」换成「请求堆积在队列里」，是另一种 DoS 形态；现有原语都对不上——KeyedGate 按 key 隔离同样排队、gopool.Pool 的 MaxIdleWorkers 是常驻 worker 上限不是并发上限（任务队列满即回退为独立 goroutine 直跑，任务永不因并发数被拒）、ratelimit.KeyedLimiter 是速率型令牌桶不是并发闸门，消费方只能手搓裸 channel 信号量。新增 TryAcquire() (release func(), ok bool)：满额立即返回 ok=false，不等待、不占名额；ok=false 只有一个含义（名额已满，非阻塞取名额没有别的失败原因），调用方可据此回 429/503 而不是泛化成 500；release 幂等（与 Acquire 一致，重复调用只归还一次），用 atomic CAS 实现，并发调用安全；cap<=0 视为不限，恒返回 ok=true；与 Acquire 并存、命名区分（Acquire=排队、TryAcquire=即拒）
+- feat(syncx): Gate 补非阻塞取名额 TryAcquire（#65）——满额即拒，不排队。Gate 原先是排队语义（Acquire 满额时等 ctx 取消才返回 ctx.Err()），而「重活并发上限用满就该立刻拒绝」这类闸门（图片全量解码、ffmpeg 子进程、模型推理）排队等待会把「内存被并发占满」换成「请求堆积在队列里」，是另一种 DoS 形态；现有原语都对不上——KeyedGate 按 key 隔离同样排队、gopool.Pool 的 MaxIdleWorkers 是常驻 worker 上限不是并发上限（任务队列满即回退为独立 goroutine 直跑，任务永不因并发数被拒）、ratelimit.KeyedLimiter 是速率型令牌桶不是并发闸门，消费方只能手搓裸 channel 信号量。新增 TryAcquire() (release func(), ok bool)：满额立即返回 ok=false，不等待、不占名额；ok=false 只有一个含义（名额已满，非阻塞取名额没有别的失败原因），调用方可据此回 429/503 而不是泛化成 500；release 幂等（与 Acquire 一致，重复调用只归还一次），用 atomic CAS 实现，并发调用安全；cap<=0 视为不限，恒返回 ok=true；与 Acquire 并存、命名区分（Acquire=排队、TryAcquire=即拒）
 
 ## [v0.19.0] — 2026-10-21
 
@@ -364,7 +364,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
   - `AllowWithRetryAfter(key) (wait, ok)`：拒绝时返回下一个可用令牌等待时长，
     内部 `Reserve→Delay→Cancel` **不消耗令牌**（429 + Retry-After 标准姿势）
   - `Replace(key, l)` 速率热更（换桶即新配额）；`TokenBucket.RetryAfter()` 暴露探测能力
-- **feat(syncx)**：新增逐槽错误变体 `FanInErr`（`fn func(i int) (T, error)` 返回
+- **feat(syncx)**：新增逐槽错误变体 `FanInErr`（`fn func(i int) (T, error)` 返回（#9）
   `[]Slot[T]`）——`Slot.Val/Err/Panicked` 三态：fn panic 不再静默零值槽，
   payload 直达调用侧（经新增 `async.ReportPanic` 上报全局 handler，观测面
   统一），合法零值与 panic 空槽可区分，消费方按槽降级免写 recover→占位
