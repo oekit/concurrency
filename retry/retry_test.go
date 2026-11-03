@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -539,5 +540,252 @@ func TestBackoff_SaturatesInsteadOfOverflowing(t *testing.T) {
 	}
 	if d != time.Duration(math.MaxInt64) {
 		t.Fatalf("退避应饱和到 MaxInt64：%v", d)
+	}
+}
+
+// ---- #128：导出计算面 Backoff / TotalBackoff（总退避预算 = 锁 TTL 覆盖重试窗口）----
+
+// handBackoff / handTotalBackoff 是消费方手抄公式的独立复刻（zeus task
+// executor 的 retryBackoff / totalBackoffSec 形态：指数退避 Delay*2^(attempt-1)、
+// MaxDelay 封顶、Jitter=0）。刻意与库内实现不同构——库内公式一旦漂移（改基数、
+// 改封顶语义、引入抖动），下面的表驱动等价性测试立即破裂：
+// 漂移从「不可测」变「必测出」。
+func handBackoff(delay, max time.Duration, attempt int) time.Duration {
+	d := delay
+	for i := 1; i < attempt; i++ {
+		if max > 0 && d >= max {
+			return max
+		}
+		d *= 2
+	}
+	if max > 0 && d > max {
+		return max
+	}
+	return d
+}
+
+func handTotalBackoff(delay, max time.Duration, attempts int) time.Duration {
+	var total time.Duration
+	for i := 1; i < attempts; i++ {
+		total += handBackoff(delay, max, i)
+	}
+	return total
+}
+
+// TestTotalBackoff_MatchesHandFormula 钉住「与手抄公式一致」：Jitter=0 的配置下
+// 导出计算面与消费方手抄公式逐项等价、总和一致；want 手算绝对值再独立钉一层，
+// 防止库内与手抄两侧一起漂。
+func TestTotalBackoff_MatchesHandFormula(t *testing.T) {
+	cases := []struct {
+		name     string
+		delay    time.Duration
+		max      time.Duration
+		attempts int
+		want     time.Duration
+	}{
+		{"指数+封顶（下游 zeus 锚定形态）", 100 * time.Millisecond, 5 * time.Second, 6, 3100 * time.Millisecond},
+		{"指数不封顶", 50 * time.Millisecond, 0, 8, 6350 * time.Millisecond},
+		{"封顶极早触发", time.Second, 2 * time.Second, 10, 17 * time.Second},
+		{"attempts<=1 无退避窗口", 100 * time.Millisecond, 5 * time.Second, 1, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{Attempts: c.attempts, Delay: c.delay, MaxDelay: c.max, Exponential: true}
+			for i := 1; i < c.attempts; i++ {
+				if got, want := Backoff(cfg, i), handBackoff(c.delay, c.max, i); got != want {
+					t.Fatalf("Backoff(attempt=%d) = %v，手抄公式 = %v", i, got, want)
+				}
+			}
+			if got := TotalBackoff(cfg, c.attempts); got != c.want {
+				t.Fatalf("TotalBackoff = %v，手算 = %v", got, c.want)
+			}
+			if got, want := TotalBackoff(cfg, c.attempts), handTotalBackoff(c.delay, c.max, c.attempts); got != want {
+				t.Fatalf("TotalBackoff = %v，手抄公式总和 = %v", got, want)
+			}
+		})
+	}
+
+	// 线性/固定口径同样可预计算（手算独立钉住）
+	if got := TotalBackoff(Config{Delay: 100 * time.Millisecond, Linear: true}, 4); got != 600*time.Millisecond {
+		t.Fatalf("线性 TotalBackoff = %v，手算 600ms", got)
+	}
+	if got := TotalBackoff(Config{Delay: 300 * time.Millisecond}, 4); got != 900*time.Millisecond {
+		t.Fatalf("固定 TotalBackoff = %v，手算 900ms", got)
+	}
+}
+
+// TestBackoff_JitterCeilingIsUpperBound 钉住抖动口径 = 上限：返回值是实跑等待的
+// 保守上界，Jitter=0 时即精确等待值。
+func TestBackoff_JitterCeilingIsUpperBound(t *testing.T) {
+	// 固定抖动：上界 = 计算值 + Jitter
+	cfg := Config{Delay: 100 * time.Millisecond, Jitter: 20 * time.Millisecond}
+	if got := Backoff(cfg, 1); got != 120*time.Millisecond {
+		t.Fatalf("固定抖动上界 = %v，期望 120ms", got)
+	}
+	// 比例抖动：上界 = 计算值*(1+ratio)，且比例抖动优先于固定 Jitter
+	cfg = Config{Delay: 100 * time.Millisecond, JitterRatio: 0.5, Jitter: time.Second}
+	if got := Backoff(cfg, 1); got != 150*time.Millisecond {
+		t.Fatalf("比例抖动上界 = %v，期望 150ms", got)
+	}
+	// 上界必须是真上界：实跑退避落在 [计算值, Backoff) 内
+	cfg = Config{Attempts: 10, Delay: 5 * time.Millisecond, JitterRatio: 0.5}
+	_ = Do(context.Background(), cfg, func(attempt int) error {
+		d := backoff(cfg, attempt, errors.New("busy"))
+		if d < 5*time.Millisecond || d >= Backoff(cfg, attempt) {
+			t.Fatalf("实跑退避 %v 越出 [%v, %v)", d, 5*time.Millisecond, Backoff(cfg, attempt))
+		}
+		return errors.New("busy")
+	})
+}
+
+// TestBackoffCeiling_SaturatesInsteadOfOverflowing 上界计算同样饱和不回绕：
+// 负上界会把锁 TTL 预算算成负数。
+func TestBackoffCeiling_SaturatesInsteadOfOverflowing(t *testing.T) {
+	cfg := Config{Delay: time.Duration(math.MaxInt64), Jitter: time.Duration(math.MaxInt64)}
+	if got := Backoff(cfg, 1); got != time.Duration(math.MaxInt64) {
+		t.Fatalf("抖动上界应饱和到 MaxInt64，实际 %v", got)
+	}
+}
+
+// TestTotalBackoff_SaturatesInsteadOfOverflowing 总窗口求和溢出与无界重试
+// 均饱和返回 MaxInt64（无界窗口没有有限预算），不回绕为负。
+func TestTotalBackoff_SaturatesInsteadOfOverflowing(t *testing.T) {
+	if got := TotalBackoff(Config{Delay: time.Hour, Exponential: true}, 200); got != time.Duration(math.MaxInt64) {
+		t.Fatalf("求和应饱和到 MaxInt64，实际 %v", got)
+	}
+	if got := TotalBackoff(Config{Delay: time.Hour, Exponential: true}, UnboundedAttempts); got != time.Duration(math.MaxInt64) {
+		t.Fatalf("无界窗口应饱和到 MaxInt64，实际 %v", got)
+	}
+}
+
+// TestDo_WaitsAlignWithBackoff 钉住「预计算与实跑同源」：实跑每段等待与
+// Backoff 逐项对齐（不早于预计算、不显著超出），毫秒级实测防止两侧各活各的。
+func TestDo_WaitsAlignWithBackoff(t *testing.T) {
+	cfg := Config{Attempts: 5, Delay: 5 * time.Millisecond, MaxDelay: 20 * time.Millisecond, Exponential: true}
+	var waits []time.Duration
+	last := time.Now()
+	_ = Do(context.Background(), cfg, func(attempt int) error {
+		if attempt > 1 {
+			waits = append(waits, time.Since(last))
+		}
+		last = time.Now()
+		return errors.New("busy")
+	})
+	if len(waits) != 4 {
+		t.Fatalf("期望 4 段退避，实际 %d", len(waits))
+	}
+	for i, w := range waits {
+		want := Backoff(cfg, i+1) // 第 i+1 次失败后的退避
+		if w < want-time.Millisecond {
+			t.Fatalf("第 %d 段实测 %v 早于预计算 %v", i+1, w, want)
+		}
+		if w > want+300*time.Millisecond {
+			t.Fatalf("第 %d 段实测 %v 远超预计算 %v（预计算与实跑不同源）", i+1, w, want)
+		}
+	}
+}
+
+// ---- #129：无界重试（Attempts < 0，直到 ctx 取消）----
+
+// TestDoValue_UnboundedStopsOnContextCancel 钉住「ctx 取消即停」：无界重试
+// 在退避等待中感知取消，立即返回 ctx.Err()，不再继续调用 fn。
+func TestDoValue_UnboundedStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int32
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := DoValue(ctx, Config{Attempts: UnboundedAttempts, Delay: 20 * time.Millisecond,
+		MaxDelay: 50 * time.Millisecond, Exponential: true},
+		func(attempt int) (string, error) {
+			atomic.AddInt32(&calls, 1)
+			return "", errors.New("busy")
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("期望 context.Canceled，实际 %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("取消后未及时返回：%v", elapsed)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 || n > 10 {
+		t.Fatalf("无界重试应持续到取消为止，调用次数异常：%d", n)
+	}
+}
+
+// TestDoValue_UnboundedZeroDelayStopsOnContextCancel 钉住 Delay=0 忙等路径：
+// 无退避等待也必须感知取消，否则无界重试在 ctx 取消后永远空转。
+func TestDoValue_UnboundedZeroDelayStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	var calls int32
+	done := make(chan error, 1)
+	go func() {
+		_, err := DoValue(ctx, Config{Attempts: UnboundedAttempts}, // Delay=0：无退避忙等
+			func(attempt int) (int, error) {
+				atomic.AddInt32(&calls, 1)
+				return 0, errors.New("busy")
+			})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("期望 context.Canceled，实际 %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("无界忙等未感知 ctx 取消（Delay=0 路径空转）")
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("取消前应已有多次调用，实际 %d", n)
+	}
+}
+
+// TestDo_UnboundedRetriesUntilSuccess 钉住无界语义：不限次数，直到 fn 成功。
+func TestDo_UnboundedRetriesUntilSuccess(t *testing.T) {
+	calls := 0
+	err := Do(context.Background(), Config{Attempts: UnboundedAttempts, Delay: time.Millisecond},
+		func(attempt int) error {
+			calls++
+			if attempt < 6 {
+				return errors.New("busy")
+			}
+			return nil
+		})
+	if err != nil || calls != 6 {
+		t.Fatalf("期望第 6 次成功，得到 err=%v calls=%d", err, calls)
+	}
+}
+
+// TestAttemptsBoundedSemanticsUnchanged 钉住边界：0/1 仍是只跑一次（零值配置
+// 绝不变无界），无界只有负值一档（不限于常量本身）。
+func TestAttemptsBoundedSemanticsUnchanged(t *testing.T) {
+	for _, attempts := range []int{0, 1} {
+		calls := 0
+		_ = Do(context.Background(), Config{Attempts: attempts}, func(int) error {
+			calls++
+			return errors.New("x")
+		})
+		if calls != 1 {
+			t.Fatalf("Attempts=%d 应只跑一次，实际 %d", attempts, calls)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	calls := 0
+	err := Do(ctx, Config{Attempts: -7, Delay: time.Millisecond}, func(int) error {
+		calls++
+		return errors.New("x")
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("负值 Attempts 应为无界直到 ctx 结束，实际 %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("负值 Attempts 应多次重试，实际 %d", calls)
 	}
 }

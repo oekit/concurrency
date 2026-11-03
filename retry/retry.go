@@ -14,9 +14,24 @@ import (
 // ErrTimeout Poll 超时（调用方按需区分「条件未达成」与真错误）。
 var ErrTimeout = errors.New("retry: 轮询超时")
 
+// UnboundedAttempts Config.Attempts 的无界档（任意负值等效）：重试直到 fn 成功
+// 或 ctx 取消。与「<=1 视为 1」明确区分——1 仍是只跑一次，零值配置不变。
+// 命名常量替代消费方的 1<<30 占位写法，意图不再靠注释（#129）。
+const UnboundedAttempts = -1
+
 // Config 重试参数。零值 = 只执行一次、不重试。
 type Config struct {
-	// Attempts 总尝试次数（含首次）；<=1 视为 1。
+	// Attempts 总尝试次数（含首次）；<=1 视为 1（零值 = 只执行一次）。
+	// 取负值（推荐常量 UnboundedAttempts）= 无界重试：直到 fn 成功或 ctx 取消，
+	// 适用于长驻消费循环（NATS JetStream Fetch、队列拉取、watch stream），
+	// 替代 1<<30 占位 hack：
+	//
+	//	batch, err := retry.DoValue(subCtx, retry.Config{
+	//		Attempts:    retry.UnboundedAttempts,
+	//		Delay:       100 * time.Millisecond,
+	//		MaxDelay:    5 * time.Second,
+	//		Exponential: true,
+	//	}, fetchFn)
 	Attempts int
 	// Delay 退避基数。Linear=false 固定间隔；Linear=true 第 i 次失败后等待 Delay*i。
 	// Exponential=true 时第 i 次失败后等待 Delay*2^(i-1)（见 Exponential）。
@@ -47,7 +62,8 @@ type Config struct {
 	Retryable func(error) bool
 }
 
-// Do 执行 fn 至多 Attempts 次，失败按 Config 退避后重试；返回最后一次错误。
+// Do 执行 fn 至多 Attempts 次（Attempts < 0 时无界，见 UnboundedAttempts），
+// 失败按 Config 退避后重试；返回最后一次错误。
 // 退避等待感知 ctx 取消（nil 视为 context.Background()）。
 //
 // 实现上**委托给 DoValue**——退避序列、抖动比例、MaxDelay 封顶、DelayHint 优先、
@@ -60,7 +76,8 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 	return err
 }
 
-// DoValue 是 Do 的泛型伴生：执行 fn 至多 Attempts 次，失败按 Config 退避后重试；
+// DoValue 是 Do 的泛型伴生：执行 fn 至多 Attempts 次（Attempts < 0 时无界），
+// 失败按 Config 退避后重试；
 // 成功返回 fn 的结果与 nil，失败返回**零值**与最后一次错误。
 //
 // 与 Do 同源——Do 即本函数的薄包装，因此「调用方自己重写一遍退避+抖动」导致的
@@ -77,24 +94,34 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 //   - err == nil 时返回值有效；err != nil 时返回**零值**——失败那次的中间结果
 //     不可用，返回它会诱导调用方误用未成功的产物。
 //   - 退避等待期间 ctx 取消 → 返回零值与 ctx.Err()。
+//   - 每次重试启动前 ctx 已取消 → 返回零值与 ctx.Err()（fn 不再调用；
+//     Delay=0 的忙等路径同样感知取消，无界重试不会在取消后空转）。
 //   - cfg.Retryable 判为不可重试 → 立即返回零值与该错误。
+//   - cfg.Attempts < 0（UnboundedAttempts）= 无界：直到 fn 成功或 ctx 取消。
 //   - cfg 零值 = 只执行一次（同 Do）。
 func DoValue[T any](ctx context.Context, cfg Config, fn func(attempt int) (T, error)) (T, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	unbounded := cfg.Attempts < 0
 	attempts := cfg.Attempts
 	if attempts < 1 {
 		attempts = 1
 	}
 	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
+	for attempt := 1; unbounded || attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			if err := ctx.Err(); err != nil {
+				var zero T
+				return zero, err
+			}
+		}
 		v, err := fn(attempt)
 		if err == nil {
 			return v, nil
 		}
 		lastErr = err
-		if attempt == attempts {
+		if !unbounded && attempt == attempts {
 			break
 		}
 		if cfg.Retryable != nil && !cfg.Retryable(err) {
@@ -116,15 +143,62 @@ func DoValue[T any](ctx context.Context, cfg Config, fn func(attempt int) (T, er
 	return zero, lastErr
 }
 
-// backoff 计算第 attempt 次失败后的实际退避时长。
-// 顺序：计算退避（Exponential > Linear > 固定间隔）→ DelayHint 建议覆盖 →
-// MaxDelay 封顶 → 抖动（JitterRatio 比例抖动优先，否则固定 Jitter）。
-func backoff(cfg Config, attempt int, err error) time.Duration {
-	var delay time.Duration
+// Backoff 计算第 attempt 次失败后的单次退避时长（attempt 从 1 起、与 fn(attempt)
+// 同口径；attempt < 1 视为 1）。供**预计算**场景使用——典型如给分布式锁的 TTL
+// 做覆盖预算（锁必须活过整个重试窗口，否则重试中途锁过期、并发实例双跑）：
+//
+//	ttl := execTimeout + retry.TotalBackoff(cfg, cfg.Attempts)
+//
+// 与 Do/DoValue 实跑共用同一公式（见 computedDelay）：库内公式改动同步反映到
+// 预计算面，消费方不必手抄指数退避、不存在「库内改了手抄版没改」的漂移（#128）。
+//
+// 抖动口径 = **上限**：返回值是实跑等待的保守上界。JitterRatio > 0 时上界为
+// 计算值*(1+ratio)，否则 Jitter > 0 时为 计算值+Jitter（均饱和到 MaxInt64），
+// 实跑等待落在 [计算值, 本返回值) 内；Jitter=0 时本函数即精确等待值。
+//
+// DelayHint 不参与预计算：服务端建议依赖具体错误，预计算无从得知。启用
+// DelayHint 的配置做预算时，请以 MaxDelay 作为单次退避的上界另计。
+func Backoff(cfg Config, attempt int) time.Duration {
+	return jitterCeiling(capDelay(computedDelay(cfg, attempt), cfg.MaxDelay), cfg)
+}
+
+// TotalBackoff 预计算 attempts 次尝试（含首次，与 Config.Attempts 同口径）的
+// 总退避窗口 = 第 1..attempts-1 次失败后各次退避上限之和，供锁 TTL/预算场景；
+// 「N 次重试」即 TotalBackoff(cfg, N+1)。attempts <= 1 返回 0。
+//
+// 口径与 Backoff 一致（含抖动上限）；求和溢出与 attempts < 0（无界重试没有
+// 有限窗口）均饱和返回 math.MaxInt64，不回绕为负。
+func TotalBackoff(cfg Config, attempts int) time.Duration {
+	const maxDur = time.Duration(math.MaxInt64)
+	if attempts < 0 {
+		return maxDur
+	}
+	var total time.Duration
+	for i := 1; i < attempts; i++ {
+		d := Backoff(cfg, i)
+		if d <= 0 {
+			continue
+		}
+		if total > maxDur-d {
+			return maxDur
+		}
+		total += d
+	}
+	return total
+}
+
+// computedDelay 第 attempt 次失败后的公式退避（Exponential > Linear > 固定间隔），
+// 不含 DelayHint 覆盖、MaxDelay 封顶与抖动。退避公式的**唯一**实现：
+// Backoff/TotalBackoff 预计算面与 Do 实跑面共用它——「预计算」与「实跑」同源，
+// 公式改动不可能只落在一侧（#128 的根因是消费方只能手抄公式）。
+func computedDelay(cfg Config, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
 	switch {
 	case cfg.Exponential:
 		// Delay * 2^(attempt-1)；溢出饱和而非回绕为负
-		delay = cfg.Delay
+		delay := cfg.Delay
 		for i := 1; i < attempt; i++ {
 			if delay <= 0 {
 				break
@@ -138,11 +212,46 @@ func backoff(cfg Config, attempt int, err error) time.Duration {
 			}
 			delay *= 2
 		}
+		return delay
 	case cfg.Linear:
-		delay = time.Duration(attempt) * cfg.Delay
+		return time.Duration(attempt) * cfg.Delay
 	default:
-		delay = cfg.Delay
+		return cfg.Delay
 	}
+}
+
+// capDelay MaxDelay 封顶（<=0 不限）。
+func capDelay(delay, max time.Duration) time.Duration {
+	if max > 0 && delay > max {
+		return max
+	}
+	return delay
+}
+
+// jitterCeiling 含抖动的单次退避上界（Backoff 的「上限」口径）：计算值 +
+// 抖动幅度（JitterRatio 比例抖动优先，否则固定 Jitter），饱和不回绕。
+// 与 addJitter 的实际取值 [0, span) 对齐：任何实跑等待都 < 返回值。
+func jitterCeiling(delay time.Duration, cfg Config) time.Duration {
+	var span int64
+	switch {
+	case cfg.JitterRatio > 0:
+		span = jitterSpanRatio(delay, cfg.JitterRatio)
+	case cfg.Jitter > 0:
+		span = int64(cfg.Jitter)
+	}
+	if span <= 0 {
+		return delay
+	}
+	if delay > time.Duration(math.MaxInt64)-time.Duration(span) {
+		return time.Duration(math.MaxInt64)
+	}
+	return delay + time.Duration(span)
+}
+
+// backoff Do 实跑口径：计算退避（见 computedDelay）→ DelayHint 建议覆盖 →
+// MaxDelay 封顶 → 抖动（JitterRatio 比例抖动优先，否则固定 Jitter）。
+func backoff(cfg Config, attempt int, err error) time.Duration {
+	delay := computedDelay(cfg, attempt)
 
 	// 服务端退避建议覆盖计算退避（负值视为无效走计算值）
 	if cfg.DelayHint != nil {
@@ -151,9 +260,7 @@ func backoff(cfg Config, attempt int, err error) time.Duration {
 		}
 	}
 
-	if cfg.MaxDelay > 0 && delay > cfg.MaxDelay {
-		delay = cfg.MaxDelay
-	}
+	delay = capDelay(delay, cfg.MaxDelay)
 
 	// 抖动：比例抖动（单边向上 [d, d*(1+ratio))）优先于固定 Jitter
 	//
