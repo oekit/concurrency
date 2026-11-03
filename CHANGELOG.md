@@ -1,3 +1,9 @@
+## [v0.23.4] — 2026-11-03
+
+- feat(retry): 导出退避预算 Backoff/TotalBackoff + 无界重试档 UnboundedAttempts（#128 #129）
+
+关联问题单：concurrency#128、concurrency#129。
+
 ## [v0.23.3] — 2026-11-02
 
 - build: 矩阵内依赖地板 `pkg` v0.31.0 → v0.31.1（维护轮全量对齐；本版不含 API 变更）
