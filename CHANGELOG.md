@@ -1,3 +1,13 @@
+## [v0.24.0] — 2026-11-05
+
+- feat(async): 新增 `Supervise` 监督循环原语（#137）——GoSafe/GoSafeLabeled 只保进程不保循环：循环体 panic 后 goroutine 死亡、循环静默停摆（消费 worker 停摆=丢消息、巡检循环停摆=新对象永不启动、活性表僵尸条目永占位），消费方三处手写同型防护。监督语义三件套收编为单源：①单轮 panic 收编（转 typed `*PanicError`、errors.As 可辨携带栈，按 GoSafeLabeled 同款格式带 task 标签上报）；②退避重启（`WithRestartBackoff(initial, max)` 指数翻倍封顶 / max<=0 固定档 / initial<=0 立即档，溢出取封顶值不回绕为负；重启等待可被 ctx 取消打断，已取消的 ctx 不首跑）；③连续失败上限 + 钩子（`WithMaxConsecutiveFailures` + `WithOnGiveUp` 告警、`WithOnRestart` 观测，钩子自身 panic 被收编）；`*Supervision` 句柄导出 Rounds/Restarts/ConsecutiveFailures 活性面 + Wait/Err/Done。轮次契约：一次 loop 调用=一轮，返回 nil=优雅结束，error/panic=失败轮；ctx 取消时监督以 ctx.Err() 告终——取消是停机决定，最后一轮业务错误不伪装成结束原因，调用方告警判据 `err != nil && !errors.Is(err, context.Canceled)` 因此可靠。与 loop.Run 的分工：loop.Run 管周期性 tick（单轮 panic 不打断后续轮次），Supervise 管单个长驻循环活得好不好（整轮死亡从头重启，重启即丢 loop 内部状态，有状态循环应状态外置）
+- feat(retry): `DetailError` + `WithDetail`/`Detail[T]` 失败伴生数据面（#138）——DoValue「失败恒返零值」防误用契约不动，诊断/分类/审计需要的伴生数据（HTTP 状态码、响应摘要）由 fn 打包进 error：`WithDetail(err, res)` 装配、`Detail[T](err)` 提取最后一次尝试的伴生数据（类型不符 ok=false 不强转）；Error()/Unwrap() 透传原始错误，errors.Is/As 链与既有错误分类零破坏；WithDetail(nil,…) 原样返回 nil，fn 成功短路路径可无判空统一装配
+- **BREAKING** fix(retry): `Config.Delay` 负值 panic（#136）——此前 `time.After(负值)` 立即触发，三连败瞬间打完、退避静默归零：失效面正是 retry 包的核心价值（「打散同时失败的重试风暴」），而同函数 MaxDelay 负值有「安全忽略」守卫、Delay 没有且无文档，同函数两种契约。守卫落在退避公式唯一实现处（computedDelay），Do/DoValue/Backoff/TotalBackoff 四个面同口径在 fn 首次调用前暴露（对齐 Lockout「配置错误宁可启动即暴露」哲学；MaxDelay 负值=「安全忽略=不限」没有这类后果，故两者守卫形态不同）；零退避是合法显式配置（设 0），不受影响
+- fix(ratelimit): `NewSlidingWindow` 非法值守卫 + maxCount<=0 语义声明（#135）——此前 maxCount<=0 静默构造出**恒拒限流器**，症状（「全被拒」）与「真被打满」在调用方视角不可分辨，值班先去查流量而不会怀疑配置；且与同包 Lockout「非法值 panic」哲学相反（LockoutConfig 注释点名「锁静默失效等于没有防护」）。修法：`window<=0` 与 `maxCount<0` panic（启动即暴露）；`maxCount==0` 按**不限流**处理（恒放行、不记账，对齐同包 WithMaxEntries/LockoutConfig.MaxEntries 的 0=不限口径与宿主配置面直觉——bianque 的 webhook 源限频靠宿主侧守卫 `perMin<=0 return true` 躲坑，守卫应在库侧）；AllowN/Reserve/Wait/Count 全路径同口径
+- fix(ratelimit): `KeyedLimiterOf.Get` 慢路径不再登记 factory 返回的 nil 条目（#134）——Create 明确拒 nil、Replace 明确拒 nil，唯独 Get 慢路径照单注册：幽灵条目被后续 Get 快路径持续刷新 lastSeen ⇒ IdleTTL 永不回收（慢性泄漏到进程重启），且占住 WithMaxEntries 名额把真 key 挤出容量护栏（OverCapHits 增长但症状只是「新 key 恒 false」，与限流命中不可分辨）。修后 factory 返回 nil 不注册直接返回 nil，doc 的「配额表缺 key 返回 nil ⇒ Allow 显式失败」建议才真正成立
+
+关联问题单：concurrency#134、concurrency#135、concurrency#136、concurrency#137、concurrency#138。
+
 ## [v0.23.4] — 2026-11-03
 
 - feat(retry): 导出退避预算 Backoff/TotalBackoff + 无界重试档 UnboundedAttempts（#128 #129）

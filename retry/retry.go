@@ -6,6 +6,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"time"
@@ -35,6 +36,10 @@ type Config struct {
 	Attempts int
 	// Delay 退避基数。Linear=false 固定间隔；Linear=true 第 i 次失败后等待 Delay*i。
 	// Exponential=true 时第 i 次失败后等待 Delay*2^(i-1)（见 Exponential）。
+	// **负值 panic**（#136）：负退避 = 零退避，会静默消灭「打散重试风暴」这道
+	// 包内核心防线——「漏个负号」的配置错误必须当场暴露而不是静默吞掉（对齐
+	// 同矩阵 Lockout「非法值 panic」的哲学；MaxDelay 的负值是「安全忽略=不限」，
+	// 没有这类后果，故两者守卫形态不同）。零退避请显式设 0。
 	Delay time.Duration
 	// MaxDelay 单次退避上限（<=0 不限）。
 	MaxDelay time.Duration
@@ -92,7 +97,9 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 //
 // 契约：
 //   - err == nil 时返回值有效；err != nil 时返回**零值**——失败那次的中间结果
-//     不可用，返回它会诱导调用方误用未成功的产物。
+//     不可用，返回它会诱导调用方误用未成功的产物。需要拿「失败伴生数据」做
+//     错误分类/审计（如状态码、响应摘要）时，让 fn 把它装进 DetailError
+//     （见 WithDetail/Detail，#138）——零值契约不动，伴生数据随 lastErr 送达。
 //   - 退避等待期间 ctx 取消 → 返回零值与 ctx.Err()。
 //   - 每次重试启动前 ctx 已取消 → 返回零值与 ctx.Err()（fn 不再调用；
 //     Delay=0 的忙等路径同样感知取消，无界重试不会在取消后空转）。
@@ -192,6 +199,11 @@ func TotalBackoff(cfg Config, attempts int) time.Duration {
 // Backoff/TotalBackoff 预计算面与 Do 实跑面共用它——「预计算」与「实跑」同源，
 // 公式改动不可能只落在一侧（#128 的根因是消费方只能手抄公式）。
 func computedDelay(cfg Config, attempt int) time.Duration {
+	// Delay 负值守卫（#136）：守在公式唯一实现处，Do/DoValue/Backoff/TotalBackoff
+	// 四个面同口径暴露——负值在哪条路径上都不该静默变成零退避
+	if cfg.Delay < 0 {
+		panic(fmt.Sprintf("retry: Config.Delay 不能为负（got %s）——负退避等于零退避，会静默消灭防重试风暴防线；零退避请显式设 0", cfg.Delay))
+	}
 	if attempt < 1 {
 		attempt = 1
 	}
