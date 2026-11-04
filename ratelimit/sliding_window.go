@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -18,13 +19,25 @@ type SlidingWindow struct {
 // NewSlidingWindow 创建滑动窗口限流器。
 //
 // 参数:
-//   - window: 时间窗口大小
-//   - maxCount: 窗口内最大请求数
+//   - window: 时间窗口大小，<=0 直接 panic（对齐 Lockout 的「配置错误宁可启动
+//     即暴露」——窗口为 0 的滑窗没有语义）
+//   - maxCount: 窗口内最大请求数；**<=0 视为不限流**（恒放行、不记账，对齐
+//     同包 WithMaxEntries / LockoutConfig.MaxEntries 的 0=不限口径）——配置面
+//     「0=不限」是多数宿主的直觉（#135）。需要「窗口内 0 配额」的恒拒语义
+//     不该构造限流器，直接在业务侧拒绝即可。负值 panic：负配额没有任何可辩护
+//     语义，「漏个负号」必须启动即暴露，而不是静默变成恒拒限流器（那与「真被
+//     打满」在调用方视角不可分辨，值班先去查流量而不会怀疑配置）。
 //
 // 用法:
 //
 //	limiter := ratelimit.NewSlidingWindow(time.Minute, 100) // 每分钟最多 100 次
 func NewSlidingWindow(window time.Duration, maxCount int) *SlidingWindow {
+	if window <= 0 {
+		panic("ratelimit: sliding window duration must be greater than 0")
+	}
+	if maxCount < 0 {
+		panic(fmt.Sprintf("ratelimit: sliding window maxCount must not be negative, got %d (0 = unlimited)", maxCount))
+	}
 	return &SlidingWindow{
 		window:   window,
 		maxCount: maxCount,
@@ -38,6 +51,9 @@ func (sw *SlidingWindow) Allow() bool {
 
 // AllowN 检查是否允许 N 个请求。n<=0 视为 0 个请求，直接放行（不占槽位）。
 func (sw *SlidingWindow) AllowN(n int) bool {
+	if sw.maxCount <= 0 {
+		return true // 不限流档（#135）：恒放行、不记账
+	}
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -69,6 +85,9 @@ func (sw *SlidingWindow) AllowN(n int) bool {
 // 槽位已按 now+d 预占——与 x/time/rate 的 Reserve 语义一致：预留即消费，
 // 并发调用者拿到的是互不相同的槽位而非同一个"虚拟许可"。
 func (sw *SlidingWindow) Reserve() time.Duration {
+	if sw.maxCount <= 0 {
+		return 0 // 不限流档（#135）：立即放行、不记账
+	}
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -138,6 +157,9 @@ func (sw *SlidingWindow) Reset() {
 // 「已占位未放行」的幽灵计数（与 Reserve 的「预留即消费」口径不同，这里刻意
 // 不预占——等待者还没拿到配额，不该占着坑）。
 func (sw *SlidingWindow) Wait(ctx context.Context) error {
+	if sw.maxCount <= 0 {
+		return nil // 不限流档（#135）：立即放行、不记账
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

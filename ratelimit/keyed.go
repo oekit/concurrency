@@ -154,8 +154,9 @@ func NewKeyedLimiterOf[K comparable](factory func() Limiter, opts ...KeyedOption
 //
 // ⚠️ 未在配额表里登记的 key 会拿到 factory 返回的值（若 factory 写了兜底默认值，
 // 就是静默按兜底档限流）。这是 API 形状使然，不是库的 bug——但它曾导致一次迁移中
-// 未登记的接口被按默认档限流。**配额表缺 key 时应让它显式失败**（返回 nil 会让
-// Allow 返回 false，见 Get 的容量护栏说明），或在 Allow 处自行判空，避免静默降级。
+// 未登记的接口被按默认档限流。**配额表缺 key 时应让它显式失败**（factory 返回 nil
+// 会让 Allow 返回 false，且 nil **不会被登记**为条目——见 Get 的说明），或在 Allow
+// 处自行判空，避免静默降级。
 func NewKeyedLimiterByFunc[K comparable](factory func(K) Limiter, opts ...KeyedOption[K]) *KeyedLimiterOf[K] {
 	cfg := keyedConfig[K]{
 		ttl:        defaultTTL,
@@ -203,7 +204,12 @@ func (kl *KeyedLimiterOf[K]) allowNew(now time.Time) bool {
 	return len(kl.limiters) < kl.maxEntries
 }
 
-// Get 获取指定 key 的限流器。表满且 key 未登记时返回 nil。
+// Get 获取指定 key 的限流器。以下两种情形返回 nil：
+//   - 表满且 key 未登记（容量护栏拒绝，OverCapHits 计数）；
+//   - factory 对该 key 返回 nil（#134）——此时**不登记**条目，对齐 Create/Replace
+//     的拒 nil 契约：nil 若被注册成条目，会被后续 Get 的快路径持续刷新 lastSeen
+//     ⇒ IdleTTL 永不回收（慢性泄漏），还会占住 WithMaxEntries 的名额把真 key
+//     挤出护栏（OverCapHits 增长，症状与「限流命中」不可分辨）。
 func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
 	kl.mu.RLock()
 	entry, ok := kl.limiters[key]
@@ -227,6 +233,9 @@ func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
 	}
 
 	limiter := kl.factory(key)
+	if limiter == nil {
+		return nil
+	}
 	entry = &limiterEntry{limiter: limiter}
 	entry.lastSeen.Store(time.Now().UnixNano())
 	kl.limiters[key] = entry
