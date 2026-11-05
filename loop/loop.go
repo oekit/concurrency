@@ -7,11 +7,36 @@ import (
 	"github.com/oekit/concurrency/async"
 )
 
+// IntervalMode 周期循环的间隔模式（#140）。
+type IntervalMode int
+
+const (
+	// IntervalFixed 固定节奏（默认）：按 Interval 的固定时刻表触发，忙时丢 tick——
+	// fn 同步执行不重叠，执行期间到点的 tick 积压在 ticker 缓冲（cap=1）自然合并。
+	// 关心「固定时刻表」的任务用这档（心跳 / 快照落盘 / 配置轮询）。
+	IntervalFixed IntervalMode = iota
+
+	// IntervalAfterCompletion 轮次完成后间隔：本轮 fn 返回（含 panic 收编）后再等
+	// Interval 才跑下一轮——本轮跑得久，下一轮相应推迟。关心「两次执行之间至少
+	// 隔开 Interval」的任务用这档（清理 / 巡检 / 对账 / 认领-投递类 worker）：
+	// 固定节奏语义下「轮次间隔 ≥ Interval」没有保证（长轮次只丢 tick 不后移），
+	// 而这类任务对时序的隐含假设恰恰是间隔下限。
+	//
+	// 间隔从「本轮结束」起算：fn 返回 → 重置计时器 → 等 Interval → 下一轮。
+	// panic 收编（RunSafe）发生在 fn 外层，收编完成后同样重新计时。
+	IntervalAfterCompletion
+)
+
 // Config 周期循环参数。
 type Config struct {
 	// Interval 轮次间隔。<=0 视为 0（只跑首跑轮，避免忙轮询）。
+	// IntervalMode 两种模式下语义不同：IntervalFixed 是固定节奏的周期；
+	// IntervalAfterCompletion 是「本轮结束到下一轮开始」的间隔。
 	Interval time.Duration
+	// IntervalMode 间隔模式，缺省 IntervalFixed（保持既有语义，#140）。
+	IntervalMode IntervalMode
 	// FirstDelay 首跑延迟；0 = 立即首跑。延迟期间 ctx 取消可打断。
+	// 两种模式下都作用于首跑之前。
 	FirstDelay time.Duration
 	// Name 可选任务名：panic 汇报带 task 标签（async.RunSafeLabeled），便于按任务聚合。
 	Name string
@@ -60,13 +85,30 @@ func (l *Loop) loop(ctx context.Context, cfg Config, fn func(ctx context.Context
 		}
 	}
 
-	// 立即首跑；此后按 Interval 丢 tick 迭代
+	// 立即首跑；此后按模式迭代
 	l.runOnce(cfg.Name, ctx, fn)
 
 	if cfg.Interval <= 0 {
 		// 非正间隔：只跑首跑轮（避免无意义忙轮询拖死 CPU）；
 		// 要持续轮询应给正间隔
 		return
+	}
+
+	if cfg.IntervalMode == IntervalAfterCompletion {
+		// 轮次完成后间隔（#140）：本轮结束 → 重置计时器 → 等 Interval → 下一轮。
+		// 本轮跑得久，下一轮相应推迟——「轮次间隔 ≥ Interval」由构造保证。
+		// timer 每轮新建：间隔从本轮结束起算，Ticker 的固定时刻表语义在这里不成立。
+		for {
+			timer := time.NewTimer(cfg.Interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			// 取消拦下一轮；在飞已在 runOnce 内同步完成——与固定节奏同契约
+			l.runOnce(cfg.Name, ctx, fn)
+		}
 	}
 
 	ticker := time.NewTicker(cfg.Interval)
