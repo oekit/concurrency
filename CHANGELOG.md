@@ -1,3 +1,7 @@
+## [v0.25.1] — 2026-11-06
+
+- build: 矩阵依赖地板对齐（维护轮 #233）
+
 ## [v0.25.0] — 2026-11-06
 
 - feat(loop): 新增 `IntervalAfterCompletion` 间隔模式（#140）——`loop.Run` 此前只有「固定节奏 + 忙时丢 tick」一种语义，而周期任务里有很大一类（清理/巡检/对账/认领-投递类 worker）关心的是「两次执行之间至少隔开 Interval」：本轮跑得久，下一轮相应推迟。固定节奏语义下长轮次只丢 tick 不后移，「轮次间隔 ≥ Interval」无保证，消费方只能在 `async.Supervise` 里手搓同款「fn + timer select」（octopus 两处实证：outbox worker / bot 巡检——用 Supervise 只为 panic 收编，重启/退避语义根本没触发）。新增 `Config.IntervalMode`（缺省 `IntervalFixed` 保持既有语义零破坏）：AfterCompletion 模式下间隔从「本轮结束」起算，fn 返回（含 panic 收编）→ 重置计时器 → 等 Interval → 下一轮；ctx 取消拦下一轮、在飞轮次跑完的排水契约不变，轮间等待可被取消打断（timer select 而非 Sleep）。两种模式的判据差异见包文档「间隔模式」节
