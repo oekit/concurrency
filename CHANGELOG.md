@@ -1,3 +1,20 @@
+## [v0.26.0] — 2026-11-06
+
+- feat(async): 补 `RunSafeCtx` / `RunSafeCtxRet`——在**别人的 goroutine 边界**就地收编 panic，收编成 `*PanicError` 交回调用方，并带 ctx 自己记日志/计数（#146）
+- feat(fanout): 补 `WithOnItemError` 逐项失败钩子——`panic` 也走钩子，消费方不必再在 fn 内层手写 `recover` 抢先（#146）
+- feat(ratelimit): 补写合并节流 `Throttle[K]`（first-then-suppress）——同 key 窗口内只生效一次，写失败撤销戳可立刻重试，`Suppressed()` 提供「合并生效了没有」的观测口（#145）
+- test(ratelimit): 空闲回调用例改**事件驱动**等待——原先「睡 80ms 断言后台清扫已回收」余量只有约 2 倍，实测 ~10% 假红
+
+**#146（人机工学）**：`GoSafe`/`RunSafe` 走全局 PanicHandler（签名不带 ctx ⇒ 日志无法按请求聚合），`GoSafeWithContext` 新开 goroutine（调用方拿不到结局），`RunSafeErr` 收不到 ctx——三档都装不下「在第三方 SDK 自己的读循环 goroutine 里就地收编 panic」。ws 客户端事件回调这类边界上，外层 `Supervise` 覆盖不到，panic 必须在回调内收编，而回调里又确实需要 ctx 才能把这条 panic 记得有用。`RunSafeCtx` 补的正是这一格：同步执行、ctx 透传、panic ⇒ `*PanicError` **返回**给调用方（**同时**照 `RunSafeErr` 口径向全局 handler 汇报一份，全局观测面不因「调用方自己也要记」而漏）；`RunSafeCtxRet` 是带返回值的伴生（panic ⇒ 零值 + `*PanicError`，调用方才能区分「合法零值 + nil」与「崩了」）。
+
+`fanout` 侧同一个根源：库已把逐项 panic 收编成 `*async.PanicError` 并经 `Error.Failed` 返还，但消费方想在**该项失败那一刻**落业务终态（毒丸行标记失败）时，此前只能在 fn 内层 `defer recover()` **抢先于库的收编**（库的 PanicError 通道因此被吃掉），或等整批返回后再 `errors.As` 分拣（长批里终态与进度脱节）。`WithOnItemError` 把「分拣 + 落终态」放回库的收编链路：聚合返回**之前**逐项同步调用（**调用方 goroutine、非 worker ⇒ 不并发**），`err` 覆盖 fn 返回的错误、panic 收编结果、ctx 取消导致未启动项的 `context.Canceled`（与 `Error.Failed` 同一口径）；钩子自己 panic 就地收编上报，不改变该项失败归属。选项走**变参** ⇒ 既有四参调用点零改动。
+
+**#145（写合并节流）**：`KeyedLimiter` 是速率配额（Allow=false 只说明这次没通过），而「last_used_at 类时间戳回写」要的是**窗口内去重合并**——每个请求都该 touch，真落库窗口一次。拿令牌桶硬凑会缺一笔账：抑制了几次没有口径，observability 上看不出合并有没有生效。`Throttle[K]` 补这一格，三条语义是刻意的：①窗口锚在**上次放行时刻**（固定窗口，时钟可注入）；②fn 返回错误或 panic ⇒ **撤销本次戳**，下一个调用立刻可重试——写失败等于「没写」，若仍记成已消费，时间戳会整整一个窗口得不到更新；③fn **不持锁**执行，慢 fn 不阻塞其它 key（同 key 的抑制判定也不等它）。撤销只删「还是自己那一戳」的条目：fn 耗时超过窗口时别的调用可能已写入更新的戳，无条件删会让下一次重复执行。
+
+**改用例的那条**：`TestKeyedLimiter_EvictCallback_PanicAbsorbed` 用「睡 80ms 再断言后台清扫已回收」，而清扫 ticker 的首个命中时刻取决于 ttl、ticker 间隔与调度延迟，插桩实测约 35ms 才命中 ⇒ 余量只有约 2 倍 ⇒ 负载高时实测 20 次跑出 2 次红（`evictions=0 want >=1`）。改事件驱动：回调里 `sync.Once` 发信号（先发信号再 panic，panic 照旧由库收编），3s 超时兜底。改后 40 次连跑零红。这与 v0.23.1 修 async 同款假红是同一条纪律：**等后台协程必须等事件，不要等一个估计出来的时间窗**。
+
+关联问题单：concurrency#145、concurrency#146。
+
 ## [v0.25.1] — 2026-11-06
 
 - build: 矩阵依赖地板对齐（维护轮 #233）
