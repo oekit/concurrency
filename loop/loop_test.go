@@ -13,19 +13,36 @@ func TestRunFirstDelayThenInterval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	const firstDelay = 30 * time.Millisecond
 	var n atomic.Int32
-	l := Run(ctx, Config{Interval: 20 * time.Millisecond, FirstDelay: 30 * time.Millisecond}, func(context.Context) {
-		n.Add(1)
+	firstAt := make(chan time.Duration, 1)
+	start := time.Now()
+	l := Run(ctx, Config{Interval: 20 * time.Millisecond, FirstDelay: firstDelay}, func(context.Context) {
+		if n.Add(1) == 1 {
+			select {
+			case firstAt <- time.Since(start):
+			default:
+			}
+		}
 	})
 
-	// FirstDelay 内不应有执行
-	time.Sleep(15 * time.Millisecond)
-	if n.Load() != 0 {
-		t.Fatalf("FirstDelay 内不应执行，实际 %d", n.Load())
+	// 「FirstDelay 内不应执行」不能靠「睡 15ms 再取样」来判：time.Sleep 在负载下
+	// 会超时到 30ms 之外，取样时刻本身就不确定 ⇒ 断言随时会假红（实测 50 次跑出
+	// 「实际 1」）。改为**量首跑的实际时刻**，判据与 FirstDelay 直接比。
+	select {
+	case d := <-firstAt:
+		if d < firstDelay {
+			t.Fatalf("首跑早于 FirstDelay：%v < %v", d, firstDelay)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("FirstDelay 后仍未首跑")
 	}
 
-	// FirstDelay 后应有首跑 + 后续 tick
-	time.Sleep(80 * time.Millisecond)
+	// FirstDelay 后至少再有一轮 tick：等**事件**不等等时间窗（超时只作兜底）。
+	deadline := time.Now().Add(3 * time.Second)
+	for n.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
 	if n.Load() < 2 {
 		t.Fatalf("期望至少 2 轮，实际 %d", n.Load())
 	}

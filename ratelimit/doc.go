@@ -30,4 +30,19 @@
 //	    // 本次失败触发锁定（或已在锁定中）
 //	}
 //	lo.Reset("user:42") // 登录成功清零
+//
+// # 与 Throttle（写合并节流）的分工
+//
+// 上面的 Limiter / KeyedLimiter 是**速率配额**：单位时间允许通过多少次。
+// Throttle 是另一件事——**窗口内去重合并**（first-then-suppress）：同一个 key
+// 在窗口里只需生效一次，后续调用静默抑制、不排队、不报错、不占配额：
+//
+//	th := ratelimit.NewThrottle[uint64](time.Minute)
+//	ran, err := th.Do(ctx, userID, func(ctx context.Context) error {
+//	    return repo.TouchLastSeen(ctx, userID) // 每个请求都该 touch，真写库一分钟一次
+//	})
+//	_ = ran // false = 本窗口内已合并，不是失败
+//
+// 拿令牌桶硬凑这套语义会缺一笔账：Allow 返回 false 只说明「这次没通过」，
+// 没有「抑制了几次」的口径（见 Throttle.Suppressed）。
 package ratelimit

@@ -39,6 +39,14 @@
 //	async.GoSafeLabeled("janitor", func() { sweep() })
 //	async.RunSafeLabeled("batch-flush", func() { flush() })
 //
+// 在**别人的 goroutine 边界**上就地收编 panic（第三方 SDK 回调，外层监督够不着），
+// 且收编后要把 panic 连同 ctx 交给调用方自己记：
+//
+//	err := async.RunSafeCtx(ctx, func(ctx context.Context) { handleEvent(ctx, ev) })
+//	var pe *async.PanicError
+//	if errors.As(err, &pe) { log.ErrorContext(ctx, "事件处理 panic", "panic", pe.Value) }
+//
+// 需要同时拿返回值用 RunSafeCtxRet：panic 时返回零值与 *PanicError。
 // # 使用场景
 //
 //   - 后台任务：日志上报、指标采集、缓存预热
