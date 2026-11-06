@@ -4,7 +4,7 @@
 > 当前版本：`v0.26.0` · module：`github.com/oekit/concurrency` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
-`async/`、`batch/`、`breaker/`、`budget/`、`fanout/`、`gopool/`、`group/`、`loop/`、`progress/`、`ratelimit/`、`retry/`、`retry/httpx/`、`shedding/`、`singleflight/`、`syncx/`、`timewheel/`、`window/`
+`async/`、`async/supervisor/`、`batch/`、`breaker/`、`budget/`、`fanout/`、`gopool/`、`group/`、`loop/`、`poll/`、`progress/`、`ratelimit/`、`retry/`、`retry/httpx/`、`shedding/`、`singleflight/`、`syncx/`、`timewheel/`、`window/`
 
 ## 硬规则速览（全矩阵适用）
 
