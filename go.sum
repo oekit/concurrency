@@ -1,4 +1,4 @@
-github.com/oekit/pkg v0.35.0 h1:lKGJw4s9CzxUpmlE+iywpM9BIkSGPI0reKwpSaN5Nmo=
-github.com/oekit/pkg v0.35.0/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
+github.com/oekit/pkg v0.35.1 h1:2fyZMmxVh5/evRzEsA1EHPMImBiABiitwSX+N1yvfts=
+github.com/oekit/pkg v0.35.1/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
 golang.org/x/time v0.14.0 h1:MRx4UaLrDotUKUdCIqzPC48t1Y9hANFKIRpNx+Te8PI=
 golang.org/x/time v0.14.0/go.mod h1:eL/Oa2bBBK0TkX57Fyni+NgnyQQN4LitPmob2Hjnqw4=
