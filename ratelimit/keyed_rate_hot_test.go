@@ -282,16 +282,31 @@ func TestKeyedLimiter_EvictCallback_SweepOnPressure(t *testing.T) {
 }
 
 // TestKeyedLimiter_EvictCallback_PanicAbsorbed 回调 panic 被收编，主路径不受影响。
+//
+// 等回收用**事件驱动**（回调里发信号），不用固定 sleep 等后台清扫：清扫 ticker 的
+// 首次命中时刻取决于 ttl、ticker 间隔与调度延迟，原先「睡 80ms 断言已回收」只有
+// 约 2 倍余量，CI 负载高时实测 ~10% 概率假红（evictions=0 want >=1）。
 func TestKeyedLimiter_EvictCallback_PanicAbsorbed(t *testing.T) {
 	async.SetPanicHandler(func(msg string, stack []byte) { _ = msg; _ = stack }) // 静音
+	t.Cleanup(func() { async.SetPanicHandler(nil) })
+
+	fired := make(chan struct{})
+	var once sync.Once
 	kl := NewKeyedLimiterOf[string](func() Limiter { return NewTokenBucket(10, 10) },
 		WithIdleTTL[string](20*time.Millisecond),
-		WithEvictCallback[string](func(string, time.Duration) { panic("callback boom") }),
+		WithEvictCallback[string](func(string, time.Duration) {
+			once.Do(func() { close(fired) }) // 先发信号再 panic：panic 由库收编
+			panic("callback boom")
+		}),
 	)
 	defer kl.Close()
 
 	kl.Allow("a")
-	time.Sleep(80 * time.Millisecond) // 等清扫触发一次回调 panic
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("eviction callback never fired：清扫协程未在超时内回收空闲条目")
+	}
 
 	// 主路径存活：新 key 正常登记放行
 	if !kl.Allow("b") {

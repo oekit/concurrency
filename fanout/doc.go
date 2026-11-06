@@ -31,4 +31,15 @@
 // 一项失败**不**影响其余项——批量运维里「一台连不上」不该让另外九台的采集白跑。
 // 所有失败项在最后汇总成一个 *Error 返回（含下标），errors.Is / errors.As 可穿透
 // 到每一项的原始错误。
+//
+// # 逐项失败钩子（把业务终态落回失败现场）
+//
+// 需要在「该项失败那一刻」落业务终态（如把毒丸行标记为终态）时用 WithOnItemError：
+// 钩子在聚合返回**之前**逐项同步调用，**panic 也走这里**（err 是 *async.PanicError），
+// 调用方不必再在 fn 内层自己 recover 抢在库前面——那样会把库的 PanicError 通道吃掉。
+//
+//	results, err := fanout.Map(ctx, rows, 8, deliver,
+//	    fanout.WithOnItemError(func(i int, err error) {
+//	        markTerminal(ctx, rows[i].ID, err) // 该项失败当场落库
+//	    }))
 package fanout

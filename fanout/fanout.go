@@ -88,11 +88,14 @@ func (e *Error) Unwrap() []error {
 //
 // 底层引擎是 syncx.FanInLimitCtx（固定 worker 池 + 原子取号 + panic 收编 + ctx
 // fail-fast），本函数在其上补 item 口径与错误汇总。
+//
+// 可选行为（逐项失败钩子等）走变参 Option，见 WithOnItemError。
 func Map[T, R any](ctx context.Context, items []T, concurrency int,
-	fn func(ctx context.Context, item T) (R, error)) ([]R, error) {
+	fn func(ctx context.Context, item T) (R, error), opts ...Option) ([]R, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
+	o := newOptions(opts)
 
 	slots := syncx.FanInLimitCtx(ctx, len(items), concurrency,
 		func(ctx context.Context, i int) (R, error) {
@@ -105,6 +108,9 @@ func Map[T, R any](ctx context.Context, items []T, concurrency int,
 		results[i] = s.Val
 		if s.Err != nil {
 			failed = append(failed, ItemError{Index: i, Err: s.Err})
+			// 钩子在聚合阶段、返回之前逐项同步调用：此时该项的失败已经定形
+			// （含 panic 收编结果），调用方可在拿到整批结果前就落业务终态。
+			notifyItemError(o.onItemError, i, s.Err)
 		}
 	}
 	if len(failed) > 0 {
