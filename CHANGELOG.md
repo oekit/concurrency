@@ -1,3 +1,26 @@
+## [v0.27.0] — 2026-11-07
+
+- feat(poll): 新增 `RunCursor[T]`——带单调游标的长轮询批量拉取循环，四个易漂移语义由库钉死（游标只前进 / 处理完才推进 / 失败退避复用 retry 口径 / 单项 panic 收编不杀循环）（#144）
+- feat(async/supervisor): 新增 `Group[T]`——按键常驻循环集合与外部目标集持续对齐（新增起 / 消失停并转排水 / 规格变更重启 / 意外死亡探活重启），组内单条循环复用 `async.Supervise`（#143）
+- feat(retry): 导出 `Delay(cfg, attempt, err)`——退避的**实跑口径**（真实抖动随机量 / `DelayHint` 覆盖 / `MaxDelay` 封顶），与 `Backoff` 的上界口径互补；`poll` 的续拉退避直接走它，全仓仍只有一份退避公式
+- feat!(fanout): `Option` 更名 `MapOption`——本仓 AGENTS.md 禁止裸 `Option`（多包 co-import 冲突），v0.26.0 引入该别名时违反了这条。只传 `fanout.WithOnItemError(...)` 的调用点不受影响；显式声明该类型变量会编译失败
+
+**#144（游标长轮询）**：IM / 消息平台的收消息循环是同一个形状，逐平台复制——带游标拉一批 → 出错等固定几秒 → 推进游标并持久化 → 逐条处理。复制出来的副本在三处各自漂移：①退避是手写固定值（`time.After(3 * time.Second)`，无指数无抖动 ⇒ 两个平台同时撞故障会按同一节奏把下游再打一遍）；②游标推进时机各写各的（先推进后处理 = 崩溃丢消息，先处理后推进 = 崩溃重复投递，两版混在生产里）；③批内一条坏数据 panic 打死整个循环。
+
+`poll.RunCursor` 把四件事钉死成一份实现：**游标只前进**（非空批必须带回不同游标，否则 `ErrCursorStuck` 当场返回——它不会自愈，退避重试只会无限重复同一批）；**处理完才推进**（缺省档恒为 at-least-once，`OnAdvance` 先落盘成功才算推进，持久化失败就退回旧游标重拉——「凭记忆跳读」比重复处理难查得多）；**失败退避复用 `retry.Config` 全部口径**（指数 / 抖动 / `DelayHint` 服务端建议 / `MaxDelay` 封顶），不可续拉的错误（鉴权失效、游标被服务端作废）带错误返回而不空转；**单项 panic 经 `async.RunSafeCtx` 就地收编**成 `*PanicError` 并汇报全局 `PanicHandler`，循环存活。缺省档下某项失败即停本批（已处理的项会再处理一次，未处理的一项不丢）；`AdvanceOnItemError` 档下必须跑完整批再推进（中途返回会让剩余项再也不会被拉回来）。`IdleDelay` 没有安全缺省——服务端 hold 与不 hold 用同一个数字必有一边是错的，故只对 hold 的接口留 0 并由文档点明。
+
+**#143（按键 reconcile 组）**：`async.Supervise` 管**单条**循环活得好不好，`loop.Run` 管**固定周期**任务，但「目标集来自外部存储、运行中要持续对齐」这一类形态没有原语——通道/连接/租户 worker 池类服务各手写一份 `map[K]entry{cancel, spec, done}` + mutex，锁内 cancel/delete 顺序、snapshot 比对、done 非阻塞探活全是并发正确性敏感点。
+
+`supervisor.Group[T]` 收敛成两个动作：`Reconcile(targets)` 对齐、`Stop`/`Wait` 停机排水。组内单条循环的健壮性**完全复用** `async.Supervise`（panic 收编 + 指数退避 + 失败上限），本包只管集合——两层职责不重叠。三个刻意的判断：①身份取 `IDOf` 返回的 **reconcile 键**而不是主键，哪些字段变了要重启由调用方把字段编进键里决定（拿 `reflect.DeepEqual` 比较规格会在含 mutex / 函数字段时给出假差异 ⇒ 重启风暴，而漏编字段只是少重启一次，两种失效方向不对称）；②移除目标只取消、转排水集合，**不阻塞 Reconcile**（慢排水的循环不能拖住对齐），`Draining()` 暴露排水进度；③用户代码（cancel / start）一律在**锁外**调用——持锁启动会让回调里的读操作卡在不可重入的 `sync.Mutex` 上，失效形态是「整组对齐从此停摆」而不是一次可见的报错。
+
+观测三个非阻塞探针：`Len`（受管目标数）/ `Running`（循环尚未结束的目标数）/ `Draining`（已移除未退出）。`Running < Len` 是「集合对齐了但实际没在服务」的唯一观测口。注意 `Running` 不等于「start 已经跑过」——cancel 早于首跑时 `async.Supervise` 一次都不跑。
+
+**`retry.Delay` 那条**：写 `poll` 时发现「自己实现循环」的调用方拿不到**实跑**退避——`Backoff` 是上界口径（抖动取满），拿来当实跑等待会让抖动退化成确定值，同一批同时失败的实例仍撞在同一点上。故补 `Delay`（实跑口径）并与 `Backoff`（预算口径）在注释里明确分工；`poll` 的续拉退避走它，全仓仍然只有一份退避公式。
+
+**`fanout.Option` 更名**：本仓 AGENTS.md 写着「函数选项模式 `XxxOption`，禁止裸 `Option`（多包 co-import 冲突）」，而 v0.26.0 新增 `WithOnItemError` 时引入的正是裸 `Option`——自己立的规矩自己没守。0.x 阶段 minor 允许 breaking，故直接更名 `MapOption` 而不留别名（留别名等于把违禁名永久化）。调用点只传 `fanout.WithOnItemError(...)` 的不受影响。
+
+关联问题单：concurrency#143、concurrency#144。
+
 ## [v0.26.0] — 2026-11-06
 
 - feat(async): 补 `RunSafeCtx` / `RunSafeCtxRet`——在**别人的 goroutine 边界**就地收编 panic，收编成 `*PanicError` 交回调用方，并带 ctx 自己记日志/计数（#146）
