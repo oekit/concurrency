@@ -2,17 +2,17 @@ package fanout
 
 import "github.com/oekit/concurrency/async"
 
-// Option 配置 Map 的可选行为。
+// MapOption 配置 Map 的可选行为。
 //
 // 走变参选项而不是新增必填参数：既有四参调用点一个都不用改（本包所有新增能力
 // 都按这个口径加）。
-type Option func(*options)
+type MapOption func(*options)
 
 type options struct {
 	onItemError func(index int, err error)
 }
 
-func newOptions(opts []Option) options {
+func newOptions(opts []MapOption) options {
 	var o options
 	for _, fn := range opts {
 		if fn != nil {
@@ -53,7 +53,7 @@ func newOptions(opts []Option) options {
 //	    fanout.WithOnItemError(func(i int, err error) {
 //	        markTerminal(ctx, rows[i].ID, err) // 该项失败当场落库
 //	    }))
-func WithOnItemError(hook func(index int, err error)) Option {
+func WithOnItemError(hook func(index int, err error)) MapOption {
 	return func(o *options) { o.onItemError = hook }
 }
 

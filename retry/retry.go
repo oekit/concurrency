@@ -169,6 +169,25 @@ func Backoff(cfg Config, attempt int) time.Duration {
 	return jitterCeiling(capDelay(computedDelay(cfg, attempt), cfg.MaxDelay), cfg)
 }
 
+// Delay 计算第 attempt 次失败后的**实际等待时长**——实跑口径：抖动取真实随机量、
+// DelayHint 服务端建议覆盖计算值、MaxDelay 封顶。失败侧（attempt 从 1 起）。
+//
+// 与 Backoff 互补，两者**不是**同一量纲：
+//
+//   - Backoff 返回**上界**（抖动取满），供预算预计算——锁 TTL、重试窗口预算这类
+//     「我要先把最坏情况算清楚」的场景；
+//   - Delay 返回**这一次真的会等多久**，供自己写等待/循环的调用方。拿 Backoff 当
+//     实跑等待会让抖动退化成「恒取上界」的确定值，同一批同时失败的实例仍然撞在
+//     同一点上，打散重试风暴的意义随之消失。
+//
+// Do/DoValue 的实跑退避与本函数同源（见 backoff）：公式、抖动、DelayHint 优先、
+// MaxDelay 封顶只有一份实现，消费方不必手抄指数退避（#128 的根因正是手抄）。
+//
+// cfg.Delay 为负会 panic（与 Do 同口径，#136）。
+func Delay(cfg Config, attempt int, err error) time.Duration {
+	return backoff(cfg, attempt, err)
+}
+
 // TotalBackoff 预计算 attempts 次尝试（含首次，与 Config.Attempts 同口径）的
 // 总退避窗口 = 第 1..attempts-1 次失败后各次退避上限之和，供锁 TTL/预算场景；
 // 「N 次重试」即 TotalBackoff(cfg, N+1)。attempts <= 1 返回 0。

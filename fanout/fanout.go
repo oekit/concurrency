@@ -89,9 +89,9 @@ func (e *Error) Unwrap() []error {
 // 底层引擎是 syncx.FanInLimitCtx（固定 worker 池 + 原子取号 + panic 收编 + ctx
 // fail-fast），本函数在其上补 item 口径与错误汇总。
 //
-// 可选行为（逐项失败钩子等）走变参 Option，见 WithOnItemError。
+// 可选行为（逐项失败钩子等）走变参 MapOption，见 WithOnItemError。
 func Map[T, R any](ctx context.Context, items []T, concurrency int,
-	fn func(ctx context.Context, item T) (R, error), opts ...Option) ([]R, error) {
+	fn func(ctx context.Context, item T) (R, error), opts ...MapOption) ([]R, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
