@@ -45,6 +45,31 @@ func TestRollingWindow_New(t *testing.T) {
 	}
 }
 
+// TestRollingWindow_InvalidIntervalPanics interval<=0 属编程错误，构造期 panic
+// （#158）：旧实现只校验 size，interval 为 0 时首次 Add/Reduce 即在 span() 里
+// 整型除零 panic——运行期炸在读写路径上，远不如构造期直接暴露；
+// 与 breaker WithBreakerWindow 的护栏口径对齐。
+func TestRollingWindow_InvalidIntervalPanics(t *testing.T) {
+	for _, interval := range []time.Duration{0, -time.Second} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("interval %v should panic", interval)
+				}
+			}()
+			NewRollingWindow[float64, *Bucket[float64]](newTestBucket, 10, interval)
+		}()
+	}
+	// 正值照常构造可用
+	r := NewRollingWindow[float64, *Bucket[float64]](newTestBucket, 2, time.Millisecond)
+	r.Add(1)
+	var sum float64
+	r.Reduce(func(b *Bucket[float64]) { sum += b.Sum })
+	if sum != 1 {
+		t.Errorf("sum = %v, want 1", sum)
+	}
+}
+
 // TestRollingWindow_NilClockFallback 注入 nil 时钟应回退 time.Now，不 panic。
 func TestRollingWindow_NilClockFallback(t *testing.T) {
 	r := NewRollingWindow[int64, *Bucket[int64]](func() *Bucket[int64] { return new(Bucket[int64]) }, 2, bucketInterval,
