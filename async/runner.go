@@ -3,6 +3,7 @@ package async
 import (
 	"context"
 	"fmt"
+	"log"
 )
 
 // Runner 携带自己的 PanicHandler 的 GoSafe/RunSafe 家族（#13）。
@@ -25,12 +26,25 @@ type Runner struct {
 	Handler PanicHandler
 }
 
-// handler 返回生效的汇报函数（nil 安全）。
-func (r Runner) handler() PanicHandler {
-	if r.Handler != nil {
-		return r.Handler
+// call 经本实例 handler 汇报一次 panic，是 Runner 全部方法的唯一汇报出口（#164）。
+//
+// handler 自身 panic 必须就地收编：本函数运行在 recover 闭包内（RunSafe/GoSafe
+// 的 deferred recover），这里再 panic 不会被同一个 defer 恢复，直接打死进程——
+// 与包级 callPanicHandler 同款双层 recover 防护。此前六个方法各自直接调
+// r.handler()，同一个库里「包级 GoSafe 的 Handler panic 被收编、Runner 的
+// Handler panic 打死进程」自相矛盾。
+// 零值 Runner（Handler == nil）回退全局 handler：callPanicHandler 自带同款防护。
+func (r Runner) call(msg string, stack []byte) {
+	if r.Handler == nil {
+		callPanicHandler(msg, stack)
+		return
 	}
-	return callGlobalPanicHandler
+	defer func() {
+		if rr := recover(); rr != nil {
+			log.Printf("async: panic handler itself panicked: %v", rr)
+		}
+	}()
+	r.Handler(msg, stack)
 }
 
 // RunSafe 同步运行 fn，panic 经本实例 handler 汇报（不重新 panic）。
@@ -38,7 +52,7 @@ func (r Runner) RunSafe(fn func()) {
 	defer func() {
 		if rc := recover(); rc != nil {
 			pe := newPanicError("", rc)
-			r.handler()(fmt.Sprintf("%v", rc), pe.Stack)
+			r.call(fmt.Sprintf("%v", rc), pe.Stack)
 		}
 	}()
 	fn()
@@ -49,7 +63,7 @@ func (r Runner) RunSafeErr(fn func() error) (err error) {
 	defer func() {
 		if rc := recover(); rc != nil {
 			pe := newPanicError("", rc)
-			r.handler()(fmt.Sprintf("%v", rc), pe.Stack)
+			r.call(fmt.Sprintf("%v", rc), pe.Stack)
 			err = pe
 		}
 	}()
@@ -62,7 +76,7 @@ func (r Runner) GoSafe(fn func()) {
 		defer func() {
 			if rc := recover(); rc != nil {
 				pe := newPanicError("", rc)
-				r.handler()(fmt.Sprintf("%v", rc), pe.Stack)
+				r.call(fmt.Sprintf("%v", rc), pe.Stack)
 			}
 		}()
 		fn()
@@ -75,7 +89,7 @@ func (r Runner) GoSafeLabeled(task string, fn func()) {
 		defer func() {
 			if rc := recover(); rc != nil {
 				pe := newPanicError(task, rc)
-				r.handler()(labeledMsg(task, rc), pe.Stack)
+				r.call(labeledMsg(task, rc), pe.Stack)
 			}
 		}()
 		fn()
@@ -93,14 +107,9 @@ func RunSafeRetWith[T any](r Runner, fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if rc := recover(); rc != nil {
 			pe := newPanicError("", rc)
-			r.handler()(fmt.Sprintf("%v", rc), pe.Stack)
+			r.call(fmt.Sprintf("%v", rc), pe.Stack)
 			err = pe
 		}
 	}()
 	return fn()
-}
-
-// callGlobalPanicHandler 委托全局 handler（零值 Runner 的回退目标）。
-func callGlobalPanicHandler(msg string, stack []byte) {
-	callPanicHandler(msg, stack)
 }
