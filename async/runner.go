@@ -2,7 +2,6 @@ package async
 
 import (
 	"context"
-	"fmt"
 	"log"
 )
 
@@ -15,14 +14,15 @@ import (
 //
 // 用法：
 //
-//	var runner = async.Runner{Handler: func(msg string, stack []byte) {
-//	    logx.Error("agentkit.worker.task_panic", "msg", msg, "stack", string(stack))
+//	var runner = async.Runner{Handler: func(ctx context.Context, r any, stack []byte) {
+//	    logx.CtxError(ctx, "agentkit.worker.task_panic", "err", r, "stack", string(stack))
 //	}}
 //
 //	runner.GoSafeLabeled("claim", func() { ... })
 //	err := runner.RunSafeErr(func() error { ... })
 type Runner struct {
-	// Handler 本实例的 panic 汇报函数；nil 回退全局 PanicHandler。
+	// Handler 本实例的 panic 汇报函数（签名与全局 PanicHandler 一致，#184）；
+	// nil 回退全局 PanicHandler。
 	Handler PanicHandler
 }
 
@@ -34,9 +34,9 @@ type Runner struct {
 // r.handler()，同一个库里「包级 GoSafe 的 Handler panic 被收编、Runner 的
 // Handler panic 打死进程」自相矛盾。
 // 零值 Runner（Handler == nil）回退全局 handler：callPanicHandler 自带同款防护。
-func (r Runner) call(msg string, stack []byte) {
+func (r Runner) call(ctx context.Context, v any, stack []byte) {
 	if r.Handler == nil {
-		callPanicHandler(msg, stack)
+		callPanicHandler(ctx, v, stack)
 		return
 	}
 	defer func() {
@@ -44,7 +44,7 @@ func (r Runner) call(msg string, stack []byte) {
 			log.Printf("async: panic handler itself panicked: %v", rr)
 		}
 	}()
-	r.Handler(msg, stack)
+	r.Handler(ctx, v, stack)
 }
 
 // RunSafe 同步运行 fn，panic 经本实例 handler 汇报（不重新 panic）。
@@ -52,7 +52,7 @@ func (r Runner) RunSafe(fn func()) {
 	defer func() {
 		if rc := recover(); rc != nil {
 			pe := newPanicError("", rc)
-			r.call(fmt.Sprintf("%v", rc), pe.Stack)
+			r.call(context.Background(), rc, pe.Stack)
 		}
 	}()
 	fn()
@@ -63,7 +63,7 @@ func (r Runner) RunSafeErr(fn func() error) (err error) {
 	defer func() {
 		if rc := recover(); rc != nil {
 			pe := newPanicError("", rc)
-			r.call(fmt.Sprintf("%v", rc), pe.Stack)
+			r.call(context.Background(), rc, pe.Stack)
 			err = pe
 		}
 	}()
@@ -76,20 +76,21 @@ func (r Runner) GoSafe(fn func()) {
 		defer func() {
 			if rc := recover(); rc != nil {
 				pe := newPanicError("", rc)
-				r.call(fmt.Sprintf("%v", rc), pe.Stack)
+				r.call(context.Background(), rc, pe.Stack)
 			}
 		}()
 		fn()
 	}()
 }
 
-// GoSafeLabeled 带 task 标签的 GoSafe（msg 形如 "task=janitor: ..."）。
+// GoSafeLabeled 带 task 标签的 GoSafe：标签经 panic 汇报的 ctx 携带
+// （TaskFromContext 可取，#184 前拼在 msg 前缀 "task=<name>: ..." 里）。
 func (r Runner) GoSafeLabeled(task string, fn func()) {
 	go func() {
 		defer func() {
 			if rc := recover(); rc != nil {
 				pe := newPanicError(task, rc)
-				r.call(labeledMsg(task, rc), pe.Stack)
+				r.call(withTask(context.Background(), task), rc, pe.Stack)
 			}
 		}()
 		fn()
@@ -97,8 +98,17 @@ func (r Runner) GoSafeLabeled(task string, fn func()) {
 }
 
 // GoWithContext 启动携带 ctx 的安全 goroutine（汇报走本实例 handler）。
+// panic 汇报携带该 ctx（#184：此前经由 GoSafe 委托，ctx 到不了 handler）。
 func (r Runner) GoWithContext(ctx context.Context, fn func(ctx context.Context)) {
-	r.GoSafe(func() { fn(ctx) })
+	go func() {
+		defer func() {
+			if rc := recover(); rc != nil {
+				pe := newPanicError("", rc)
+				r.call(ctx, rc, pe.Stack)
+			}
+		}()
+		fn(ctx)
+	}()
 }
 
 // RunSafeRetWith 是 Runner 版的 RunSafeRet（方法不能带类型参数，
@@ -107,7 +117,7 @@ func RunSafeRetWith[T any](r Runner, fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if rc := recover(); rc != nil {
 			pe := newPanicError("", rc)
-			r.call(fmt.Sprintf("%v", rc), pe.Stack)
+			r.call(context.Background(), rc, pe.Stack)
 			err = pe
 		}
 	}()

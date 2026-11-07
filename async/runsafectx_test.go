@@ -9,15 +9,18 @@ import (
 
 // capturePanic 安装一个收集型 PanicHandler，返回「是否被调用」的读取闭包。
 // 与 safe_test.go 的 waitSignal 同一套事件驱动口径：不轮询、不留超时窗口。
-func capturePanic(t *testing.T) func() (msg string, called bool) {
+// #184 起 handler 收 (ctx, r, stack)，这里把 r 与汇报 ctx 一并存下。
+func capturePanic(t *testing.T) func() (r any, hctx context.Context, called bool) {
 	t.Helper()
 	var mu sync.Mutex
-	var got string
+	var got any
+	var gotCtx context.Context
 	called := make(chan struct{}, 1)
 	old := *panicHandler.Load()
-	SetPanicHandler(func(msg string, _ []byte) {
+	SetPanicHandler(func(ctx context.Context, r any, _ []byte) {
 		mu.Lock()
-		got = msg
+		got = r
+		gotCtx = ctx
 		mu.Unlock()
 		select {
 		case called <- struct{}{}:
@@ -25,16 +28,16 @@ func capturePanic(t *testing.T) func() (msg string, called bool) {
 		}
 	})
 	t.Cleanup(func() { SetPanicHandler(old) })
-	return func() (string, bool) {
+	return func() (any, context.Context, bool) {
 		select {
 		case <-called:
 			mu.Lock()
 			defer mu.Unlock()
-			return got, true
+			return got, gotCtx, true
 		default:
 			mu.Lock()
 			defer mu.Unlock()
-			return got, false
+			return got, gotCtx, false
 		}
 	}
 }
@@ -50,8 +53,8 @@ func TestRunSafeCtx_Normal(t *testing.T) {
 	if !ran {
 		t.Fatal("fn 未被调用")
 	}
-	if msg, called := read(); called {
-		t.Fatalf("正常返回不该触发 PanicHandler，got %q", msg)
+	if r, _, called := read(); called {
+		t.Fatalf("正常返回不该触发 PanicHandler，got %v", r)
 	}
 }
 
@@ -78,17 +81,23 @@ func TestRunSafeCtx_PanicReturnsPanicError(t *testing.T) {
 
 // TestRunSafeCtx_PanicAlsoReported 钉住：返回给调用方**同时**向全局 PanicHandler
 // 汇报一份——否则「调用方自己记了一笔」会让全局观测面漏掉这类事件。
+// #184：汇报 r 为 recover 原始值、ctx 为调用方传入的 ctx（按请求聚合的依据）。
 func TestRunSafeCtx_PanicAlsoReported(t *testing.T) {
 	read := capturePanic(t)
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "req-9")
 
-	_ = RunSafeCtx(context.Background(), func(context.Context) { panic("boom-report") })
+	_ = RunSafeCtx(ctx, func(context.Context) { panic("boom-report") })
 
-	msg, called := read()
+	r, hctx, called := read()
 	if !called {
 		t.Fatal("panic 必须经全局 PanicHandler 上报一份")
 	}
-	if msg != "boom-report" {
-		t.Fatalf("上报文案应含原始 payload，got %q", msg)
+	if r != "boom-report" {
+		t.Fatalf("上报的 r 应为原始 payload，got %v", r)
+	}
+	if v, _ := hctx.Value(key{}).(string); v != "req-9" {
+		t.Fatalf("汇报 ctx 应为调用方 ctx，got %v", hctx)
 	}
 }
 

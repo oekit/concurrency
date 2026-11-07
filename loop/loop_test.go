@@ -107,10 +107,10 @@ func TestBusyDropsTicks(t *testing.T) {
 
 func TestPanicDoesNotKillLoop(t *testing.T) {
 	var panics atomic.Int32
-	async.SetPanicHandler(async.PanicHandler(func(msg string, stack []byte) {
+	async.SetPanicHandler(async.PanicHandler(func(ctx context.Context, r any, stack []byte) {
 		panics.Add(1)
 	}))
-	defer async.SetPanicHandler(async.PanicHandler(func(msg string, stack []byte) {
+	defer async.SetPanicHandler(async.PanicHandler(func(ctx context.Context, r any, stack []byte) {
 		// 恢复为静默 handler，不影响其他用例
 	}))
 

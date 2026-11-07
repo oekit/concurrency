@@ -2,6 +2,7 @@ package async_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -113,11 +114,12 @@ func TestGoDetached_EnricherPreservesTrace(t *testing.T) {
 	}
 }
 
-// TestGoDetached_PanicContainedWithTaskLabel GoDetached 的 panic 收编带 task 标签。
+// TestGoDetached_PanicContainedWithTaskLabel GoDetached 的 panic 收编带 task 标签
+// （#184：标签经汇报 ctx 携带，TaskFromContext 取；r 为 recover 原始值）。
 func TestGoDetached_PanicContainedWithTaskLabel(t *testing.T) {
 	msgs := make(chan string, 8)
-	async.SetPanicHandler(func(msg string, stack []byte) {
-		msgs <- msg
+	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
+		msgs <- TaskFromContextLabel(ctx, r)
 	})
 	t.Cleanup(func() { async.SetPanicHandler(nil) })
 
@@ -132,4 +134,13 @@ func TestGoDetached_PanicContainedWithTaskLabel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("panic 未被收编汇报")
 	}
+}
+
+// TaskFromContextLabel 测试侧小工具：把标签与 r 拼回可断言文案。
+func TaskFromContextLabel(ctx context.Context, r any) string {
+	task := async.TaskFromContext(ctx)
+	if task == "" {
+		return fmt.Sprint(r)
+	}
+	return "task=" + task + ": " + fmt.Sprint(r)
 }

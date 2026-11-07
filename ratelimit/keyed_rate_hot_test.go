@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -287,7 +288,7 @@ func TestKeyedLimiter_EvictCallback_SweepOnPressure(t *testing.T) {
 // 首次命中时刻取决于 ttl、ticker 间隔与调度延迟，原先「睡 80ms 断言已回收」只有
 // 约 2 倍余量，CI 负载高时实测 ~10% 概率假红（evictions=0 want >=1）。
 func TestKeyedLimiter_EvictCallback_PanicAbsorbed(t *testing.T) {
-	async.SetPanicHandler(func(msg string, stack []byte) { _ = msg; _ = stack }) // 静音
+	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) { _ = r; _ = stack }) // 静音
 	t.Cleanup(func() { async.SetPanicHandler(nil) })
 
 	fired := make(chan struct{})

@@ -60,7 +60,7 @@ func TestAfterCompletion_GapFromCompletion(t *testing.T) {
 // TestAfterCompletion_PanicRetimesInterval panic 收编后同样重新计时：本轮 panic
 // 被 RunSafe 收编、循环存活，下一轮仍从收编完成后再等 Interval（#140）。
 func TestAfterCompletion_PanicRetimesInterval(t *testing.T) {
-	async.SetPanicHandler(func(msg string, stack []byte) { _ = msg; _ = stack }) // 静音本用例的 panic 汇报
+	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) { _ = r; _ = stack }) // 静音本用例的 panic 汇报
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

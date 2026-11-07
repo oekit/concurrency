@@ -19,8 +19,8 @@ type superviseConfig struct {
 	onGiveUp       func(cause error)
 }
 
-// WithTask 给监督循环设任务名：panic 汇报带 task 标签（GoSafeLabeled 同款
-// "task=<name>: ..."），便于按任务维度聚合告警。
+// WithTask 给监督循环设任务名：panic 汇报的 ctx 携带 task 标签（GoSafeLabeled
+// 同款，TaskFromContext 可取），便于按任务维度聚合告警。
 func WithTask(name string) SuperviseOption {
 	return func(c *superviseConfig) { c.task = name }
 }
@@ -118,7 +118,8 @@ func (s *Supervision) ConsecutiveFailures() int64 {
 // Supervise 提供监督语义三件套：
 //
 //  1. **单轮 panic 收编**：loop panic 转成 *PanicError（errors.As 可辨、携带栈）
-//     并按 GoSafeLabeled 同款格式上报全局 PanicHandler；
+//     并带 task 标签上报全局 PanicHandler（标签经 panic 汇报的 ctx 携带，
+//     TaskFromContext 可取）；
 //  2. **退避重启**：失败轮（错误或 panic）按指数退避重启（见 WithRestartBackoff），
 //     重启等待可被 ctx 取消打断；
 //  3. **失败上限 + 告警钩子**：连续失败达上限放弃重启（WithMaxConsecutiveFailures
@@ -222,13 +223,13 @@ func (s *Supervision) run(ctx context.Context, cfg superviseConfig, loop func(ct
 	}
 }
 
-// round 执行一轮：loop 的 panic 收编为 *PanicError（同 RunSafeErr，但汇报带
-// task 标签），业务错误原样透传。
+// round 执行一轮：loop 的 panic 收编为 *PanicError（同 RunSafeErr，但汇报的
+// ctx 携带 task 标签），业务错误原样透传。
 func (s *Supervision) round(ctx context.Context, task string, loop func(ctx context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			pe := newPanicError(task, r)
-			callPanicHandler(labeledMsg(task, r), pe.Stack)
+			callPanicHandler(withTask(ctx, task), r, pe.Stack)
 			err = pe
 		}
 	}()

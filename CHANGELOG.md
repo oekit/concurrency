@@ -1,3 +1,11 @@
+## [v0.28.2] — 2026-11-08
+
+- **BREAKING** refactor!(async): `PanicHandler` 签名统一为 `func(ctx context.Context, r any, stack []byte)`——与 gopool.PanicHandler 完全一致（#184）。ctx 为任务执行上下文（带 ctx 的 spawn 家族——GoWithContext / GoSafeWithContext / GoSafeWithContextLabeled / RunSafeCtx / Runner.GoWithContext / GoDetached——把调用方 ctx 透传给 handler，日志可按请求聚合）；r 为 recover 原始值（错误上报路径为 fn 返回的 error）；Labeled 家族与 Supervise(WithTask) 的任务标签改经 ctx 携带（新增 `TaskFromContext` 取，默认 handler 输出仍带 `task=<name>:` 前缀），不再拼在消息前缀里。消费方迁移：`func(msg string, stack []byte)` → `func(ctx, r any, stack []byte)`（打印 msg 的位置改打印 r）
+- docs(breaker): WithForcePass godoc 钉死 #25 三态语义——探活结果（无论成败）只进窗口统计，不驱动关闸/重开/重置冷却；关闸唯一路径是冷却期满的半开探测成功；「恢复即自动愈合」说法废弃（#185，措辞随 #167 收口后本轮补齐归属）
+- docs(ratelimit): SlidingWindow.Wait 注明不预占设计的惊群代价（多等待者同刻醒来抢同一空位，仅一个成功），高并发严格排队场景指路 Reserve 的预占语义（#186）
+
+关联问题单：concurrency#184、concurrency#185、concurrency#186。
+
 ## [v0.28.1] — 2026-11-07
 
 - build: 全线依赖地板对齐（16 项，v0.1.27 维护轮）

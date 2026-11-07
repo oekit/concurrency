@@ -143,7 +143,7 @@ func TestMap_OnItemError_CtxCanceledUnstarted(t *testing.T) {
 // ——「某一项的钩子写坏了」不能升级成「整批结果全丢」。
 func TestMap_OnItemError_HookPanicIsolated(t *testing.T) {
 	var reported bool
-	async.SetPanicHandler(func(string, []byte) { reported = true })
+	async.SetPanicHandler(func(context.Context, any, []byte) { reported = true })
 	defer async.SetPanicHandler(nil)
 
 	results, err := Map(context.Background(), []int{1, 2}, 2,

@@ -2,6 +2,7 @@ package async
 
 import (
 	"context"
+	"runtime/debug"
 	"sync/atomic"
 )
 
@@ -64,7 +65,8 @@ func DetachedContext(parent context.Context) context.Context {
 //     请求超时/断连不会腰斩在飞任务；
 //   - 经 SetContextEnricher 注册的钩子保留 parent 的 trace_id（由 tracing/
 //     traceid 模块 init 注册，concurrency 不依赖具体实现）；
-//   - panic 收编并带 task 标签（与 GoSafeLabeled 同口径）。
+//   - panic 收编并带 task 标签（与 GoSafeLabeled 同口径），汇报的 ctx 即
+//     富化后的后台 ctx——trace 保留到 panic 日志里（#184）。
 //
 // 与既有原语的分工：
 //
@@ -74,5 +76,13 @@ func DetachedContext(parent context.Context) context.Context {
 // 适合构建/部署触发、通知下发、缓存失效等「异步但不该被请求取消牵死、日志又要
 // 跟请求串起来」的调用点，替代各服务手抄的 Background+traceid+GoSafe 三件套。
 func GoDetached(parent context.Context, task string, fn func(ctx context.Context)) {
-	GoSafeLabeled(task, func() { fn(DetachedContext(parent)) })
+	bg := DetachedContext(parent)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callPanicHandler(withTask(bg, task), r, debug.Stack())
+			}
+		}()
+		fn(bg)
+	}()
 }

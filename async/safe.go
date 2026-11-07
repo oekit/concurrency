@@ -8,16 +8,54 @@ import (
 	"sync/atomic"
 )
 
-// PanicHandler 是 panic 恢复时的日志处理函数。
+// PanicHandler 是 panic 恢复时的处理函数，签名与 gopool.PanicHandler 完全一致
+// （#184）：ctx 为任务提交/执行时的上下文（无可用 ctx 时为 context.Background；
+// Labeled 家族与 Supervise(WithTask) 会把任务标签放进 ctx，经 TaskFromContext
+// 可取），r 为 recover 的原始值，stack 为调用栈。
 // 默认使用标准库 log.Printf。可通过 SetPanicHandler 注入自定义实现（如 logx）。
-type PanicHandler func(msg string, stack []byte)
+//
+// 注意 r 不一定来自 panic：GoSafeWithErr / GoSafeWithContext 的「错误上报」
+// 路径也走本 handler，此时 r 是 fn 返回的 error——全局观测面统一从这一个口子过。
+type PanicHandler func(ctx context.Context, r any, stack []byte)
 
 var panicHandler atomic.Pointer[PanicHandler]
 
+// taskCtxKey 是 panic 汇报 ctx 携带任务标签的键（结构体键防碰撞，#184）。
+type taskCtxKey struct{}
+
+// withTask 给 panic 汇报用的 ctx 附带任务标签；task 为空时原样返回，
+// ctx 为 nil 时垫 Background。
+func withTask(ctx context.Context, task string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if task == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, taskCtxKey{}, task)
+}
+
+// TaskFromContext 返回 panic 汇报 ctx 携带的任务归属标签（RunSafeLabeled /
+// GoSafeLabeled / GoSafeWithContextLabeled / Supervise(WithTask) / GoDetached
+// 注入）；无标签返回空串。handler 注入方按任务维度聚合告警用它——#184 签名
+// 统一前标签拼在消息前缀（"task=<name>: ..."）里，现在随 ctx 走，结构化日志
+// 不必再解析消息文本。
+func TaskFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(taskCtxKey{}).(string)
+	return v
+}
+
 // defaultPanicHandler 返回缺省 panic 汇报函数（标准库 log）。
 func defaultPanicHandler() PanicHandler {
-	return PanicHandler(func(msg string, stack []byte) {
-		log.Printf("[async] panic recovered: %s\n%s", msg, string(stack))
+	return PanicHandler(func(ctx context.Context, r any, stack []byte) {
+		if task := TaskFromContext(ctx); task != "" {
+			log.Printf("[async] panic recovered: task=%s: %v\n%s", task, r, string(stack))
+			return
+		}
+		log.Printf("[async] panic recovered: %v\n%s", r, string(stack))
 	})
 }
 
@@ -26,8 +64,8 @@ func init() {
 	panicHandler.Store(&defaultHandler)
 }
 
-// SetPanicHandler 设置全局 panic 恢复日志处理器。
-// 应在 main.go 初始化阶段调用，注入 logx 等结构化日志实现。
+// SetPanicHandler 设置全局 panic 恢复处理器（签名与 gopool.PanicHandler 同一
+// 形态，#184）。应在 main.go 初始化阶段调用，注入 logx 等结构化日志实现。
 //
 // handler 为 nil 时**恢复默认 handler**（标准库 log，与同矩阵
 // gopool.SetPanicHandler(nil) 同口径，#165）——而非静默关闭所有 panic 汇报；
@@ -35,8 +73,8 @@ func init() {
 //
 // 用法:
 //
-//	async.SetPanicHandler(func(msg string, stack []byte) {
-//	    logx.Error("goroutine panic", "err", msg, "stack", string(stack))
+//	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
+//	    logx.CtxError(ctx, "goroutine panic", "err", r, "stack", string(stack))
 //	})
 func SetPanicHandler(handler PanicHandler) {
 	if handler == nil {
@@ -47,7 +85,7 @@ func SetPanicHandler(handler PanicHandler) {
 	panicHandler.Store(&handler)
 }
 
-func callPanicHandler(msg string, stack []byte) {
+func callPanicHandler(ctx context.Context, r any, stack []byte) {
 	fn := panicHandler.Load()
 	if fn == nil || *fn == nil {
 		// SetPanicHandler(nil) 已恢复默认 handler，此分支仅作防御
@@ -61,15 +99,16 @@ func callPanicHandler(msg string, stack []byte) {
 			log.Printf("async: panic handler itself panicked: %v", r)
 		}
 	}()
-	(*fn)(msg, stack)
+	(*fn)(ctx, r, stack)
 }
 
 // ReportPanic 将一次「已被调用方 recover 的 panic」上报给全局 PanicHandler，
 // 供自管 recover 的编排原语（如 syncx.FanInErr 逐槽收编）保持与 GoSafe/RunSafe
 // 统一的观测面——handler 注入方（日志/告警）不漏接任何恢复事件。
-// msg 形如 "panic recovered: <payload>"；stack 取当前调用栈。
+// r 为 recover 的原始值；stack 取当前调用栈；ctx 为 Background（调用方自管
+// recover，手上没有可透传的任务 ctx）。
 func ReportPanic(r any) {
-	callPanicHandler(fmt.Sprintf("panic recovered: %v", r), debug.Stack())
+	callPanicHandler(context.Background(), r, debug.Stack())
 }
 
 // RunSafe 在当前 goroutine 同步运行 fn，panic 被 recover 并经 PanicHandler
@@ -78,7 +117,7 @@ func ReportPanic(r any) {
 func RunSafe(fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
+			callPanicHandler(context.Background(), r, debug.Stack())
 		}
 	}()
 	fn()
@@ -89,7 +128,7 @@ func GoSafe(fn func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
+				callPanicHandler(context.Background(), r, debug.Stack())
 			}
 		}()
 		fn()
@@ -100,28 +139,43 @@ func GoSafe(fn func()) {
 // fn 返回的 error（含 panic 转换的 error）经 PanicHandler 记录后丢弃——
 // 适合"错误只需日志上报"的后台任务；需要收集错误到共享 channel 用
 // GoSafeWithErrChannel，需要同步等待/级联取消用 concurrency/group。
+// handler 收到的 r 即该 error 值（非 panic 值）。
 func GoSafeWithErr(fn func() error) {
 	GoSafe(func() {
 		if err := fn(); err != nil {
-			callPanicHandler(fmt.Sprintf("task error: %v", err), debug.Stack())
+			callPanicHandler(context.Background(), err, debug.Stack())
 		}
 	})
 }
 
 // GoWithContext 启动一个携带 ctx 的安全 goroutine（panic 恢复，无错误上报）。
-// fn 收到的就是调用方传入的 ctx，取消/超时由调用方管理。
+// fn 收到的就是调用方传入的 ctx，取消/超时由调用方管理；panic 汇报也携带该
+// ctx（#184：handler 可按请求聚合日志）。
 func GoWithContext(ctx context.Context, fn func(ctx context.Context)) {
-	GoSafe(func() { fn(ctx) })
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callPanicHandler(ctx, r, debug.Stack())
+			}
+		}()
+		fn(ctx)
+	}()
 }
 
 // GoSafeWithContext 启动一个携带 ctx 的安全 goroutine，fn 返回的 error
-// （含 panic 转换的 error）经 PanicHandler 记录。等价 GoWithContext + 错误上报。
+// （含 panic 转换的 error）经 PanicHandler 记录（r 为该 error 值）。
+// 等价 GoWithContext + 错误上报；panic 与错误汇报均携带该 ctx。
 func GoSafeWithContext(ctx context.Context, fn func(ctx context.Context) error) {
-	GoSafe(func() {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callPanicHandler(ctx, r, debug.Stack())
+			}
+		}()
 		if err := fn(ctx); err != nil {
-			callPanicHandler(fmt.Sprintf("task error: %v", err), debug.Stack())
+			callPanicHandler(ctx, err, debug.Stack())
 		}
-	})
+	}()
 }
 
 // GoSafeWithErrChannel 启动 fn 并把 panic 与 fn 返回值都发送到共享 channel。
@@ -137,7 +191,7 @@ func GoSafeWithErrChannel(ch chan<- error, fn func() error) {
 		send := func(err error) {
 			defer func() {
 				if r := recover(); r != nil {
-					callPanicHandler(fmt.Sprintf("send to error channel: %v", r), debug.Stack())
+					callPanicHandler(context.Background(), r, debug.Stack())
 				}
 			}()
 			// 非阻塞发送，避免 channel 满时 goroutine 泄漏
@@ -148,7 +202,7 @@ func GoSafeWithErrChannel(ch chan<- error, fn func() error) {
 		}
 		defer func() {
 			if r := recover(); r != nil {
-				callPanicHandler(fmt.Sprintf("%v", r), debug.Stack())
+				callPanicHandler(context.Background(), r, debug.Stack())
 				send(fmt.Errorf("panic: %v", r))
 			}
 		}()
@@ -156,52 +210,52 @@ func GoSafeWithErrChannel(ch chan<- error, fn func() error) {
 	}()
 }
 
-// RunSafeLabeled 与 RunSafe 相同，但 panic 汇报带任务归属标签。
-// msg 形如 "task=janitor: boom"，便于按任务维度聚合告警，不依赖堆栈解析。
-// task 为空时退化为 RunSafe 的消息格式。
+// RunSafeLabeled 与 RunSafe 相同，但 panic 汇报的 ctx 携带任务归属标签
+// （TaskFromContext 可取），便于按任务维度聚合告警，不依赖堆栈解析。
+// task 为空时等价 RunSafe。
 func RunSafeLabeled(task string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			callPanicHandler(labeledMsg(task, r), debug.Stack())
+			callPanicHandler(withTask(context.Background(), task), r, debug.Stack())
 		}
 	}()
 	fn()
 }
 
-// GoSafeLabeled 与 GoSafe 相同，但 panic 汇报带任务归属标签。
+// GoSafeLabeled 与 GoSafe 相同，但 panic 汇报的 ctx 携带任务归属标签。
 // 后台循环 / 心跳 / 清扫等命名任务用本变体，运维可直接按 task 聚合。
 func GoSafeLabeled(task string, fn func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				callPanicHandler(labeledMsg(task, r), debug.Stack())
+				callPanicHandler(withTask(context.Background(), task), r, debug.Stack())
 			}
 		}()
 		fn()
 	}()
 }
 
-// GoSafeWithContextLabeled 启动带 ctx 的安全 goroutine，panic 汇报带任务归属标签。
+// GoSafeWithContextLabeled 启动带 ctx 的安全 goroutine，panic 汇报携带该 ctx
+// 与任务归属标签（#184 统一签名前标签拼在 msg 里，ctx 与标签只能二选一）。
 func GoSafeWithContextLabeled(ctx context.Context, task string, fn func(ctx context.Context)) {
-	GoSafeLabeled(task, func() { fn(ctx) })
-}
-
-// labeledMsg 组装带任务归属的 panic 消息。
-func labeledMsg(task string, r any) string {
-	if task == "" {
-		return fmt.Sprintf("%v", r)
-	}
-	return fmt.Sprintf("task=%s: %v", task, r)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callPanicHandler(withTask(ctx, task), r, debug.Stack())
+			}
+		}()
+		fn(ctx)
+	}()
 }
 
 // RunSafeErr 同步运行 fn，panic 收编为 error 返回（不再静默）。
 // 适合「panic → 领域 error 透给调用方」场景（如 guardedCall）。
-// 正常返回值原样透传；panic 时额外经 PanicHandler 汇报。
+// 正常返回值原样透传；panic 时额外经 PanicHandler 汇报（r 为 recover 原始值）。
 func RunSafeErr(fn func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			pe := newPanicError("", r)
-			callPanicHandler(fmt.Sprintf("%v", r), pe.Stack)
+			callPanicHandler(context.Background(), r, pe.Stack)
 			err = pe
 		}
 	}()
@@ -214,19 +268,19 @@ func RunSafeRet[T any](fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			pe := newPanicError("", r)
-			callPanicHandler(fmt.Sprintf("%v", r), pe.Stack)
+			callPanicHandler(context.Background(), r, pe.Stack)
 			err = pe
 		}
 	}()
 	return fn()
 }
 
-// RunSafeRetLabeled 同 RunSafeRet，panic 汇报带任务归属标签。
+// RunSafeRetLabeled 同 RunSafeRet，panic 汇报的 ctx 携带任务归属标签。
 func RunSafeRetLabeled[T any](task string, fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			pe := newPanicError(task, r)
-			callPanicHandler(labeledMsg(task, r), pe.Stack)
+			callPanicHandler(withTask(context.Background(), task), r, pe.Stack)
 			err = pe
 		}
 	}()

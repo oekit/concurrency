@@ -2,7 +2,6 @@ package async
 
 import (
 	"context"
-	"fmt"
 )
 
 // RunSafeCtx 在当前 goroutine **同步**运行 fn，并把 panic 收编成 *PanicError 返回。
@@ -11,9 +10,9 @@ import (
 //
 // 三个既有形态都装不下「在别人的 goroutine 边界上就地收编 panic」：
 //
-//   - GoSafe / RunSafe：走全局 PanicHandler，而 handler 签名不带 ctx ⇒ 日志无法
-//     按请求/连接聚合；
-//   - GoSafeWithContext：新开 goroutine ⇒ 调用方拿不到这次执行的结局；
+//   - GoSafe / RunSafe：不返回任何值 ⇒ 调用方拿不到这次执行的结局；
+//   - GoSafeWithContext：新开 goroutine，同样拿不到结局（#184 起 panic 汇报
+//     虽已携带 ctx，结局仍不可知）；
 //   - RunSafeErr：能返回 error，但 fn 收不到 ctx ⇒ 收编点自己记不了 ctx 维度的账。
 //
 // 典型用途是**第三方 SDK 回调**：ws 客户端的读循环在 SDK 自己的 goroutine 里分发
@@ -41,7 +40,7 @@ func RunSafeCtx(ctx context.Context, fn func(context.Context)) (panicErr error) 
 	defer func() {
 		if r := recover(); r != nil {
 			pe := newPanicError("", r)
-			callPanicHandler(fmt.Sprintf("%v", r), pe.Stack)
+			callPanicHandler(ctx, r, pe.Stack)
 			panicErr = pe
 		}
 	}()
@@ -58,7 +57,7 @@ func RunSafeCtxRet[T any](ctx context.Context, fn func(context.Context) (T, erro
 	defer func() {
 		if r := recover(); r != nil {
 			pe := newPanicError("", r)
-			callPanicHandler(fmt.Sprintf("%v", r), pe.Stack)
+			callPanicHandler(ctx, r, pe.Stack)
 			err = pe
 		}
 	}()

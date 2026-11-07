@@ -2,6 +2,7 @@ package async_test
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"os"
 	"strings"
@@ -29,7 +30,7 @@ func captureStdLog(t *testing.T) *bytes.Buffer {
 // nil 语义——两个同名 API 对 nil 不得一恢复一失明）。
 func TestSetPanicHandler_NilRestoresDefault(t *testing.T) {
 	customCalled := make(chan struct{}, 8)
-	async.SetPanicHandler(func(msg string, stack []byte) {
+	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
 		customCalled <- struct{}{}
 	})
 	t.Cleanup(func() { async.SetPanicHandler(nil) })
