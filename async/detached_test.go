@@ -54,7 +54,7 @@ func TestGoDetached_DecoupledFromParent(t *testing.T) {
 
 	// 场景三：nil parent
 	nilDone := make(chan struct{})
-	async.GoDetached(nil, "nil-parent", func(ctx context.Context) {
+	async.GoDetached(nil, "nil-parent", func(ctx context.Context) { //nolint:staticcheck // 契约：nil parent 兜底 Background（#155 测试目标）
 		if ctx == nil || ctx.Err() != nil {
 			t.Error("nil parent 应派生 Background ctx")
 		}

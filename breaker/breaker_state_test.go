@@ -1049,8 +1049,8 @@ func TestState_ProbePromiseCarriesProbeFlag(t *testing.T) {
 	p.Pass()
 
 	// open 态 forcePass 放行：无标记
-	if err := b.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
-		t.Fatalf("trip call err = %v, want boom", err)
+	if tripErr := b.Do(ctx, func() error { return boom }); !errors.Is(tripErr, boom) {
+		t.Fatalf("trip call err = %v, want boom", tripErr)
 	}
 	clock.Advance(3 * time.Second)
 	p, _, err = b.AllowGen(ctx)
@@ -1080,24 +1080,27 @@ func TestState_ProbePromiseCarriesProbeFlag(t *testing.T) {
 func TestBreaker_NilCtxTreatedAsBackground(t *testing.T) {
 	b := NewBreaker("nil-ctx-test").(*circuitBreaker)
 
-	p, err := b.Allow(nil)
+	p, err := b.Allow(nil) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#159 测试目标）
 	if err != nil || p == nil {
 		t.Fatalf("Allow(nil) = (%v, %v), want pass (treated as Background)", p, err)
 	}
 	p.Pass()
 
-	_, gen, err := b.AllowGen(nil)
+	_, gen, err := b.AllowGen(nil) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#159 测试目标）
 	if err != nil {
 		t.Fatalf("AllowGen(nil) err = %v, want nil", err)
 	}
-	b.FailureGen(nil, gen) // 不 panic、照常记样本
+	b.FailureGen(nil, gen) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#159 测试目标）
 
+	//nolint:staticcheck // 契约：nil ctx 按 Background 处理（#159 测试目标）
 	if err := b.Do(nil, func() error { return nil }); err != nil {
 		t.Fatalf("Do(nil) err = %v, want nil", err)
 	}
+	//nolint:staticcheck // 契约：nil ctx 按 Background 处理（#159 测试目标）
 	if err := b.DoWithAcceptable(nil, func() error { return nil }, func(error) bool { return true }); err != nil {
 		t.Fatalf("DoWithAcceptable(nil) err = %v, want nil", err)
 	}
+	//nolint:staticcheck // 契约：nil ctx 按 Background 处理（#159 测试目标）
 	if err := b.DoWithFallback(nil, func() error { return nil }, defaultAcceptable, nil); err != nil {
 		t.Fatalf("DoWithFallback(nil) err = %v, want nil", err)
 	}
