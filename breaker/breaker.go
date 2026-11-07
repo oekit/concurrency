@@ -178,8 +178,9 @@ func newBreakerConfig(opts ...BreakerOption) breakerConfig {
 	return cfg
 }
 
-// BreakerOption 用于定制 Breaker（函数选项模式；按本仓命名硬规则为 XxxOption，
-// 禁止裸 Option）。
+// BreakerOption 用于定制 Breaker（函数选项模式；命名推荐 XxxOption。
+// 「禁止裸 Option」原为硬规则措辞，但矩阵内既有 8 处裸 Option（oekit#158）——
+// 降级为推荐，新代码仍应遵守；历史类型保持稳定不强制改名。
 type BreakerOption func(*breakerConfig)
 
 // WithBreakerWindow 定制统计窗口：size 个桶、单桶时间宽度 interval。
