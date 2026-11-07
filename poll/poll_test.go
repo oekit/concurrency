@@ -215,8 +215,8 @@ func TestRunCursor_AdvanceOnItemErrorHandlesWholeBatch(t *testing.T) {
 // PanicHandler、该项按失败档处理。
 func TestRunCursor_ItemPanicDoesNotKillLoop(t *testing.T) {
 	var panics atomic.Int64
-	async.SetPanicHandler(func(string, []byte) { panics.Add(1) })
-	t.Cleanup(func() { async.SetPanicHandler(func(string, []byte) {}) })
+	async.SetPanicHandler(func(context.Context, any, []byte) { panics.Add(1) })
+	t.Cleanup(func() { async.SetPanicHandler(func(context.Context, any, []byte) {}) })
 
 	var (
 		advanced  atomic.Int64
@@ -269,8 +269,8 @@ func TestRunCursor_ItemPanicDoesNotKillLoop(t *testing.T) {
 // TestRunCursor_FetchPanicSurvives fetch 自身 panic：收编成一次可续拉失败，循环存活。
 func TestRunCursor_FetchPanicSurvives(t *testing.T) {
 	var panics atomic.Int64
-	async.SetPanicHandler(func(string, []byte) { panics.Add(1) })
-	t.Cleanup(func() { async.SetPanicHandler(func(string, []byte) {}) })
+	async.SetPanicHandler(func(context.Context, any, []byte) { panics.Add(1) })
+	t.Cleanup(func() { async.SetPanicHandler(func(context.Context, any, []byte) {}) })
 
 	var (
 		calls    atomic.Int64

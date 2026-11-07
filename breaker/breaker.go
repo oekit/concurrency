@@ -200,12 +200,17 @@ func WithBreakerWindow(size int, interval time.Duration) BreakerOption {
 }
 
 // WithForcePass 定制强制探活间隔：open 态每隔 d 强制放行一次请求探测服务是否恢复
-// （恢复观察哨 + 窗口样本通道）。注意（#25 三态语义）：探活结果**只进窗口统计，
-// 不驱动关闸**——恢复的唯一路径是冷却期满的半开探测成功（half-open → closed +
-// 清窗），forcePass 本身不会让熔断器「自动愈合」；half-open 态（挂起探测在飞）
-// 不走 forcePass 通道（#156/#162/#172）。缺省 DefaultForcePass（对齐上游）；
-// d <= 0 时 panic。该探活属于 open 态放行策略的一部分；显式三态的半开探测
-// 由 WithProbeTimeout 调度，两者互补。
+// （恢复观察哨 + 窗口样本通道）。
+//
+// 探活结果的语义（#25 三态语义；旧文档「恢复即自动愈合」的说法已废弃，#185）：
+//   - **只进窗口统计，不驱动关闸**——探活成功只是窗口里的一条成功样本，熔断器
+//     保持 open、不会因此恢复放行；探活失败同样只记样本，不重开、不重置冷却；
+//   - 关闸的唯一路径是冷却期满放行的半开探测成功（half-open → closed + 清窗，
+//     见 WithCooldown / WithProbeTimeout）；探测失败则重开并重置计时；
+//   - half-open 态（挂起探测在飞）不走 forcePass 通道（#156/#162/#172）。
+//
+// 该探活属于 open 态放行策略的一部分；显式三态的半开探测由 WithProbeTimeout
+// 调度，两者互补。缺省 DefaultForcePass（对齐上游）；d <= 0 时 panic。
 func WithForcePass(d time.Duration) BreakerOption {
 	if d <= 0 {
 		panic("breaker: force pass duration must be greater than 0")

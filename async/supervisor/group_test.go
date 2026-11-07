@@ -342,11 +342,13 @@ func TestGroup_PanicInStartRestartedAndLabeled(t *testing.T) {
 		panics   atomic.Int64
 	)
 	msgs := make(chan string, 16)
-	async.SetPanicHandler(func(msg string, _ []byte) {
+	async.SetPanicHandler(func(ctx context.Context, r any, _ []byte) {
 		panics.Add(1)
-		msgs <- msg
+		if task := async.TaskFromContext(ctx); task != "" {
+			msgs <- "task=" + task
+		}
 	})
-	t.Cleanup(func() { async.SetPanicHandler(func(string, []byte) {}) })
+	t.Cleanup(func() { async.SetPanicHandler(func(context.Context, any, []byte) {}) })
 
 	start := func(ctx context.Context, _ string) error {
 		if attempts.Add(1) == 1 {

@@ -2,6 +2,7 @@ package async_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,7 +16,11 @@ import (
 // 进程存活（逃逸的 panic 会当场击穿测试进程）。
 func TestRunner_HandlerPanicContained(t *testing.T) {
 	called := make(chan string, 8)
-	r := async.Runner{Handler: func(msg string, stack []byte) {
+	r := async.Runner{Handler: func(ctx context.Context, v any, stack []byte) {
+		msg := fmt.Sprint(v)
+		if task := async.TaskFromContext(ctx); task != "" {
+			msg = "task=" + task + ": " + msg
+		}
 		called <- msg
 		panic("handler-boom: " + msg) // handler 自身 panic
 	}}

@@ -3,6 +3,7 @@ package async_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,21 +12,29 @@ import (
 	"github.com/oekit/concurrency/async"
 )
 
+// labeled 等价断言用的拼接（#184：标签经 ctx 携带，msg 前缀形态不复存在）。
+func taskMsg(ctx context.Context, r any) string {
+	if task := async.TaskFromContext(ctx); task != "" {
+		return "task=" + task + ": " + fmt.Sprint(r)
+	}
+	return fmt.Sprint(r)
+}
+
 // TestRunner_OwnHandlerGlobalUntouched 钉住 #13：Runner 用自己的 handler
 // 汇报 panic，全局 PanicHandler 不受影响也不被覆盖。
 func TestRunner_OwnHandlerGlobalUntouched(t *testing.T) {
 	var mu sync.Mutex
 	var ownMsgs []string
-	r := async.Runner{Handler: func(msg string, stack []byte) {
+	r := async.Runner{Handler: func(ctx context.Context, r any, stack []byte) {
 		mu.Lock()
-		ownMsgs = append(ownMsgs, msg)
+		ownMsgs = append(ownMsgs, taskMsg(ctx, r))
 		mu.Unlock()
 	}}
 
 	var globalMsgs []string
-	async.SetPanicHandler(func(msg string, stack []byte) {
+	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
 		mu.Lock()
-		globalMsgs = append(globalMsgs, msg)
+		globalMsgs = append(globalMsgs, taskMsg(ctx, r))
 		mu.Unlock()
 	})
 	t.Cleanup(func() {
@@ -49,9 +58,9 @@ func TestRunner_OwnHandlerGlobalUntouched(t *testing.T) {
 func TestRunner_ZeroValue_FallsBackToGlobal(t *testing.T) {
 	var mu sync.Mutex
 	var globalMsgs []string
-	async.SetPanicHandler(func(msg string, stack []byte) {
+	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
 		mu.Lock()
-		globalMsgs = append(globalMsgs, msg)
+		globalMsgs = append(globalMsgs, taskMsg(ctx, r))
 		mu.Unlock()
 	})
 	t.Cleanup(func() { async.SetPanicHandler(nil) })
@@ -69,9 +78,9 @@ func TestRunner_ZeroValue_FallsBackToGlobal(t *testing.T) {
 func TestRunner_RunSafeErr_TypedError(t *testing.T) {
 	var mu sync.Mutex
 	var ownMsgs []string
-	r := async.Runner{Handler: func(msg string, stack []byte) {
+	r := async.Runner{Handler: func(ctx context.Context, r any, stack []byte) {
 		mu.Lock()
-		ownMsgs = append(ownMsgs, msg)
+		ownMsgs = append(ownMsgs, taskMsg(ctx, r))
 		mu.Unlock()
 	}}
 
@@ -105,9 +114,9 @@ func TestRunner_RunSafeRetWith(t *testing.T) {
 func TestRunner_GoFamily(t *testing.T) {
 	var mu sync.Mutex
 	var ownMsgs []string
-	r := async.Runner{Handler: func(msg string, stack []byte) {
+	r := async.Runner{Handler: func(ctx context.Context, v any, stack []byte) {
 		mu.Lock()
-		ownMsgs = append(ownMsgs, msg)
+		ownMsgs = append(ownMsgs, taskMsg(ctx, v))
 		mu.Unlock()
 	}}
 
