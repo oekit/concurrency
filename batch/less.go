@@ -41,10 +41,15 @@ func NewLessExecutor(interval time.Duration, do func(), opts ...BatchOption) *Le
 func (e *LessExecutor) DoOrDiscard() bool {
 	now := e.now()
 	if !e.ever.Load() {
-		if !e.ever.CompareAndSwap(false, true) {
-			return false // 并发对手已抢先执行窗口首次
-		}
+		// 首窗竞态修复（#173）：先写 lastNano 再 CAS ever。旧顺序（先 CAS 后
+		// Store）在两条原子指令间存在无同步窗口：败者在窗口内 ever==true 而
+		// lastNano==0，1970 以来的纳秒差远大于任何 interval，间隔判定通过且
+		// CAS(0→now) 成功 ⇒ 与胜者同窗双执行。修复后 ever==true 时 lastNano
+		// 必已写入（原子全序保证），败者路径的 0 值读不再可达。
 		e.lastNano.Store(now.UnixNano())
+		if !e.ever.CompareAndSwap(false, true) {
+			return false // 并发对手已抢先完成首窗写入并执行
+		}
 		async.RunSafe(e.do)
 		return true
 	}
