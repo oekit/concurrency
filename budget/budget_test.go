@@ -60,6 +60,31 @@ func TestConsume_OverBudgetArchives(t *testing.T) {
 	_ = ref2
 }
 
+// TestConsume_ArchiveContentCopied 存档与调用方缓冲区不共享（#192）：
+// 消费方复用同一缓冲区是常态（每请求一个 bytes.Buffer），入库即拷贝——
+// Consume 返回后继续写这块内存不得污染存档（Get 侧本就拷贝，两侧口径对称）。
+func TestConsume_ArchiveContentCopied(t *testing.T) {
+	l, _ := newTestLedger()
+	_, _ = l.Consume("bytes", 100, nil)
+
+	buf := []byte("original-full-content")
+	ref, err := l.Consume("bytes", 250, buf)
+	if !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("err = %v, want ErrOverBudget", err)
+	}
+
+	// 调用方复用缓冲区继续写
+	copy(buf, "OVERWRITTEN-XXXXX")
+
+	got, ok := l.Get(ref)
+	if !ok {
+		t.Fatal("archived content not retrievable")
+	}
+	if string(got) != "original-full-content" {
+		t.Fatalf("存档被调用方缓冲区篡改：got %q, want %q", got, "original-full-content")
+	}
+}
+
 func TestConsume_UnknownDimensionUnlimited(t *testing.T) {
 	l, _ := newTestLedger()
 	for i := 0; i < 100; i++ {

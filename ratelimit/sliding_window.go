@@ -9,6 +9,9 @@ import (
 
 // SlidingWindow 是滑动窗口限流器。
 // 在指定时间窗口内限制请求次数。
+//
+// timestamps 按时间**升序**维护（含 Reserve 预占的未来槽位）：cleanOld 只扫
+// 过期头部、Reserve 的「下个空位」计算依赖有序性（#190）。
 type SlidingWindow struct {
 	mu         sync.Mutex
 	window     time.Duration
@@ -72,9 +75,9 @@ func (sw *SlidingWindow) AllowN(n int) bool {
 		return false
 	}
 
-	// 记录请求时间戳
+	// 记录请求时间戳（有序插入：窗口里可能已有 Reserve 预占的未来槽位）
 	for i := 0; i < n; i++ {
-		sw.timestamps = append(sw.timestamps, now)
+		sw.insertLocked(now)
 	}
 
 	return true
@@ -83,7 +86,16 @@ func (sw *SlidingWindow) AllowN(n int) bool {
 // Reserve 预留一个请求，返回需要等待的时间。
 // 返回 0 表示立即放行（槽位已计入窗口）；返回 d>0 表示需等待 d 后放行，
 // 槽位已按 now+d 预占——与 x/time/rate 的 Reserve 语义一致：预留即消费，
-// 并发调用者拿到的是互不相同的槽位而非同一个"虚拟许可"。
+// 并发调用者拿到的是互不相同的槽位而非同一个"虚拟许可"（#190）。
+//
+// 返回 -1 表示不可预留：在册预占（尚未到期的未来槽位）已达 maxCount——整窗
+// 额度已被订满，再受理只会无限透支未来窗口。调用方应改用 Wait 或放弃。
+//
+// 预占槽位的算法：timestamps 升序，预占时刻 t 必须满足「t 那一刻在窗条目数
+// ≤ maxCount-1」⇒ 至少 len-maxCount+1 条已滑出窗口 ⇒ 最早的可行时刻是
+// timestamps[len-maxCount]+window（无预占时即最老一条的到期时刻）。每受理
+// 一笔预占，该边界下标随 len 前移 ⇒ 之后的并发预留者天然排到更晚的槽位，
+// 互不相同；同刻腾出的多槽由 1ns 错开兜底。
 func (sw *SlidingWindow) Reserve() time.Duration {
 	if sw.maxCount <= 0 {
 		return 0 // 不限流档（#135）：立即放行、不记账
@@ -97,35 +109,59 @@ func (sw *SlidingWindow) Reserve() time.Duration {
 	sw.cleanOld(windowStart)
 
 	if len(sw.timestamps) < sw.maxCount {
-		sw.timestamps = append(sw.timestamps, now)
+		sw.insertLocked(now)
 		return 0
 	}
 
-	// 需要等到最早的请求过期；预占到期时刻的槽位
-	wait := sw.window
-	if len(sw.timestamps) > 0 {
-		wait = sw.timestamps[0].Add(sw.window).Sub(now)
-		if wait < 0 {
-			wait = 0
-		}
+	// 在册预占（晚于当下的未来槽位）以 maxCount 为上限：超限不再受理（#190
+	// 修复前每笔 Reserve 无条件 append，Count 可在 maxCount=2 时涨到 1002）。
+	pending := 0
+	for i := len(sw.timestamps) - 1; i >= 0 && sw.timestamps[i].After(now); i-- {
+		pending++
 	}
-	sw.timestamps = append(sw.timestamps, now.Add(wait))
-	return wait
+	if pending >= sw.maxCount {
+		return -1
+	}
+
+	// 窗口已满：预占「有槽位腾出」的最早时刻（见函数注释的推导）。
+	t := sw.timestamps[len(sw.timestamps)-sw.maxCount].Add(sw.window)
+	if last := sw.timestamps[len(sw.timestamps)-1]; !t.After(last) {
+		t = last.Add(time.Nanosecond) // 同刻腾出多槽时错开 1ns，保证槽位互不相同
+	}
+	sw.timestamps = append(sw.timestamps, t)
+	return t.Sub(now)
 }
 
-// cleanOld 清理过期的时间戳（调用者需持有锁）。
+// cleanOld 清理过期的**头部**时间戳（列表升序，过期条目只出现在头部；
+// 调用者需持有锁）。
 func (sw *SlidingWindow) cleanOld(windowStart time.Time) {
-	valid := 0
-	for _, ts := range sw.timestamps {
-		if ts.After(windowStart) {
-			sw.timestamps[valid] = ts
-			valid++
-		}
+	head := 0
+	for head < len(sw.timestamps) && !sw.timestamps[head].After(windowStart) {
+		head++
 	}
-	sw.timestamps = sw.timestamps[:valid]
+	if head == 0 {
+		return
+	}
+	n := copy(sw.timestamps, sw.timestamps[head:])
+	sw.timestamps = sw.timestamps[:n]
 }
 
-// Count 返回当前窗口内的请求数。
+// insertLocked 按时间序插入一条槽位（调用者需持有锁）。
+//
+// 窗口里存在 Reserve 预占的未来槽位时，"当下"时间戳必须插在它们之前——
+// 直接 append 会破坏升序，cleanOld 的头部淘汰与 Reserve 的边界下标都会失真。
+func (sw *SlidingWindow) insertLocked(t time.Time) {
+	i := len(sw.timestamps)
+	for i > 0 && sw.timestamps[i-1].After(t) {
+		i--
+	}
+	sw.timestamps = append(sw.timestamps, time.Time{})
+	copy(sw.timestamps[i+1:], sw.timestamps[i:])
+	sw.timestamps[i] = t
+}
+
+// Count 返回当前窗口内**已落账**的请求数（不含 Reserve 已预占、尚未到期的
+// 未来槽位——预占在到期落账后才计入；任意时刻本值不会超过 maxCount，#190）。
 func (sw *SlidingWindow) Count() int {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -134,7 +170,14 @@ func (sw *SlidingWindow) Count() int {
 	windowStart := now.Add(-sw.window)
 	sw.cleanOld(windowStart)
 
-	return len(sw.timestamps)
+	n := 0
+	for _, ts := range sw.timestamps {
+		if ts.After(now) {
+			break // 升序：后面全是未到期的预占
+		}
+		n++
+	}
+	return n
 }
 
 // Reset 重置限流器。
@@ -175,7 +218,7 @@ func (sw *SlidingWindow) Wait(ctx context.Context) error {
 		now := time.Now()
 		sw.cleanOld(now.Add(-sw.window))
 		if len(sw.timestamps) < sw.maxCount {
-			sw.timestamps = append(sw.timestamps, now)
+			sw.insertLocked(now)
 			sw.mu.Unlock()
 			return nil
 		}

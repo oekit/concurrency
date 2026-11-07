@@ -335,6 +335,131 @@ func TestGroup_StartMayReadGroupState(t *testing.T) {
 	g.Wait()
 }
 
+// TestGroup_IDOfMayReadGroupState idOf 一律在锁外被调用：回调里读组状态（Len）
+// 不会自锁（#188）。修复前 Reconcile 持 g.mu 调 idOf，idOf 里再调 Len 即死锁，
+// 表现为「对齐循环还在跑但什么都不动」——本用例以 3s 超时断言钉住。
+func TestGroup_IDOfMayReadGroupState(t *testing.T) {
+	readBack := make(chan int, 4)
+
+	var g *Group[string]
+	idOf := func(s string) string {
+		readBack <- g.Len() // 文档承诺安全的用法：回调里读组状态
+		return s
+	}
+	start := func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g = NewGroup(ctx, idOf, start)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.Reconcile([]string{"a", "b"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Reconcile 3s 未返回——idOf 里读组状态自死锁（持锁调用了用户回调）")
+	}
+
+	// 两次 idOf 读回都要真的发生（不是没跑就通过）
+	for i := 0; i < 2; i++ {
+		select {
+		case <-readBack:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("idOf 的第 %d 次读回没有送达", i+1)
+		}
+	}
+	if got := g.Len(); got != 2 {
+		t.Fatalf("Len = %d，期望 2", got)
+	}
+
+	g.Stop()
+	g.Wait()
+}
+
+// TestGroup_IDOfPanicKeepsGroupUsable idOf 自身 panic：经 RunSafe 收编为
+// *PanicError 后上抛，上抛点不持锁——组不因一次坏回调永久死锁（#189）。
+func TestGroup_IDOfPanicKeepsGroupUsable(t *testing.T) {
+	var reported atomic.Int64
+	async.SetPanicHandler(func(context.Context, any, []byte) { reported.Add(1) })
+	t.Cleanup(func() { async.SetPanicHandler(nil) }) // nil = 恢复默认 handler（#165）
+
+	start := func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g := NewGroup(ctx, func(s string) string {
+		if s == "bad" {
+			panic("目标元数据解析出错")
+		}
+		return s
+	}, start)
+
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		g.Reconcile([]string{"bad"})
+	}()
+
+	var r any
+	select {
+	case r = <-panicked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Reconcile 3s 未返回——idOf panic 把 g.mu 悬空了")
+	}
+	if r == nil {
+		t.Fatal("idOf panic 应回调失败上抛（契约违反 fail-fast），而不是静默吞掉")
+	}
+	// 收编路径应经全局 PanicHandler 上报（r 是 *async.PanicError 的包装）
+	perr, ok := r.(error)
+	if !ok {
+		t.Fatalf("上抛 panic 应是 error（fmt.Errorf 包装 *PanicError），got %T", r)
+	}
+	var pe *async.PanicError
+	if !errors.As(perr, &pe) {
+		t.Fatalf("上抛 panic 应包装 *async.PanicError，got %T", r)
+	}
+	waitFor(t, "panic 已上报 PanicHandler", func() bool { return reported.Load() == 1 })
+
+	// 组仍可用：Len 不阻塞、后续 Reconcile 正常工作
+	lenDone := make(chan int, 1)
+	go func() { lenDone <- g.Len() }()
+	select {
+	case n := <-lenDone:
+		if n != 0 {
+			t.Fatalf("Len = %d，期望 0（坏目标没有登记）", n)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("idOf panic 后 g.Len() 永久阻塞——g.mu 未释放")
+	}
+
+	started := make(chan string, 4)
+	g2 := NewGroup(ctx, identity, func(ctx context.Context, target string) error {
+		started <- target
+		<-ctx.Done()
+		return nil
+	})
+	g2.Reconcile([]string{"good"})
+	select {
+	case id := <-started:
+		if id != "good" {
+			t.Fatalf("启动目标 = %q，期望 good", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("后续 Reconcile 没有正常启动目标")
+	}
+	g2.Stop()
+	g2.Wait()
+	g.Stop()
+}
+
 // TestGroup_PanicInStartRestartedAndLabeled 循环体 panic：收编上报（带 task 标签）并重启。
 func TestGroup_PanicInStartRestartedAndLabeled(t *testing.T) {
 	var (

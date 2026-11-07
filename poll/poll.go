@@ -140,7 +140,11 @@ func RunCursor[T any](
 		}
 
 		if len(items) == 0 {
-			// 空批：游标通常不动；但有的服务端会把游标推到「当前读到的位置」，
+			// 空批也是**成功轮**（fetch 无错误完成——长轮询「暂无新数据」的常态）：
+			// 失败计数在此归零，否则一次抖动累积的退避会跨过所有空批继续爬，
+			// Exponential 档单调涨到 MaxDelay 钉死不再回落（#191）。
+			failures = 0
+			// 游标通常不动；但有的服务端会把游标推到「当前读到的位置」，
 			// 那种形态下 next 会变，照常推进（否则下次重启会重扫）。
 			if next != "" && next != cursor {
 				advanced, advErr := advance(ctx, cfg, cursor, next)
@@ -152,7 +156,6 @@ func RunCursor[T any](
 					continue
 				}
 				cursor = advanced
-				failures = 0
 			}
 			if cfg.IdleDelay > 0 {
 				if err := sleepCtx(ctx, cfg.IdleDelay); err != nil {

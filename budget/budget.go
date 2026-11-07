@@ -101,7 +101,9 @@ func (l *Ledger) Consume(d Dimension, n int64, content []byte) (Ref, error) {
 	if n > cap-used {
 		ref := l.next
 		l.next++
-		l.archives[ref] = entry{content: content, at: l.now()}
+		// 入库即拷贝（#192）：消费方常复用同一缓冲区，原样存档会让「按需取回
+		// 完整原文」的取证材料被事后改写——与 Get 出库侧的防御口径对称。
+		l.archives[ref] = entry{content: append([]byte(nil), content...), at: l.now()}
 		return ref, ErrOverBudget
 	}
 	// 饱和累加：钳到 cap ⇒ used 永不超过 cap ⇒ 「cap-used 不回绕」这条
