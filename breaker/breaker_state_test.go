@@ -1073,3 +1073,37 @@ func TestState_ProbePromiseCarriesProbeFlag(t *testing.T) {
 	}
 	p.Pass()
 }
+
+// TestBreaker_NilCtxTreatedAsBackground nil ctx 口径统一（#159）：Allow/AllowGen/
+// Do 系列与 FailureGen 对 nil ctx 不再解引用 panic，按 context.Background() 处理
+// （与 retry/loop/syncx 一致）。
+func TestBreaker_NilCtxTreatedAsBackground(t *testing.T) {
+	b := NewBreaker("nil-ctx-test").(*circuitBreaker)
+
+	p, err := b.Allow(nil)
+	if err != nil || p == nil {
+		t.Fatalf("Allow(nil) = (%v, %v), want pass (treated as Background)", p, err)
+	}
+	p.Pass()
+
+	_, gen, err := b.AllowGen(nil)
+	if err != nil {
+		t.Fatalf("AllowGen(nil) err = %v, want nil", err)
+	}
+	b.FailureGen(nil, gen) // 不 panic、照常记样本
+
+	if err := b.Do(nil, func() error { return nil }); err != nil {
+		t.Fatalf("Do(nil) err = %v, want nil", err)
+	}
+	if err := b.DoWithAcceptable(nil, func() error { return nil }, func(error) bool { return true }); err != nil {
+		t.Fatalf("DoWithAcceptable(nil) err = %v, want nil", err)
+	}
+	if err := b.DoWithFallback(nil, func() error { return nil }, defaultAcceptable, nil); err != nil {
+		t.Fatalf("DoWithFallback(nil) err = %v, want nil", err)
+	}
+
+	total, _ := sumBucket(b.gb)
+	if total != 5 { // Pass + FailureGen + Do + DoWithAcceptable + DoWithFallback
+		t.Fatalf("total samples = %d, want 5 (nil ctx must not swallow stats)", total)
+	}
+}
