@@ -100,12 +100,17 @@ func (b *bucket) Reset() {
 //     熔断期内不放流量）；冷却（自进入/重开 open 起冷却期——WithCooldown 可独立
 //     配置，缺省沿用 probeTimeout）期满后，首个放行请求即半开探测
 //     （携带新代 generation）；
-//   - half-open：挂起探测等待回报——成功关闸（closed + 清窗，旧失败样本不得触发立即重开）；
-//     失败重开并重置计时；超 probeTimeout 未回报视为失联回收，放行新探测；
-//     陈旧代（gen < 当前代）回报整体作废，不计窗口、不迁移。
+//   - half-open：挂起探测等待回报——期间**不走 forcePass 通道**（探测本身就是
+//     半开的放行流量，#156/#162/#172：若此时再放普通请求，其携带的代与探测代
+//     相同，回报会被误判为探测结果——force-pass 失败吞掉探测位、成功替真探测
+//     关闸，状态迁移被非探测请求劫持）；成功关闸（closed + 清窗，旧失败样本不得
+//     触发立即重开）；失败重开并重置计时；超 probeTimeout 未回报视为失联回收，
+//     放行新探测；陈旧代（gen < 当前代）回报整体作废，不计窗口、不迁移。
 //
 // 代（generation）仅在探测放行时自增，普通放行携带当前代——同一代内并发在途回报
 // 全部有效，代差只在探测迁移边界产生，陈旧探测的迟到回报因此可被精确识别丢弃。
+// 探测回报的识别按「放行时签发的探测标记」而非代相等（见 googlePromise.probe）：
+// 与挂起探测同代的普通放行（若有）不会被误认作探测。
 // 开放期普通失败只记窗口样本，不触碰冷却计时（openSince）——冷却不被延长。
 // 参见 https://landing.google.com/sre/sre-book/chapters/handling-overload/
 type googleBreaker struct {
@@ -187,7 +192,7 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 		b.consecFails = 0 // 进入 half-open：连续失败计数归零
 		b.mu.Unlock()
 		b.lastPass.Store(now)
-		return googlePromise{b: b, gen: gen}, gen, nil
+		return googlePromise{b: b, gen: gen, probe: true}, gen, nil
 	}
 	gen := b.gen
 	st := b.state
@@ -230,10 +235,19 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	// 每隔 forcePass 强制放行一次探活（恢复观察哨 + 样本通道），其余一律拒绝
 	// 并记丢弃样本。dropRatio<=0 的公式愈合不再短路放行（旧版在此全量放行，
 	// 计数型触发在低样本场景形同虚设——状态已 open 而流量照旧）；关闸只由
-	// 半开探测成功驱动，熔断期内不放流量
-	if lastPass := b.lastPass.Load(); lastPass > 0 && time.Duration(now-lastPass) > b.forcePass {
-		b.lastPass.Store(now)
-		return googlePromise{b: b, gen: gen}, gen, nil
+	// 半开探测成功驱动，熔断期内不放流量。
+	//
+	// forcePass 通道仅在 open 态开放（#156/#162/#172）：half-open 期（挂起探测
+	// 在飞）不再放行——探测本身就是半开的放行流量；此时普通放行携带的正是
+	// 探测代（代只在探测放行时自增），其回报会被误判为探测结果：force-pass
+	// 失败清探测位重开、真探测的成功随之被降级成普通样本，熔断器多冷却一整轮；
+	// 反向则由 force-pass 的成功替真探测关闸。观察哨流量由 open 态的 forcePass
+	// 节奏承担，half-open 只等探测回报。
+	if st == stateOpen {
+		if lastPass := b.lastPass.Load(); lastPass > 0 && time.Duration(now-lastPass) > b.forcePass {
+			b.lastPass.Store(now)
+			return googlePromise{b: b, gen: gen}, gen, nil
+		}
 	}
 	b.markDrop()
 	return googlePromise{}, 0, ErrCircuitOpen
@@ -278,14 +292,18 @@ func (b *googleBreaker) doReq(req func() error, acceptable func(error) bool) (er
 // report 按代回填一次放行的结果：陈旧代（gen < 当前代）整体作废——不计窗口、不迁移、
 // 不计入连续失败；命中挂起探测的回报驱动状态迁移（成功关闸清窗；失败重开重置计时）；
 // 其余回报只记窗口样本并维护连续失败计数（计数型触发，见 accountConsec）。
-func (b *googleBreaker) report(gen uint64, ok bool) {
+//
+// probe 为本次回报的探测身份（放行时签发，见 googlePromise.probe；gen-only 入口
+// 按代推断，见 isProbeGen）：探测判定按「发起者标记」而非代相等（#156/#162/#172）——
+// 与挂起探测同代的普通放行（若有）只记窗口样本，不驱动状态迁移。
+func (b *googleBreaker) report(gen uint64, probe bool, ok bool) {
 	b.mu.Lock()
 	if gen < b.gen {
 		// 探测纪元已推进（新探测放行）：旧代回报作废，防止误算进新一代的账
 		b.mu.Unlock()
 		return
 	}
-	isProbe := b.probeGen != 0 && gen == b.probeGen
+	isProbe := probe && b.probeGen != 0 && gen == b.probeGen
 	if !isProbe {
 		b.accountConsec(ok)
 	}
@@ -333,12 +351,22 @@ func (b *googleBreaker) report(gen uint64, ok bool) {
 
 // successGen 按代回填成功。
 func (b *googleBreaker) successGen(gen uint64) {
-	b.report(gen, true)
+	b.report(gen, b.isProbeGen(gen), true)
 }
 
 // failureGen 按代回填失败。
 func (b *googleBreaker) failureGen(gen uint64) {
-	b.report(gen, false)
+	b.report(gen, b.isProbeGen(gen), false)
+}
+
+// isProbeGen 判定 gen 是否为当前挂起探测的代——SuccessGen/FailureGen 等
+// gen-only 回报入口的探测身份推断。推断恒可靠：half-open 期 forcePass 通道
+// 关闭（见 allowGen），携带探测代的放行只可能是探测本身（#156/#162/#172）；
+// report 内还会在锁内复核，探测位已被回收/放弃时降级为普通样本。
+func (b *googleBreaker) isProbeGen(gen uint64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.probeGen != 0 && gen == b.probeGen
 }
 
 // abandonGen 显式放弃挂起探测（调用方确认探针失联）：腾出探测位但不重置冷却——
@@ -416,18 +444,23 @@ func (b *googleBreaker) history() windowResult {
 	return result
 }
 
-// googlePromise 为放行后返回的承诺：绑定本次放行的代，由调用方回填真实调用结果。
+// googlePromise 为放行后返回的承诺：绑定本次放行的代与探测标记，
+// 由调用方回填真实调用结果。
 type googlePromise struct {
 	b   *googleBreaker
 	gen uint64
+	// probe 标记本次放行是否为半开探测：探测放行时置位，普通/forcePass 放行
+	// 恒为 false。report 按本标记（而非代相等）识别探测回报（#156/#162/#172）：
+	// 即使某次普通放行与挂起探测同代，也只有真正的探测发起者能驱动状态迁移。
+	probe bool
 }
 
-// Pass 告知熔断器本次调用成功（按代回报）。
+// Pass 告知熔断器本次调用成功（按代与放行时的探测标记回报）。
 func (p googlePromise) Pass() {
-	p.b.report(p.gen, true)
+	p.b.report(p.gen, p.probe, true)
 }
 
-// Fail 告知熔断器本次调用失败（按代回报）。
+// Fail 告知熔断器本次调用失败（按代与放行时的探测标记回报）。
 func (p googlePromise) Fail() {
-	p.b.report(p.gen, false)
+	p.b.report(p.gen, p.probe, false)
 }

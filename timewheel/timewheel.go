@@ -2,6 +2,7 @@ package timewheel
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"sync"
 	"time"
@@ -190,6 +191,10 @@ func (tw *TimingWheel) send(ev opEvent) {
 // loop 事件主循环：操作事件与 tick 串行处理，全部状态无锁访问。
 func (tw *TimingWheel) loop() {
 	defer close(tw.done)
+	// 循环因任何原因死亡时顺手关停通道（#174）：此后 send 快速失败（不再把
+	// 事件塞进无人消费的缓冲后「成功返回」——任务静默丢失）、HasTimer 立即
+	// 返回 false 而非永久挂起。死亡信号不再只体现在 done 上。
+	defer tw.closed.Do(func() { close(tw.stopCh) })
 
 	var tickerC <-chan time.Time
 	ticker := tw.tickerFunc(tw.interval)
@@ -257,19 +262,28 @@ func (tw *TimingWheel) advance() {
 // ticks = delay/interval（下取整，clamp 后 ≥1）；circle = (ticks-1)/numSlots，
 // pos = (current+ticks) mod numSlots。任一 ticks 值下"circle 整圈 + 走到 pos"
 // 恰等于 ticks 格。
+//
+// ticks 上界钳制（#174）：interval 极小 + 巨大 delay（「传 MaxInt64 当永不超时」
+// 是调用方自然写法）时 ticks 可达 MaxInt64，pos 计算的加法回绕成负、Go 负数
+// 取模得负槽位下标 ⇒ 事件循环 goroutine panic 死亡——此后 SetTimer 静默丢任务、
+// HasTimer 永久挂起。按整轮饱和（对齐 retry 退避的溢出饱和口径）：超出
+// MaxInt64/numSlots 的延迟钉在该格数（≈ 不可达的远未来），不回绕。
 func (tw *TimingWheel) insertLocked(key any, task func(), delay time.Duration) {
 	if delay < tw.interval {
 		delay = tw.interval
 	}
-	ticks := int(delay / tw.interval)
+	ticks := int64(delay / tw.interval)
 	if ticks < 1 {
 		ticks = 1
+	}
+	if maxTicks := int64(math.MaxInt64) / int64(tw.numSlots); ticks > maxTicks {
+		ticks = maxTicks
 	}
 	entry := &timerEntry{
 		key:    key,
 		task:   task,
-		pos:    (tw.current + ticks) % tw.numSlots,
-		circle: (ticks - 1) / tw.numSlots,
+		pos:    int((int64(tw.current) + ticks) % int64(tw.numSlots)),
+		circle: int((ticks - 1) / int64(tw.numSlots)),
 	}
 	tw.slots[entry.pos][entry] = struct{}{}
 	tw.timers[key] = entry

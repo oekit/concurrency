@@ -136,3 +136,38 @@ func TestDoChan_Forget_DoesNotDeleteNewerCall(t *testing.T) {
 	<-ch2
 	<-ch3
 }
+
+// TestDoChan_LeaderImmuneToCallerCancel 钉死 DoChan 注释声明的语义（#160）：
+// leader 的 fn 恒免疫取消——直接把**可取消 ctx** 传给 DoChan，调用方放弃等待后
+// fn 依旧跑完并投递结果（内部固定 WithoutCancel；无需调用方自己包一层）。
+// 与 TestDoChan_LeaderImmuneWithWithoutCancel 互补：那个用例在调用侧包了
+// WithoutCancel，无法区分「实现免疫」与「调用方自己免疫」。
+func TestDoChan_LeaderImmuneToCallerCancel(t *testing.T) {
+	f := New[string]()
+	callCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	res := f.DoChan(callCtx, "k", func(ctx context.Context) (string, error) {
+		close(started)
+		<-release
+		if err := ctx.Err(); err != nil {
+			return "", err // 若取消被传播，这里返回 ctx.Err
+		}
+		return "done", nil
+	})
+
+	<-started
+	cancel() // 调用方放弃等待：leader 的 fn 不受影响
+	close(release)
+
+	select {
+	case r := <-res:
+		if r.Err != nil || r.Val != "done" {
+			t.Fatalf("leader 被调用方取消腰斩：r=%+v", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("结果未投递（leader fn 被取消传播阻断）")
+	}
+}

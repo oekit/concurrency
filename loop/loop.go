@@ -2,6 +2,11 @@ package loop
 
 import (
 	"context"
+	"log"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/oekit/concurrency/async"
@@ -49,6 +54,32 @@ type Loop struct {
 
 // Run 启动周期循环，立即（或 FirstDelay 后）返回 *Loop，不阻塞调用方。
 // 循环在后台 goroutine 中运行；生命周期由 ctx 控制，排水用 Wait。
+//
+// ⚠️ 生命周期脚枪（#154）：Run 非阻塞、循环存活完全挂在 ctx 上——「短函数里
+// 派生 ctx + defer cancel」的顺手写法会在函数返回的瞬间静默退役循环（fn 仍会
+// 跑完第一轮，冒烟测试发现不了，周期行为已死）：
+//
+//	// ❌ 反例：函数返回即 cancel，循环存活不足一秒、零报错零日志
+//	func startWorkers(rootCtx context.Context) {
+//	    ctx, cancel := context.WithCancel(rootCtx)
+//	    defer cancel()
+//	    loop.Run(ctx, cfg, fn) // 非阻塞，函数随即 return
+//	}
+//
+//	// ✅ 正例一：长命 ctx（main/service 层持有，随进程/服务关闭取消）
+//	func main() {
+//	    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+//	    defer stop()
+//	    l := loop.Run(ctx, cfg, fn)
+//	    defer l.Wait() // 停机排水：在飞轮次收尾
+//	    ...
+//	}
+//
+//	// ✅ 正例二：后台巡检/清扫/指标类任务直接用 RunBackground（进程级生命周期）
+//	loop.RunBackground(cfg, fn)
+//
+// 入口已取消的 ctx 会被拒绝启动并打一行可定位的 warn 日志（连首跑都不执行，
+// 与 FirstDelay 路径的取消语义对齐）。
 func Run(ctx context.Context, cfg Config, fn func(ctx context.Context)) *Loop {
 	if ctx == nil {
 		ctx = context.Background()
@@ -56,9 +87,41 @@ func Run(ctx context.Context, cfg Config, fn func(ctx context.Context)) *Loop {
 	l := &Loop{done: make(chan struct{})}
 	async.GoSafeLabeled(cfg.Name, func() {
 		defer close(l.done)
+		if err := ctx.Err(); err != nil {
+			// #154：入口已取消的 ctx 多半来自「短函数 + defer cancel」脚枪——
+			// 此前循环静默退役（首跑后即退出），零日志零报错，生产超时清扫
+			// 启动即夭折的事故只能靠人工排查。留下可定位的一行。
+			log.Printf("[loop:%s] ctx 已取消，循环不启动: %v", cfg.Name, err)
+			return
+		}
 		l.loop(ctx, cfg, fn)
 	})
 	return l
+}
+
+// procCtxOnce/procCtx 为 RunBackground 惰性创建的进程级 ctx：SIGINT/SIGTERM
+// 到达时取消，全部 RunBackground 循环共享。
+var (
+	procCtxOnce sync.Once
+	procCtx     context.Context
+)
+
+func processContext() context.Context {
+	procCtxOnce.Do(func() {
+		procCtx, _ = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	})
+	return procCtx
+}
+
+// RunBackground 启动**进程级**周期循环（#154）：生命周期不再挂在调用方 ctx 上
+// ——内部使用共享的进程级 ctx（SIGINT/SIGTERM 取消），把「短函数 + defer cancel
+// 令循环静默退役」的脚枪从 API 形态上消除。后台巡检/清扫/指标上报等「要一直
+// 跑到停机」的任务九成要的就是这个；需要跟随请求/服务生命周期的循环仍用 Run。
+//
+// 排水：停机信号到达后在飞轮次收尾退出；调用方应在停机序列里（收到信号后）
+// 对返回的 *Loop 调用 Wait，确保周期任务有界完成。
+func RunBackground(cfg Config, fn func(ctx context.Context)) *Loop {
+	return Run(processContext(), cfg, fn)
 }
 
 // Wait 阻塞至循环排水完成（ctx 已取消 且 在飞轮次收尾返回）。

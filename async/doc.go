@@ -39,6 +39,10 @@
 //	async.GoSafeLabeled("janitor", func() { sweep() })
 //	async.RunSafeLabeled("batch-flush", func() { flush() })
 //
+// 脱离请求生命周期、但保留 trace 追踪的后台任务（fire-and-forget 可观测）：
+//
+//	async.GoDetached(ctx, "deploy-trigger", func(ctx context.Context) { trigger(ctx) })
+//
 // 在**别人的 goroutine 边界**上就地收编 panic（第三方 SDK 回调，外层监督够不着），
 // 且收编后要把 panic 连同 ctx 交给调用方自己记：
 //

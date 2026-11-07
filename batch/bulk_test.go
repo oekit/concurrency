@@ -133,3 +133,42 @@ func TestLessExecutor_ConcurrentExactlyOne(t *testing.T) {
 		t.Fatalf("expected exactly 1 execution, got %d", executed.Load())
 	}
 }
+
+// TestLessExecutor_ConcurrentFirstWindowSingleExecution 首窗双执行竞态的
+// 压力回归（#173）：每次迭代新建实例（「新建限频器 + 多 goroutine 并发首调」
+// 是告警限频的标准形态）、屏障同步后 6 路同时首调，interval 远大于测试时长
+// ⇒ 全部落在首窗，同一窗口必须恰有一路执行与一路拿到 true。
+// 旧实现在 CAS(ever) 与 Store(lastNano) 的窗口内可双执行（实测 300k 迭代
+// 命中 64 次）；修复后窗口在构造上不可达，压力轮次恒为 1。
+func TestLessExecutor_ConcurrentFirstWindowSingleExecution(t *testing.T) {
+	const (
+		iterations = 20000
+		callers    = 6
+	)
+	for i := 0; i < iterations; i++ {
+		var execs, trues atomic.Int32
+		e := NewLessExecutor(time.Hour, func() { execs.Add(1) })
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for g := 0; g < callers; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if e.DoOrDiscard() {
+					trues.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if got := execs.Load(); got != 1 {
+			t.Fatalf("迭代 %d：首窗执行 %d 次，期望恰 1（首窗竞态回归）", i, got)
+		}
+		if got := trues.Load(); got != 1 {
+			t.Fatalf("迭代 %d：首窗返回 true %d 路，期望恰 1", i, got)
+		}
+	}
+}

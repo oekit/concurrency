@@ -41,11 +41,16 @@ type (
 )
 
 // NewRollingWindow 返回带 size 个桶、单桶时间宽度 interval 的滑动窗口，
-// newBucket 为桶工厂，opts 定制窗口行为。size < 1 时 panic。
+// newBucket 为桶工厂，opts 定制窗口行为。size < 1 或 interval <= 0 时 panic
+// （interval 非法首拍 Add/Reduce 即 span() 整型除零 panic，提前到构造期暴露，
+// 对齐 breaker WithBreakerWindow 的护栏口径，#158）。
 func NewRollingWindow[T Numerical, B BucketInterface[T]](newBucket func() B, size int,
 	interval time.Duration, opts ...WindowOption[T, B]) *RollingWindow[T, B] {
 	if size < 1 {
 		panic("size must be greater than 0")
+	}
+	if interval <= 0 {
+		panic("interval must be greater than 0")
 	}
 
 	w := &RollingWindow[T, B]{

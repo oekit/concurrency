@@ -1,6 +1,7 @@
 package retry
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -90,3 +91,35 @@ func TestDelay_NegativeDelayPanics(t *testing.T) {
 type strErr struct{ s string }
 
 func (e *strErr) Error() string { return e.s }
+
+// TestDelay_LinearOverflowSaturates 线性退避裸乘溢出饱和（#166）：
+// attempt 增长超过 MaxInt64/Delay 后乘积回绕成负——负 delay 穿过封顶/抖动
+// 不变，到 DoValue 变成 delay<=0 直通，无界重试退化成紧循环；修复后饱和到
+// MaxInt64（与指数路径同口径），实跑/预计算/总量三个面一致为正。
+func TestDelay_LinearOverflowSaturates(t *testing.T) {
+	const maxDur = time.Duration(math.MaxInt64)
+	cfg := Config{Delay: time.Second, Linear: true}
+
+	attempt := math.MaxInt
+	// 期望值按同一判据推导（32 位平台 int 较窄时走精确乘积分支，不特判平台）
+	var want time.Duration
+	if int64(attempt) > int64(math.MaxInt64)/int64(cfg.Delay) {
+		want = maxDur
+	} else {
+		want = time.Duration(attempt) * cfg.Delay
+	}
+	if want <= 0 {
+		t.Fatal("测试前提不成立：期望值应为正")
+	}
+
+	if got := Delay(cfg, attempt, nil); got != want || got <= 0 {
+		t.Fatalf("Delay(线性溢出) = %s，期望饱和 %s", got, want)
+	}
+	if got := Backoff(cfg, attempt); got != want || got <= 0 {
+		t.Fatalf("Backoff(线性溢出) = %s，期望饱和 %s", got, want)
+	}
+	// 未溢出区间保持精确（线性语义不变）
+	if got := Delay(cfg, 3, nil); got != 3*time.Second {
+		t.Fatalf("Delay(线性 attempt=3) = %s，期望 3s", got)
+	}
+}

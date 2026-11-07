@@ -53,7 +53,10 @@ type (
 	}
 
 	// Breaker 是熔断器接口。Allow/Do 系列全部 ctx-aware：ctx 已取消时直接返回
-	// ctx.Err()，不消耗熔断统计。拒绝时返回裸 ErrCircuitOpen（可 errors.Is）；
+	// ctx.Err()，不消耗熔断统计；ctx 为 nil 时视为 context.Background()
+	// （与 retry/loop/syncx 的 nil ctx 口径一致，#159——本仓多个原语显式兜底，
+	// 调用方按同一契约传参不会在 breaker 上炸掉请求 goroutine）。
+	// 拒绝时返回裸 ErrCircuitOpen（可 errors.Is）；
 	// execute panic 记一次失败样本后原样 re-panic。
 	Breaker interface {
 		// Name 返回熔断器标识。
@@ -195,9 +198,12 @@ func WithBreakerWindow(size int, interval time.Duration) BreakerOption {
 	}
 }
 
-// WithForcePass 定制强制探活间隔：熔断期内每隔 d 强制放行一次请求探测服务是否恢复，
-// 恢复即自动愈合。缺省 DefaultForcePass（对齐上游）；d <= 0 时 panic。
-// 该探活属于 open 态放行策略的一部分（探测结果只进窗口统计）；显式三态的半开探测
+// WithForcePass 定制强制探活间隔：open 态每隔 d 强制放行一次请求探测服务是否恢复
+// （恢复观察哨 + 窗口样本通道）。注意（#25 三态语义）：探活结果**只进窗口统计，
+// 不驱动关闸**——恢复的唯一路径是冷却期满的半开探测成功（half-open → closed +
+// 清窗），forcePass 本身不会让熔断器「自动愈合」；half-open 态（挂起探测在飞）
+// 不走 forcePass 通道（#156/#162/#172）。缺省 DefaultForcePass（对齐上游）；
+// d <= 0 时 panic。该探活属于 open 态放行策略的一部分；显式三态的半开探测
 // 由 WithProbeTimeout 调度，两者互补。
 func WithForcePass(d time.Duration) BreakerOption {
 	if d <= 0 {
@@ -422,8 +428,12 @@ func (cb *circuitBreaker) State() State {
 }
 
 // Allow 判断请求是否放行：放行返回 Promise 供调用方回填 Pass/Fail，
-// 拒绝返回裸 ErrCircuitOpen 并触发拒绝回调；ctx 已取消时返回 ctx.Err()。
+// 拒绝返回裸 ErrCircuitOpen 并触发拒绝回调；ctx 已取消时返回 ctx.Err()；
+// ctx 为 nil 视为 context.Background()（#159）。
 func (cb *circuitBreaker) Allow(ctx context.Context) (Promise, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -435,8 +445,11 @@ func (cb *circuitBreaker) Allow(ctx context.Context) (Promise, error) {
 }
 
 // AllowGen 同 Allow，额外返回本次放行的代（GenBreaker 扩展接口）；
-// 拒绝时返回 (nil, 0, ErrCircuitOpen)。
+// 拒绝时返回 (nil, 0, ErrCircuitOpen)；ctx 为 nil 视为 context.Background()（#159）。
 func (cb *circuitBreaker) AllowGen(ctx context.Context) (Promise, uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -452,8 +465,12 @@ func (cb *circuitBreaker) SuccessGen(gen uint64) {
 	cb.gb.successGen(gen)
 }
 
-// FailureGen 按代回填失败；ctx 已取消时不消耗统计（GenBreaker 扩展接口）。
+// FailureGen 按代回填失败；ctx 已取消时不消耗统计（GenBreaker 扩展接口）；
+// ctx 为 nil 视为 context.Background()（#159）。
 func (cb *circuitBreaker) FailureGen(ctx context.Context, gen uint64) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return
 	}
@@ -484,8 +501,12 @@ func (cb *circuitBreaker) DoWithFallback(ctx context.Context, execute func() err
 }
 
 // do 为 Do 系列的公共实现：记录失败原因、分发拒绝回调与应用 fallback。
+// ctx 为 nil 视为 context.Background()（#159，Do/DoWithAcceptable/DoWithFallback 同口径）。
 func (cb *circuitBreaker) do(ctx context.Context, execute func() error,
 	fallback func(err error) error, acceptable func(error) bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

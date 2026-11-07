@@ -14,15 +14,24 @@ type PanicHandler func(msg string, stack []byte)
 
 var panicHandler atomic.Pointer[PanicHandler]
 
-func init() {
-	defaultHandler := PanicHandler(func(msg string, stack []byte) {
+// defaultPanicHandler 返回缺省 panic 汇报函数（标准库 log）。
+func defaultPanicHandler() PanicHandler {
+	return PanicHandler(func(msg string, stack []byte) {
 		log.Printf("[async] panic recovered: %s\n%s", msg, string(stack))
 	})
+}
+
+func init() {
+	defaultHandler := defaultPanicHandler()
 	panicHandler.Store(&defaultHandler)
 }
 
 // SetPanicHandler 设置全局 panic 恢复日志处理器。
 // 应在 main.go 初始化阶段调用，注入 logx 等结构化日志实现。
+//
+// handler 为 nil 时**恢复默认 handler**（标准库 log，与同矩阵
+// gopool.SetPanicHandler(nil) 同口径，#165）——而非静默关闭所有 panic 汇报；
+// 两个同名 API 对 nil 的语义保持一致，一次误传 nil 不再让 panic 观测面整体失明。
 //
 // 用法:
 //
@@ -30,12 +39,19 @@ func init() {
 //	    logx.Error("goroutine panic", "error", msg, "stack", string(stack))
 //	})
 func SetPanicHandler(handler PanicHandler) {
+	if handler == nil {
+		defaultHandler := defaultPanicHandler()
+		panicHandler.Store(&defaultHandler)
+		return
+	}
 	panicHandler.Store(&handler)
 }
 
 func callPanicHandler(msg string, stack []byte) {
 	fn := panicHandler.Load()
 	if fn == nil || *fn == nil {
+		// SetPanicHandler(nil) 已恢复默认 handler，此分支仅作防御
+		// （init 恒装载非 nil；静默丢弃 panic 事件不可接受）
 		return
 	}
 	// handler 自身 panic 必须就地收编：本函数运行在 GoSafe 的 deferred
