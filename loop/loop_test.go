@@ -1,7 +1,11 @@
 package loop
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -189,5 +193,51 @@ func TestZeroIntervalRunsOnce(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n.Load() != 1 {
 		t.Fatalf("零 Interval 应只跑首跑轮，实际 %d", n.Load())
+	}
+}
+
+// TestRun_PreCanceledCtxSkipsAndWarns 入口已取消的 ctx：循环连首跑都不执行
+// 并留下可定位的 warn 日志（#154）——「短函数 + defer cancel」脚枪的可观测出口，
+// 与 FirstDelay 路径的取消语义对齐（此前非 FirstDelay 路径会带死 ctx 静默跑一轮）。
+func TestRun_PreCanceledCtxSkipsAndWarns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(os.Stderr); log.SetFlags(log.LstdFlags) })
+
+	var n atomic.Int32
+	l := Run(ctx, Config{Interval: time.Hour, Name: "sweeper"}, func(context.Context) {
+		n.Add(1)
+	})
+	l.Wait()
+
+	if n.Load() != 0 {
+		t.Fatalf("已取消 ctx 不应执行任何轮次，实际 %d 轮", n.Load())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "sweeper") || !strings.Contains(out, "已取消") {
+		t.Fatalf("缺少可定位的退役日志，got %q", out)
+	}
+}
+
+// TestRunBackground_RunsOnProcessContext RunBackground 的生命周期挂进程级 ctx
+// （#154 脚枪的根治形态）：不随调用方函数返回/局部 ctx 取消而退役，持续按
+// Interval 运行。
+func TestRunBackground_RunsOnProcessContext(t *testing.T) {
+	var n atomic.Int32
+	_ = RunBackground(Config{Interval: 20 * time.Millisecond, Name: "bg-probe"}, func(context.Context) {
+		n.Add(1)
+	})
+
+	// 等轮次事件而非等时间窗：凑满 3 轮即证明循环持续存活（超时只作兜底）
+	deadline := time.Now().Add(3 * time.Second)
+	for n.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if n.Load() < 3 {
+		t.Fatalf("后台循环未持续运行，%d 轮", n.Load())
 	}
 }

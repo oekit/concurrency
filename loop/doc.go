@@ -20,6 +20,14 @@
 //	cancel()      // 拦下一轮；在飞轮次跑完
 //	l.Wait()      // 排水（超时预算由调用方包一层控制）
 //
+// 后台巡检/清扫/指标类任务（跑到停机为止）用进程级变体 RunBackground——
+// 生命周期不挂调用方 ctx，消除「短函数 + defer cancel 令循环静默退役」的
+// 脚枪（#154，Run 的 godoc 有 ❌/✅ 对照）：
+//
+//	_ = loop.RunBackground(loop.Config{Interval: time.Minute, Name: "timeout-check"}, func(ctx context.Context) {
+//	    checkBuildTimeout(ctx)
+//	})
+//
 // # 间隔模式
 //
 //   - IntervalFixed（默认）：固定节奏 + 忙时丢 tick。关心「固定时刻表」的任务用这档。
