@@ -142,18 +142,20 @@ func (f *Flight[T]) DoShared(ctx context.Context, key string, fn func(ctx contex
 
 // DoChan 与 Do 语义相同，但结果经 channel 返回，调用方可用 select 组合：
 //
-//	// leader 免疫取消 + waiter 各自 ctx 退出
-//	resCh := f.DoChan(context.WithoutCancel(ctx), key, dial)
+//	// leader 恒免疫取消（内部已 WithoutCancel）+ waiter 各自 ctx 退出
+//	resCh := f.DoChan(ctx, key, dial)
 //	select {
 //	case r := <-resCh:
 //	    ...
 //	case <-ctx.Done():
-//	    return ctx.Err() // 仅本 waiter 退出，不影响 leader
+//	    return ctx.Err() // 仅本调用方放弃等待，不影响 leader 的 fn
 //	}
 //
 // fn 始终在内部 goroutine 执行；返回的 channel 缓冲 1，调用方放弃读取
-// 不会泄漏 goroutine。leader 的 fn 是否免疫取消由调用方传入的 ctx 决定
-// （配合 context.WithoutCancel）。
+// 不会泄漏 goroutine。leader 的 fn **恒免疫取消**：内部固定以
+// context.WithoutCancel(ctx) 执行——即使传入可取消 ctx，fn 也不会被调用方的
+// 放弃等待腰斩（合并语义：同 key 的其他调用方还在等这次结果）。
+// 需要「调用方取消即中止执行」的取消传播用 Do/DoShared（fn 直接收到调用方 ctx）。
 func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.Context) (T, error)) <-chan Result[T] {
 	innerCtx := context.WithoutCancel(ctx)
 	ch := make(chan Result[T], 1)
