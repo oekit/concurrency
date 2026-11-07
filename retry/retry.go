@@ -245,6 +245,13 @@ func computedDelay(cfg Config, attempt int) time.Duration {
 		}
 		return delay
 	case cfg.Linear:
+		// 线性裸乘溢出回绕成负（#166）：负 delay 原样穿过 capDelay/addJitter，
+		// 到 DoValue 变成 delay<=0 直通——退避静默消失，无界重试退化成紧循环。
+		// 复用指数路径的溢出饱和口径：attempt 超过 MaxInt64/Delay 即饱和到
+		// MaxInt64，三条退避路径的防御保持一致（固定路径天然安全）。
+		if cfg.Delay > 0 && int64(attempt) > int64(math.MaxInt64)/int64(cfg.Delay) {
+			return time.Duration(math.MaxInt64)
+		}
 		return time.Duration(attempt) * cfg.Delay
 	default:
 		return cfg.Delay
