@@ -2,6 +2,7 @@ package timewheel
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -239,5 +240,47 @@ func TestTimingWheel_InvalidParams(t *testing.T) {
 			}()
 			fn()
 		}()
+	}
+}
+
+// TestTimingWheel_HugeDelayDoesNotKillLoop ticks 溢出钳制（#174）：
+// interval=1ns + delay=MaxInt64（「传 MaxInt64 当永不超时」的调用方自然写法）
+// 时 ticks 可达 MaxInt64，pos 计算回绕成负槽位下标 ⇒ 事件循环 goroutine panic
+// 死亡（被 async.GoSafe 收编、进程不死）——此后 SetTimer 静默丢任务、HasTimer
+// 永久挂起。修复后按整轮饱和：登记成功、时间轮存活、后续任务照常触发。
+func TestTimingWheel_HugeDelayDoesNotKillLoop(t *testing.T) {
+	tw, tk := newTestWheel(t, time.Nanosecond, 64)
+	ch, task := firedCh()
+
+	// 推进 current=2：溢出在 current≥1 时产生负槽位下标
+	tk.fire()
+	barrier(tw)
+	tk.fire()
+	barrier(tw)
+
+	tw.SetTimer("huge", func() { task("huge") }, time.Duration(math.MaxInt64))
+	barrier(tw)
+	if !tw.HasTimer("huge") {
+		t.Fatal("巨大延迟任务应成功登记（饱和不回绕）")
+	}
+
+	// 循环必须仍然存活：后续普通任务照常触发（旧实现在此已静默死亡——
+	// SetTimer 表面成功、任务永不触发）
+	tw.SetTimer("real", func() { task("real") }, 3*time.Nanosecond)
+	barrier(tw)
+	for i := 0; i < 3; i++ {
+		tk.fire()
+		barrier(tw)
+	}
+	select {
+	case v := <-ch:
+		if v != "real" {
+			t.Fatalf("expected real, got %v", v)
+		}
+	default:
+		t.Fatal("事件循环已死亡：普通任务未触发")
+	}
+	if !tw.HasTimer("huge") {
+		t.Fatal("饱和登记的巨大延迟任务应仍挂起（远未到期）")
 	}
 }
