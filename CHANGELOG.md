@@ -1,3 +1,24 @@
+## [v0.28.0] — 2026-11-07
+
+- fix(breaker): half-open 期 forcePass 放行的流量不再冒充「挂起探测」回报——错误不再驱动熔断状态迁移（#156）
+- fix(breaker): report 按放行时签发的探测标记识别探测回报——状态迁移不再被非探测请求劫持，gen-only 入口按代推断（#162）
+- fix(breaker): half-open 挂起探测在飞期间关闭 forcePass 通道——force-pass 回报不再被误判为探测回报、真实探测成功不再被吞（#172）
+- docs(breaker): WithForcePass 删除「恢复即自动愈合」的过时注释——关闸只由半开探测成功驱动（#167）
+- fix(async): Runner 六个方法统一经带 recover 的唯一汇报出口——handler 自身 panic 不再打死进程（#164）
+- fix(async): SetPanicHandler(nil) 恢复默认 handler——与 gopool 同名 API 语义对齐，不再静默关闭汇报（#165）
+- fix(gopool): 常驻 worker 老化退出前 drain 队列——与 close/临时 worker 两条退出路径对称，积压任务不再无人消费（#163）
+- feat(async): GoDetached 脱离请求生命周期、保留 trace 的后台安全 spawn + SetContextEnricher 富化钩子（#155）
+- feat(loop): RunBackground 共享进程级信号 ctx + Run 入口已取消 ctx 拒启——defer cancel 脚枪文档化（#154）
+- fix(window): RollingWindow 构造期校验 interval>0——首次 Add/Reduce 整型除零 panic 提前到构造期（#158）
+- fix(breaker): Allow/Do 系列对 nil ctx 兜底 Background——与 retry/loop/syncx 口径统一（#159）
+- docs(singleflight): DoChan 注释改为「leader 恒免疫取消」的真实语义——需取消传播用 Do/DoShared（#160）
+- fix(retry): 线性退避裸乘溢出回绕关闭——复用指数路径饱和口径，无界重试不再退化紧循环（#166）
+- fix(batch): LessExecutor.DoOrDiscard 首窗先记时间戳再 CAS——同窗口恰有一路执行的契约兑现（#173）
+- fix(timewheel): insertLocked ticks 整轮饱和——巨大延迟不再产生负槽位下标打死事件循环，循环死亡时 send/HasTimer 快速失败（#174）
+- build: 依赖地板对齐 pkg v0.37.0
+
+关联问题单：concurrency#154、concurrency#155、concurrency#156、concurrency#158、concurrency#159、concurrency#160、concurrency#162、concurrency#163、concurrency#164、concurrency#165、concurrency#166、concurrency#167、concurrency#172、concurrency#173、concurrency#174。
+
 ## [v0.27.0] — 2026-11-07
 
 - feat(poll): 新增 `RunCursor[T]`——带单调游标的长轮询批量拉取循环，四个易漂移语义由库钉死（游标只前进 / 处理完才推进 / 失败退避复用 retry 口径 / 单项 panic 收编不杀循环）（#144）
