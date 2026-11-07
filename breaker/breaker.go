@@ -195,9 +195,12 @@ func WithBreakerWindow(size int, interval time.Duration) BreakerOption {
 	}
 }
 
-// WithForcePass 定制强制探活间隔：熔断期内每隔 d 强制放行一次请求探测服务是否恢复，
-// 恢复即自动愈合。缺省 DefaultForcePass（对齐上游）；d <= 0 时 panic。
-// 该探活属于 open 态放行策略的一部分（探测结果只进窗口统计）；显式三态的半开探测
+// WithForcePass 定制强制探活间隔：open 态每隔 d 强制放行一次请求探测服务是否恢复
+// （恢复观察哨 + 窗口样本通道）。注意（#25 三态语义）：探活结果**只进窗口统计，
+// 不驱动关闸**——恢复的唯一路径是冷却期满的半开探测成功（half-open → closed +
+// 清窗），forcePass 本身不会让熔断器「自动愈合」；half-open 态（挂起探测在飞）
+// 不走 forcePass 通道（#156/#162/#172）。缺省 DefaultForcePass（对齐上游）；
+// d <= 0 时 panic。该探活属于 open 态放行策略的一部分；显式三态的半开探测
 // 由 WithProbeTimeout 调度，两者互补。
 func WithForcePass(d time.Duration) BreakerOption {
 	if d <= 0 {

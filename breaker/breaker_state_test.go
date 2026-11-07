@@ -929,3 +929,147 @@ func TestBreaker_StateObservability(t *testing.T) {
 		t.Fatalf("State() after probe success = %v, want StateClosed", b.State())
 	}
 }
+
+// TestState_HalfOpenForcePassDoesNotAliasProbe half-open 期 forcePass 与挂起探测
+// 同代劫持状态迁移的回归（#156/#162/#172）：挂起探测在飞时，间隔 forcePass 到期的
+// 普通请求必须被拒绝（forcePass 通道在 half-open 关闭）——旧行为放行其携带
+// probeGen 的 promise，force-pass 失败会吞掉探测位重开、真探测的成功随之降级为
+// 普通样本，关闸延迟一个完整冷却（反向则由 force-pass 的成功替真探测关闸）。
+func TestState_HalfOpenForcePassDoesNotAliasProbe(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute,
+		WithConsecutiveFailures(1), WithForcePass(2*time.Second))
+	ctx := context.Background()
+	boom := errors.New("boom")
+
+	// 单次失败即触发 open（计数型，窗口 total=1 < protection，速率型不可能触发）
+	if err := b.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("trip call err = %v, want boom", err)
+	}
+	if b.gb.state != stateOpen {
+		t.Fatalf("state = %v, want open after single failure", b.gb.state)
+	}
+
+	// 冷却期满：放行半开探测（gen=1），挂起不回报
+	clock.Advance(time.Minute)
+	probe, gen, err := b.AllowGen(ctx)
+	if err != nil || gen != 1 || b.gb.probeGen != 1 {
+		t.Fatalf("probe grant = (%v, %d), probeGen=%d, want grant gen 1", err, gen, b.gb.probeGen)
+	}
+	if b.gb.state != stateHalfOpen {
+		t.Fatalf("state = %v, want half-open with pending probe", b.gb.state)
+	}
+
+	// 前推 2s（> forcePass）再放行：forcePass 已到期，但 half-open 期通道关闭——
+	// 必须拒绝，探测位不被任何非探测请求触碰
+	clock.Advance(2 * time.Second)
+	if _, _, err = b.AllowGen(ctx); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("half-open force-pass err = %v, want ErrCircuitOpen (probe is the only half-open traffic)", err)
+	}
+	if b.gb.probeGen != 1 || b.gb.state != stateHalfOpen {
+		t.Fatalf("probeGen=%d state=%v, want 1/half-open untouched by rejected force-pass", b.gb.probeGen, b.gb.state)
+	}
+
+	// 真探测成功 → 关闸（若探测位被 force-pass 吞掉，这里将停留在 open）
+	probe.Pass()
+	if b.State() != StateClosed {
+		t.Fatalf("State() = %v, want StateClosed (probe success must close)", b.State())
+	}
+}
+
+// TestState_OpenForcePassReportIsNormalSample open 态 forcePass 照常放行（不过度
+// 抑制），其回报是普通样本：失败只进窗口统计、不重置冷却/不清探测位；冷却期满
+// 照常放行探测（#162：force-pass 的 Promise 不带探测标记，report 按标记判定）。
+func TestState_OpenForcePassReportIsNormalSample(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute,
+		WithConsecutiveFailures(1), WithForcePass(2*time.Second))
+	ctx := context.Background()
+	boom := errors.New("boom")
+
+	if err := b.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("trip call err = %v, want boom", err)
+	}
+	tripAt := b.gb.openSince
+
+	// open 态（无挂起探测）、forcePass 到期（lastPass 自进入 open 起算）：
+	// 观察哨请求放行，携带当前代（0，尚无探测）且 probe=false
+	clock.Advance(3 * time.Second)
+	p, gen, err := b.AllowGen(ctx)
+	if err != nil || p == nil {
+		t.Fatalf("open force-pass grant err = %v, want pass", err)
+	}
+	if gen != 0 {
+		t.Fatalf("force-pass gen = %d, want 0 (generation advances only on probe grants)", gen)
+	}
+	if gp := p.(googlePromise); gp.probe {
+		t.Fatal("force-pass promise must not carry the probe marker")
+	}
+
+	// force-pass 失败：普通样本——不重开重置计时（openSince 不动）、不触碰探测位
+	p.Fail()
+	if b.gb.state != stateOpen || b.gb.openSince != tripAt {
+		t.Fatalf("state=%v openSince moved=%v, want open/unchanged (force-pass report is a normal sample)",
+			b.gb.state, b.gb.openSince != tripAt)
+	}
+
+	// 冷却期满：照常放行半开探测（若 force-pass 失败被误判为探测，冷却将被重置）
+	clock.Advance(time.Minute - 3*time.Second)
+	probeP, gen2, err := b.AllowGen(ctx)
+	if err != nil || gen2 != 1 {
+		t.Fatalf("probe grant = (%v, %d), want grant gen 1 at cooldown expiry", err, gen2)
+	}
+	probeP.Pass()
+	if b.State() != StateClosed {
+		t.Fatalf("State() = %v, want StateClosed after probe success", b.State())
+	}
+}
+
+// TestState_ProbePromiseCarriesProbeFlag 探测标记按放行类型签发（#156/#162/#172
+// 的 report 侧）：closed 普通放行与 open 态 forcePass 放行的 promise 均不带标记，
+// 仅半开探测放行携带。
+func TestState_ProbePromiseCarriesProbeFlag(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(stateTestStart)
+	b := newProbeTestBreaker(clock, time.Minute,
+		WithConsecutiveFailures(1), WithForcePass(2*time.Second))
+	ctx := context.Background()
+	boom := errors.New("boom")
+
+	// closed 态普通放行：无标记
+	p, _, err := b.AllowGen(ctx)
+	if err != nil {
+		t.Fatalf("closed grant err = %v", err)
+	}
+	if gp := p.(googlePromise); gp.probe {
+		t.Fatal("closed-state grant must not carry the probe marker")
+	}
+	p.Pass()
+
+	// open 态 forcePass 放行：无标记
+	if err := b.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("trip call err = %v, want boom", err)
+	}
+	clock.Advance(3 * time.Second)
+	p, _, err = b.AllowGen(ctx)
+	if err != nil {
+		t.Fatalf("force-pass grant err = %v", err)
+	}
+	if gp := p.(googlePromise); gp.probe {
+		t.Fatal("force-pass grant must not carry the probe marker")
+	}
+	p.Fail()
+
+	// 半开探测放行：携带标记
+	clock.Advance(time.Minute - 3*time.Second)
+	p, _, err = b.AllowGen(ctx)
+	if err != nil {
+		t.Fatalf("probe grant err = %v", err)
+	}
+	if gp := p.(googlePromise); !gp.probe {
+		t.Fatal("probe grant must carry the probe marker")
+	}
+	p.Pass()
+}
