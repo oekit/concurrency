@@ -180,12 +180,22 @@ func (t *Tracker) GetDuration() time.Duration {
 }
 
 // Complete 标记所有阶段完成。
+//
+// 不覆盖失败终态（#193）：Fail 之后 Complete 是空操作——「defer t.Complete() +
+// 错误分支 t.Fail()」是消费方最自然的写法，若 Complete 无条件回写 TaskCompleted，
+// 失败的任务会在报表里显示为 100% 成功。
 func (t *Tracker) Complete() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.status == TaskFailed {
+		return // TaskFailed 是终态，不可回退到 TaskCompleted
+	}
 	now := time.Now()
 	t.status = TaskCompleted
 	for i := range t.phases {
+		if t.phases[i].Status == PhaseFailed {
+			continue // 失败阶段保留失败痕迹（防御：正常路径走不到这里）
+		}
 		if t.phases[i].Status != PhaseCompleted && t.phases[i].Status != PhaseSkipped {
 			t.phases[i].Status = PhaseCompleted
 			t.phases[i].Progress = 100

@@ -186,42 +186,68 @@ func NewGroup[T any](
 //
 // 目标经 IDOf 得到的键既作身份也作「是否需要重启」的判据（见 Group 文档）。
 // 必须由单个 goroutine 调用。组已 Stop 后调用是空操作。
+//
+// idOf 是用户回调，**在锁外**调用（文档承诺回调里读组状态——Len/Targets/Running/
+// Draining——不会自锁，#188）；其自身 panic 经 RunSafe 收编为 *PanicError 后转为
+// panic 上抛——上抛发生在无锁区，组不会被一次坏回调永久锁死（#189）。
 func (g *Group[T]) Reconcile(targets []T) {
-	type pending struct {
-		id   string
-		spec T
-	}
-
-	// 先算 diff（持锁只做 map 操作，不跑用户代码）
-	g.mu.Lock()
-	if g.stopped {
-		g.mu.Unlock()
-		return
-	}
+	// 先在锁外算身份（用户代码一律不进临界区）：空 id / 同批重复 id 是调用方
+	// 契约违反，fail-fast panic——此刻不持锁，panic 不会悬空 g.mu。
 	wanted := make(map[string]T, len(targets))
 	order := make([]string, 0, len(targets))
-	for _, target := range targets {
-		id := g.idOf(target)
+	for i, target := range targets {
+		id, err := async.RunSafeRetLabeled("supervisor.idOf", func() (string, error) {
+			return g.idOf(target), nil
+		})
+		if err != nil {
+			panic(fmt.Errorf("supervisor: idOf 回调 panic（targets[%d]）: %w", i, err))
+		}
 		if id == "" {
-			g.mu.Unlock()
 			panic("supervisor: IDOf 返回空字符串——空身份会让所有这类目标争同一个槽位")
 		}
 		if _, dup := wanted[id]; dup {
-			g.mu.Unlock()
 			panic(fmt.Sprintf("supervisor: targets 里 id 重复（%q）——同一批目标里身份必须唯一", id))
 		}
 		wanted[id] = target
 		order = append(order, id)
 	}
 
-	var toStart []pending
-	for _, id := range order {
-		if _, ok := g.slots[id]; !ok {
-			toStart = append(toStart, pending{id: id, spec: wanted[id]})
-		}
+	// 持锁只做 map 操作，算 diff（不跑用户代码）
+	toStart, toStop, alive := g.diff(wanted, order)
+	if !alive {
+		return
 	}
 
-	var toStop []*groupEntry
+	// 用户代码（cancel / start）一律在锁外：start 会立刻在监督 goroutine 里跑起来，
+	// 持锁调用会让「start 里读组状态」自锁。
+	for _, entry := range toStop {
+		entry.cancel()
+	}
+	for _, p := range toStart {
+		g.register(p, g.startOne(p.id, p.spec))
+	}
+}
+
+// pendingTarget 是一条待启动的目标（id 已在锁外经 idOf 算好）。
+type pendingTarget[T any] struct {
+	id   string
+	spec T
+}
+
+// diff 在单个临界区内完成「新增/消失」比对与登记：消失的移出 slots 并转入排水，
+// 新增的收集为待启动清单。defer Unlock 保证临界区内任何 panic 路径都不悬空
+// g.mu（#189）。组已 Stop 时返回 alive=false 且不改动任何状态。
+func (g *Group[T]) diff(wanted map[string]T, order []string) (toStart []pendingTarget[T], toStop []*groupEntry, alive bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped {
+		return nil, nil, false
+	}
+	for _, id := range order {
+		if _, ok := g.slots[id]; !ok {
+			toStart = append(toStart, pendingTarget[T]{id: id, spec: wanted[id]})
+		}
+	}
 	for id, s := range g.slots {
 		if _, ok := wanted[id]; !ok {
 			toStop = append(toStop, s.entry)
@@ -230,24 +256,19 @@ func (g *Group[T]) Reconcile(targets []T) {
 	}
 	g.draining = append(g.draining, toStop...)
 	g.pruneDrainingLocked()
-	g.mu.Unlock()
+	return toStart, toStop, true
+}
 
-	// 用户代码（cancel / start）一律在锁外：start 会立刻在监督 goroutine 里跑起来，
-	// 持锁调用会让「start 里读组状态」自锁。
-	for _, entry := range toStop {
+// register 把新起的循环登记进 slots；组已 Stop 时 cancel 掉并丢弃
+// （startOne 已在锁外跑，这里只做 map 写入，defer Unlock 同 #189）。
+func (g *Group[T]) register(p pendingTarget[T], entry *groupEntry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped {
 		entry.cancel()
+		return
 	}
-	for _, p := range toStart {
-		entry := g.startOne(p.id, p.spec)
-		g.mu.Lock()
-		if g.stopped {
-			g.mu.Unlock()
-			entry.cancel()
-			continue
-		}
-		g.slots[p.id] = &slot[T]{spec: p.spec, entry: entry}
-		g.mu.Unlock()
-	}
+	g.slots[p.id] = &slot[T]{spec: p.spec, entry: entry}
 }
 
 // Targets 返回当前受管目标的 id 集（顺序不保证）。

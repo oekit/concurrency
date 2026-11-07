@@ -1,3 +1,31 @@
+## [v0.28.3] — 2026-11-08
+
+- fix(async/supervisor): Group.Reconcile 不再在持有 g.mu 时调用用户回调 idOf——回调里
+  读组状态（Len/Running，文档明确承诺安全的用法）不再自死锁；idOf panic 经
+  `async.RunSafeRetLabeled` 收编为 `*PanicError` 后在**无锁区**上抛，剩余临界区
+  （diff/register）一律 defer Unlock——一次坏回调不再让整组方法永久死锁（#188、#189）
+- fix(ratelimit): SlidingWindow.Reserve 预占槽位**互不相同**（预占时刻按
+  `timestamps[len-maxCount]+window` 边界推进、同刻腾出的多槽 1ns 错开兜底）；在册预占以
+  maxCount 为上限（超限返回 -1 表示不可预留，不再无限透支未来窗口）；Count 只计已落账
+  条目（任意时刻 ≤ maxCount）；cleanOld 只扫过期头部、列表恒 ≤ 2*maxCount——40000 次
+  连续 Reserve 从 4.5s 的二次方退化回到线性（#190）
+- fix(poll): RunCursor 的空批（fetch 成功、0 项、游标不变——长轮询常态）按**成功轮**
+  重置失败计数，Exponential 退避不再一次抖动后单调爬到 MaxDelay 钉死不回落（#191）
+- fix(budget): Ledger.Consume 存档内容入库即拷贝——调用方复用缓冲区不再事后篡改
+  「按需取回完整原文」的取证材料（与 Get 出库侧的防御口径对称）（#192）
+- fix(progress): Tracker.Complete 不覆盖 Fail 终态（TaskFailed 不可回退，PhaseFailed
+  阶段保留失败痕迹）——`defer t.Complete()` + 错误分支 `t.Fail()` 的常见写法不再把
+  失败任务在报表里抹成 100% 成功（#193）
+- fix(group): Group.Run 的 interrupt 回调逐个经 `async.RunSafeLabeled` 收编、排空等待
+  放 defer——一个 interrupt 自身 panic 不再弃掉其余 Actor 的停机通知与等待（泄漏）（#194）
+- docs(changelog): 修复 v0.15.0 版本标题重复粘连（恢复单标题）；恢复被 feature 提交
+  误删的 v0.7.0 版本小节（#187，新门禁 oekit/.github#61 口径下自验通过）
+- docs: AGENTS.md 治理轮同步（错误处理段改 BizError/stdlib 双轨表述、日志段补
+  `logx.ErrKey` 常量约定、Option 段补非法值总则 + 新增「超时默认值」段，Refs matrix-tools#237）
+
+关联问题单：concurrency#187、concurrency#188、concurrency#189、concurrency#190、
+concurrency#191、concurrency#192、concurrency#193、concurrency#194。
+
 ## [v0.28.2] — 2026-11-08
 
 - **BREAKING** refactor!(async): `PanicHandler` 签名统一为 `func(ctx context.Context, r any, stack []byte)`——与 gopool.PanicHandler 完全一致（#184）。ctx 为任务执行上下文（带 ctx 的 spawn 家族——GoWithContext / GoSafeWithContext / GoSafeWithContextLabeled / RunSafeCtx / Runner.GoWithContext / GoDetached——把调用方 ctx 透传给 handler，日志可按请求聚合）；r 为 recover 原始值（错误上报路径为 fn 返回的 error）；Labeled 家族与 Supervise(WithTask) 的任务标签改经 ctx 携带（新增 `TaskFromContext` 取，默认 handler 输出仍带 `task=<name>:` 前缀），不再拼在消息前缀里。消费方迁移：`func(msg string, stack []byte)` → `func(ctx, r any, stack []byte)`（打印 msg 的位置改打印 r）
@@ -224,7 +252,7 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
   （**配置**共享但**计数器按 key 独立**）；factory 拿到的确实是 key 本身；
   空闲回收/容量护栏/`OverCapHits` 在新构造器上仍生效
 
-## [v0.15.0] — 2026-10-18## [v0.15.0] — 2026-10-18
+## [v0.15.0] — 2026-10-18
 
 ### feat(breaker)：同名共享熔断器配置冲突可观测（[#29](https://github.com/oekit/concurrency/issues/29)）
 - **新增 `WithBreakerConflictHandler(func(name, detail string))`**：`GetBreaker(name, opts...)`
@@ -397,6 +425,8 @@ TestGoSafeWithContextLabeled 在 CI 上偶发红（--- FAIL (1.00s) / safe_test.
 - `DoShared` 折叠可观测形态，额外返回 Shared（自己是 waiter 而非 leader）；Do 保持 (T, error) 不动
 - `Result.Waiters` 新增——本轮折叠掉的并发调用方数（近似值，观测口径）
 - 注：#17（breaker 三态状态机）当时评估后挂起，实施大纲已评论（后续轮次处理）
+
+## [v0.7.0] — 2026-10-18
 
 ### feat(async)：panic 收编统一 typed *PanicError（[#12](https://github.com/oekit/concurrency/issues/12)）
 - 新增 `async.PanicError{Value, Stack, Task}`——`RunSafeErr`/`RunSafeRet`/`RunSafeRetLabeled` 的

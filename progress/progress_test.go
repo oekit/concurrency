@@ -170,6 +170,45 @@ func TestFail(t *testing.T) {
 	}
 }
 
+// TestComplete_DoesNotOverrideFail 锁定 #193：Fail 是终态，之后的 Complete
+// 是空操作——「defer t.Complete() + 错误分支 t.Fail()」这条最自然的消费方
+// 写法不得把失败抹成 100% 成功。
+func TestComplete_DoesNotOverrideFail(t *testing.T) {
+	tr := NewTracker([]PhaseConfig{
+		{Name: "init"},
+		{Name: "work"},
+	})
+	tr.UpdatePhase("init", PhaseActive, 0)
+	tr.UpdatePhase("init", PhaseCompleted, 100)
+	tr.UpdatePhase("work", PhaseActive, 0)
+	tr.UpdatePhase("work", PhaseActive, 50)
+
+	tr.Fail()
+	tr.Complete() // 修复前：无条件把 failed 阶段改写成 completed+100
+
+	if got := tr.GetStatus(); got != TaskFailed {
+		t.Fatalf("GetStatus() = %q, want %q（Fail 不可被 Complete 回退）", got, TaskFailed)
+	}
+	if !tr.IsCompleted() {
+		t.Error("failed 任务也是已完成（成功或失败）")
+	}
+
+	work, ok := tr.GetPhase("work")
+	if !ok {
+		t.Fatal("phase work not found")
+	}
+	if work.Status != PhaseFailed {
+		t.Errorf("失败阶段被改写：work.Status = %q, want %q", work.Status, PhaseFailed)
+	}
+	if work.Progress != 50 {
+		t.Errorf("失败阶段进度被改写：work.Progress = %v, want 50", work.Progress)
+	}
+
+	if got := tr.GetOverallProgress(); got >= 100 {
+		t.Errorf("GetOverallProgress() = %v, 失败任务不应被抹成 100%%", got)
+	}
+}
+
 func TestGetPhases_ReturnsCopy(t *testing.T) {
 	tr := NewTracker([]PhaseConfig{{Name: "a"}, {Name: "b"}})
 	phases := tr.GetPhases()

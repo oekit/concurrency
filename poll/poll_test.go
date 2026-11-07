@@ -3,6 +3,7 @@ package poll
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -506,10 +507,64 @@ func TestRunCursor_BackoffGrowsWithFailures(t *testing.T) {
 	elapsed := time.Since(start)
 	cancel()
 	<-resCh
-
 	// 线性档：失败 1 次等 base、2 次等 2*base ⇒ 第三次拉取前至少过了 3*base。
 	if min := 3 * base; elapsed < min {
 		t.Fatalf("三次续拉耗时 %s，小于下界 %s（线性退避没生效）", elapsed, min)
+	}
+}
+
+// TestRunCursor_EmptyBatchResetsBackoff 空批（fetch 成功、0 项、游标不变——
+// 长轮询常态）是**成功轮**，失败计数必须归零（#191）。
+//
+// 序列：#1#2#3 失败 → #4 空批（游标不变）→ #5 失败 → #6 取消。
+// 若 #5 按 attempt=1 起算（指数 40ms），#5→#6 间隔 ≈ 40ms；修复前计数没归零，
+// #5 是 attempt=4 ⇒ 320ms——本用例以间隔上界钉住归零语义。
+func TestRunCursor_EmptyBatchResetsBackoff(t *testing.T) {
+	const base = 40 * time.Millisecond
+
+	var (
+		mu    sync.Mutex
+		at    []time.Time
+		empty atomic.Bool
+	)
+	fetch := func(_ context.Context, _ string) ([]string, string, error) {
+		mu.Lock()
+		at = append(at, time.Now())
+		n := len(at)
+		mu.Unlock()
+		if n == 4 {
+			// #4：成功但暂无新数据（空批、游标不动）——长轮询的常态轮
+			empty.Store(true)
+			return nil, "", nil
+		}
+		return nil, "", errors.New("下游抖动")
+	}
+	cfg := Config{ErrorBackoff: retry.Config{Delay: base, Exponential: true}}
+
+	resCh, cancel := startRun(cfg, "", fetch, func(context.Context, string) error { return nil })
+	waitFor(t, "#5 失败轮之后 #6 再拉一次", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(at) >= 6
+	})
+	if !empty.Load() {
+		t.Fatal("#4 应是空批（用例编排失效）")
+	}
+	cancel()
+	<-resCh
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) < 6 {
+		t.Fatalf("fetch 调用 %d 次，期望 ≥6", len(at))
+	}
+	gap := at[5].Sub(at[4])
+	// attempt=1 ⇒ 40ms；未归零 ⇒ attempt=4 ⇒ 320ms。上下界都留足裕量。
+	if gap < 30*time.Millisecond {
+		t.Fatalf("#5→#6 间隔 %s，小于 30ms（#5 之前不该有等待之外的长退避编排）", gap)
+	}
+	if gap > 150*time.Millisecond {
+		t.Fatalf("空批成功轮后 #5 的退避 = %s（>150ms）——失败计数没有被空批归零，attempt 仍按 4 起算（#191）", gap)
 	}
 }
 

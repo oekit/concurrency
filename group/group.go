@@ -31,6 +31,10 @@ func (g *Group) Add(execute func() error, interrupt func(error)) {
 // Run 并发执行所有 Actor。
 // 当第一个 Actor 返回时，其 error 传递给所有其他 Actor 的 interrupt 函数。
 // Run 阻塞直到所有 Actor 退出，返回第一个退出的 Actor 的 error。
+//
+// interrupt 是消费方提供的回调，逐个经 async.RunSafeLabeled 收编（#194）：
+// 一个 interrupt 自身 panic 不得弃掉其余 Actor 的停机通知与排空等待
+// （panic 只上报 PanicHandler，Run 继续走完停机流程）。
 func (g *Group) Run() error {
 	if len(g.actors) == 0 {
 		return nil
@@ -44,12 +48,16 @@ func (g *Group) Run() error {
 	err := <-errors
 
 	for _, a := range g.actors {
-		a.interrupt(err)
+		async.RunSafeLabeled("group.interrupt", func() { a.interrupt(err) })
 	}
 
-	for i := 1; i < cap(errors); i++ {
-		<-errors
-	}
+	// 排空等待放 defer：即使 interrupt 环节未来引入意外 panic 路径，
+	// Run 也保证等齐所有 Actor 再返回（不泄漏未通知、未等待的 goroutine）。
+	defer func() {
+		for i := 1; i < cap(errors); i++ {
+			<-errors
+		}
+	}()
 
 	return err
 }

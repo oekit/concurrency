@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oekit/concurrency/async"
 )
 
 func TestGroup_Run(t *testing.T) {
@@ -64,6 +66,57 @@ func TestGroup_InterruptCalled(t *testing.T) {
 	_ = g.Run()
 	if atomic.LoadInt32(&interrupted) != 1 {
 		t.Errorf("expected interrupt called once, got %d", interrupted)
+	}
+}
+
+// TestGroup_InterruptPanicDoesNotAbandonOthers 锁定 #194：interrupt 是消费方
+// 回调，一个 interrupt 自身 panic 不得弃掉其余 Actor 的停机通知与排空等待——
+// 修复前 panic 逃逸出 Run，后面的 Actor 既不被 interrupt 也不被等待（泄漏）。
+func TestGroup_InterruptPanicDoesNotAbandonOthers(t *testing.T) {
+	async.SetPanicHandler(func(context.Context, any, []byte) {}) // 收编上报走全局口子，这里静音
+	t.Cleanup(func() { async.SetPanicHandler(nil) })             // nil = 恢复默认（#165）
+
+	g := &Group{}
+	wantErr := errors.New("actor-1 down")
+
+	// actor-1：立即返回错误，其 interrupt 会 panic（坏回调）
+	g.Add(func() error {
+		return wantErr
+	}, func(error) {
+		panic("interrupt 自身坏了")
+	})
+	// actor-2：阻塞等 interrupt 通知，收到后退出
+	stop2 := make(chan struct{})
+	interrupted2 := make(chan struct{}, 1)
+	g.Add(func() error {
+		<-stop2
+		return nil
+	}, func(error) {
+		select {
+		case interrupted2 <- struct{}{}:
+		default:
+		}
+		close(stop2)
+	})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- g.Run() }()
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Run 返回 %v，期望首个退出的 actor 错误 %v", err, wantErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run 3s 未返回——interrupt panic 逃逸导致排空等待被弃")
+	}
+
+	// actor-2 确实收到了 interrupt（Run 已返回 ⇒ 排空完成 ⇒ actor-2 已退出，
+	// 不是泄漏在后台继续跑）
+	select {
+	case <-interrupted2:
+	case <-time.After(3 * time.Second):
+		t.Fatal("actor-2 没有收到 interrupt——坏 interrupt 弃掉了其余 actor 的停机")
 	}
 }
 
