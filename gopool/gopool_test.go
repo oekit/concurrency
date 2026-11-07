@@ -263,3 +263,46 @@ func BenchmarkGopool_Go(b *testing.B) {
 		p.Go(func() { n.Add(1) })
 	}
 }
+
+// TestPool_AgedWorkerExitDrainsBacklog 老化退出路径的 drain 对称性（#163）：
+// 常驻 worker 查龄退出时必须先清空队列存量再退——与 close/临时 worker 两条退出
+// 路径同等保证。直塞任务队列模拟「积压已存在、无新提交捞起」的形态（绕过
+// CtxGo 的 len!=0 → spawn 检查）；时钟前推让老化判定确定性成立，不依赖真实等待。
+// 旧实现直接 return：两个积压任务此后无人消费，测试超时失败。
+func TestPool_AgedWorkerExitDrainsBacklog(t *testing.T) {
+	p := NewPool("aged-drain", PoolOption{
+		MaxIdleWorkers: 1,
+		WorkerMaxAge:   time.Minute,
+		TaskChanBuffer: 8,
+	})
+	// cleanup 用有界 Close：若 drain 对称性回归（积压无人消费、wg 计数悬空），
+	// Close 返回超时错误而不是把测试进程挂死
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(closeCancel)
+	t.Cleanup(func() { _ = p.Close(closeCtx) })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p.Go(func() { close(started); <-release }) // W1：唯一常驻 worker 执行长任务
+	<-started
+
+	// 时钟直接前推超龄：now-createdAt > maxage 确定性成立（真实时钟下需等 maxage）
+	p.clock.Store(time.Now().Add(2 * time.Minute).UnixMilli())
+
+	// 直塞两个积压任务（drainTasks 经 runTask 归减 wg，需配套 Add）
+	p.wg.Add(2)
+	done := make(chan struct{}, 2)
+	for i := 0; i < 2; i++ {
+		p.tasks <- task{ctx: context.Background(), f: func() { done <- struct{}{} }}
+	}
+
+	// W1 跑完长任务 → 查龄退出：退出前必须 drain 两个积压任务
+	close(release)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("积压任务 %d 未被老化退出的 worker 消费（drain 对称性被破坏）", i+1)
+		}
+	}
+}

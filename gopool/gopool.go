@@ -201,7 +201,8 @@ func (p *Pool) recoverRun(ctx context.Context, f func()) {
 }
 
 // runWorker worker 主循环：超出常驻额度的 worker 取完存量任务即退；
-// 常驻 worker 借共享时钟做老化检查，超龄或池关闭（存量清空后）退出。
+// 常驻 worker 借共享时钟做老化检查，超龄（存量清空后）或池关闭（存量清空后）
+// 退出——三条退出路径（close/临时 worker/老化）对队列存量的保证对称。
 func (p *Pool) runWorker() {
 	id := p.workers.Add(1)
 	defer p.workers.Add(-1)
@@ -234,6 +235,12 @@ func (p *Pool) runWorker() {
 			}
 		}
 		if now-createdAt > p.maxage {
+			// 老化退出与 close/临时 worker 两条退出路径对称（#163）：退出前清空
+			// 队列存量。最后一个常驻 worker 查龄退出时队列可能还有积压——若直接
+			// 返回且此后长期无新提交（CtxGo 的 len!=0 → spawn 不再发生），积压将
+			// 无限期滞留、无人消费；drainTasks 本身非阻塞扫描，退出不会被新任务
+			// 永久拖住。
+			p.drainTasks()
 			return
 		}
 	}
