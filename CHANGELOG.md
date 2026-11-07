@@ -24,7 +24,7 @@
 - feat(poll): 新增 `RunCursor[T]`——带单调游标的长轮询批量拉取循环，四个易漂移语义由库钉死（游标只前进 / 处理完才推进 / 失败退避复用 retry 口径 / 单项 panic 收编不杀循环）（#144）
 - feat(async/supervisor): 新增 `Group[T]`——按键常驻循环集合与外部目标集持续对齐（新增起 / 消失停并转排水 / 规格变更重启 / 意外死亡探活重启），组内单条循环复用 `async.Supervise`（#143）
 - feat(retry): 导出 `Delay(cfg, attempt, err)`——退避的**实跑口径**（真实抖动随机量 / `DelayHint` 覆盖 / `MaxDelay` 封顶），与 `Backoff` 的上界口径互补；`poll` 的续拉退避直接走它，全仓仍只有一份退避公式
-- feat!(fanout): `Option` 更名 `MapOption`——本仓 AGENTS.md 禁止裸 `Option`（多包 co-import 冲突），v0.26.0 引入该别名时违反了这条。只传 `fanout.WithOnItemError(...)` 的调用点不受影响；显式声明该类型变量会编译失败
+- **BREAKING** feat!(fanout): `Option` 更名 `MapOption`——本仓 AGENTS.md 禁止裸 `Option`（多包 co-import 冲突），v0.26.0 引入该别名时违反了这条。只传 `fanout.WithOnItemError(...)` 的调用点不受影响；显式声明该类型变量会编译失败
 
 **#144（游标长轮询）**：IM / 消息平台的收消息循环是同一个形状，逐平台复制——带游标拉一批 → 出错等固定几秒 → 推进游标并持久化 → 逐条处理。复制出来的副本在三处各自漂移：①退避是手写固定值（`time.After(3 * time.Second)`，无指数无抖动 ⇒ 两个平台同时撞故障会按同一节奏把下游再打一遍）；②游标推进时机各写各的（先推进后处理 = 崩溃丢消息，先处理后推进 = 崩溃重复投递，两版混在生产里）；③批内一条坏数据 panic 打死整个循环。
 
