@@ -10,7 +10,7 @@
 // 典型接线（业务侧把 panic 汇入 logx）：
 //
 //	gopool.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
-//	    logx.Error("gopool panic", "error", r, "stack", string(stack))
+//	    logx.Error("gopool panic", "err", r, "stack", string(stack))
 //	})
 //	gopool.Go(func() { ... })                 // 包级默认池
 //	p := gopool.NewPool("ingest", gopool.PoolOption{MaxIdleWorkers: 64})

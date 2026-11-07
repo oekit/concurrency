@@ -100,7 +100,7 @@ type Config struct {
 //	    OnAdvance:    store.Save,
 //	}, cursor, fetchBatch, handleOne)
 //	if err != nil && !errors.Is(err, context.Canceled) {
-//	    log.Error("收消息循环退出", "error", err)
+//	    log.Error("收消息循环退出", "err", err)
 //	}
 func RunCursor[T any](
 	ctx context.Context,

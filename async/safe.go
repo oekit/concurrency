@@ -36,7 +36,7 @@ func init() {
 // 用法:
 //
 //	async.SetPanicHandler(func(msg string, stack []byte) {
-//	    logx.Error("goroutine panic", "error", msg, "stack", string(stack))
+//	    logx.Error("goroutine panic", "err", msg, "stack", string(stack))
 //	})
 func SetPanicHandler(handler PanicHandler) {
 	if handler == nil {
