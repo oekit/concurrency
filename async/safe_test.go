@@ -277,8 +277,12 @@ func TestPanicHandler_ReceivesCtx(t *testing.T) {
 
 // TestTaskFromContext withTask/TaskFromContext 的纯函数口径：nil ctx、空 task
 // 原样、带标签可取回。
+//
+// nilCtx 故意经变量传 nil（而非字面量）：这里测的就是两个函数对 nil ctx 的
+// 容错（handler 作者可能拿到 nil），staticcheck SA1012 只拦字面量传参。
 func TestTaskFromContext(t *testing.T) {
-	if TaskFromContext(nil) != "" {
+	var nilCtx context.Context
+	if TaskFromContext(nilCtx) != "" {
 		t.Fatal("nil ctx 应返回空标签")
 	}
 	if got := TaskFromContext(context.Background()); got != "" {
@@ -288,7 +292,7 @@ func TestTaskFromContext(t *testing.T) {
 	if got := TaskFromContext(ctx); got != "janitor" {
 		t.Fatalf("带标签 ctx 返回 %q，期望 janitor", got)
 	}
-	if got := TaskFromContext(withTask(nil, "")); got != "" {
+	if got := TaskFromContext(withTask(nilCtx, "")); got != "" {
 		t.Fatalf("空 task 不应注入标签，得到 %q", got)
 	}
 }

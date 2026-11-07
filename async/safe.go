@@ -95,8 +95,8 @@ func callPanicHandler(ctx context.Context, r any, stack []byte) {
 	// handler 自身 panic 必须就地收编：本函数运行在 GoSafe 的 deferred
 	// recover 闭包内，这里再 panic 不会被同一个 defer 恢复，直接打死进程。
 	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("async: panic handler itself panicked: %v", r)
+		if rr := recover(); rr != nil {
+			log.Printf("async: panic handler itself panicked: %v", rr)
 		}
 	}()
 	(*fn)(ctx, r, stack)
