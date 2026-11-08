@@ -28,6 +28,11 @@
 //	    checkBuildTimeout(ctx)
 //	})
 //
+// ⚠️ RunBackground 首次调用会注册 SIGINT/SIGTERM——进程对这两个信号的默认
+// 终止行为随之失效（信号只取消循环，主流程需自行处理停机，#218）。不要该
+// 副作用的调用方在进程启动早期调用 loop.DisableBackgroundSignalHandling
+// （opt-out，见其 godoc）。
+//
 // # 间隔模式
 //
 //   - IntervalFixed（默认）：固定节奏 + 忙时丢 tick。关心「固定时刻表」的任务用这档。
