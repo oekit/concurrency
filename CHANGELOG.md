@@ -1,3 +1,9 @@
+## [v0.29.1] — 2026-11-08
+
+- fix(async): Spawn/GoDetached/DetachedContext 保留 parent values——「WithoutCancel 语义内置」表述与实现对齐（concurrency#211）：实现原从 `context.Background()` 派生，parent 的 values 全部丢弃（仅经 SetContextEnricher 补 trace），与 `context.WithoutCancel` 的标准语义（仅去除取消信号、**Value 链原样继承**）相悖——Spawn 的定位是「手拼 channel+WithoutCancel+GoSafe 五件套的收编件」，凡原手拼用了 WithoutCancel（留 values）的场景收编后 values 静默丢失：values 缺失在下游深处往往是 `ScopeFrom(ctx)` 类读取返回 nil 后**静默降级**（不报错、不 panic），极难发现（下游 git-ferry delegate 后台委派实测踩坑：回填结果需要 ctx 里的会话 scope，收编 GoDetached 后拿不到 ⇒ 回填静默不执行，回归测试当场红才暴露）。改为 `context.WithoutCancel(parent)` 派生（go 地板 1.24 直接用 stdlib，不再手写自定义 context 类型）：Done 为 nil、Err 恒 nil、Deadline 不继承、Value 委托 parent——保留/丢弃对照表进 DetachedContext godoc；SetContextEnricher 钩子形态与注册口径不变（只补 trace 一层，与 values 继承正交）；nil parent 兜底 Background 口径不变。用例三对照表逐项钉住：DetachedContext 直测（values 可读且与 `context.WithoutCancel` 逐值一致、cancel parent 后 Err 恒 nil 且 Done 永不触发、带 1h 时限 parent 的 Deadline 不继承）；GoDetached/Spawn 无 enricher 时 fn 内读到 parent values（VALUES-LOST 回归钉住，Spawn 场景叠加主路径 cancel）；清 enricher 后 values 仍在（enricher 只管 trace）
+
+关联问题单：concurrency#211。
+
 ## [v0.29.0] — 2026-11-08
 
 - feat(syncx): 新增按键互斥原语 `KeyedMutex[K]`（#195）——「同名任务/通道/资源同刻只跑一个」的本地单源（收编 git-ferry localGuard 的 sync.Map 三件套手搓：LoadOrStore + 失败还名额 + Delete 回调三步各自易错，失效形态都是慢性的——忘还名额 ⇒ 慢性并发泄漏、Delete 抢跑 ⇒ 误删新执行流的标记）：`WithLock(key, fn)` / `Acquire(key)` 即拒形态（key 忙立刻 false，不排队不占名额，ok=false 唯一含义=该 key 正在执行中）、release 幂等（atomic CAS，Double-release 第二次 no-op 且不误删新持有者的标记）、release 即注销（条目生命周期=持有期，高基数 key 零残留——无需清扫协程、无需 Close，对比 KeyedGate 槽位常驻/KeyedLimiterOf 空闲 TTL 的原因见包文档）；16 段哈希分段锁（maphash.Comparable，Go 1.24）防单 map 热点；与 singleflight（同 key 合并成一次执行）的分工在包文档钉死
