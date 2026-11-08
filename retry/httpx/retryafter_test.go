@@ -30,6 +30,16 @@ func TestParseRetryAfter(t *testing.T) {
 		{"unit suffix rejected", "120s", 0, false, 0},
 		{"overflow seconds rejected", "99999999999999999999999", 0, false, 0},
 
+		// —— 秒→时长乘法溢出（#213/#215）——
+		// 上界恰不溢出：9223372036 s = MaxInt64/int64(time.Second)
+		{"max representable seconds accepted", "9223372036", 9223372036 * time.Second, true, 0},
+		// 首个溢出秒数：裸乘回绕成负时长且 ok=true（修复前），契约钉死为 (0, false)
+		{"first overflowing second rejected", "9223372037", 0, false, 0},
+		// 回绕成**小正值**的形态（≈0.29s）：只钉负值会漏掉这一格
+		{"wrap to small positive rejected", "18446744074", 0, false, 0},
+		// 10 位秒数（Atoi 在 64 位平台成功、折算必溢出）
+		{"ten-digit overflow rejected", "9999999999", 0, false, 0},
+
 		// —— 形态二：HTTP-date（IMF-fixdate，必须接受）——
 		{
 			"future date gives delta",

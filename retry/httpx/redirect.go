@@ -42,6 +42,21 @@ func DefaultSensitiveHeaders() []string {
 // 比较大小写不敏感（DNS 名不区分大小写），端口参与比较。缺省端口的等价
 // 形态（example.com 与 example.com:443）按**不同宿主**处理——判定不确定时
 // 剥离是安全方向：误剥的代价是重新认证，误留的代价是凭据发往另一个信任域。
+//
+// ⚠️ 空 toHost（fromHost 同理）按**不同宿主**处理（#214）：相对 Location
+// （"/login"、"../x"）直接 url.Parse 出来的 URL.Host 是空串——那不是「另一个
+// 信任域」，是「还没解析」。本原语只看字符串、不知道来源 URL，无法替调用方
+// 消歧，只能按保守档处理（误剥的代价是同主机跳转 401/403，误留的代价是凭据
+// 出域）。**相对 Location 必须先 ResolveReference 成绝对 URL 再判定**：
+//
+//	ref, err := url.Parse(loc) // 错误不要丢
+//	if err != nil { return err }
+//	next := req.URL.ResolveReference(ref) // Host 恒为真实宿主，req.URL 保持绝对
+//	httpx.StripSensitiveHeaders(&req.Header, req.URL.Host, next.Host)
+//	req.URL = next
+//
+// 直接拿相对 URL 的 Host 判定会把同主机跳转误剥凭据，且 req.URL 被换成相对
+// URL 后 http.Client.Do 直接失败（unsupported protocol scheme ""）。
 func CrossHostRedirect(fromHost, toHost string) bool {
 	return !strings.EqualFold(fromHost, toHost)
 }
@@ -51,19 +66,22 @@ func CrossHostRedirect(fromHost, toHost string) bool {
 // 会剥离跨宿主 Authorization，手动跟随恰好绕开这层保护；剥离发生在「跟随」
 // 而不是「响应处理」——晚了就已经在跳转请求里带出去了，go-github
 // checkRedirection 同场景）。同宿主跳转原样返回（git 平台的 URL 常带路径
-// 跳转，同宿主剥了反而破坏认证），凭据头一个不删。
+// 跳转，同宿主剥了反而破坏认证；相对 Location 解析后同属这一类，#214），
+// 凭据头一个不删。
 //
 // h 为 nil 时 no-op。剥离词表为内置缺省（见 DefaultSensitiveHeaders）；
 // 平台特化 Token 头用 StripSensitiveHeadersWith 传自定义词表。
 //
-// 用法（手动跟随 + 每跳判定）：
+// 用法（手动跟随 + 每跳判定；相对 Location 先 ResolveReference，#214——
+// 直接 url.Parse 相对串的 Host 是空串，会被按跨宿主误剥凭据）：
 //
 //	for redirects := 0; ; redirects++ {
 //	    resp, err := client.Do(req)
 //	    if err != nil { return err }
 //	    if resp.StatusCode/100 != 3 || redirects >= maxRedirects { return resp }
-//	    loc := resp.Header.Get("Location")
-//	    next, _ := url.Parse(loc)
+//	    ref, err := url.Parse(resp.Header.Get("Location"))
+//	    if err != nil { return err }
+//	    next := req.URL.ResolveReference(ref) // 相对 Location → 绝对 URL
 //	    httpx.StripSensitiveHeaders(&req.Header, req.URL.Host, next.Host)
 //	    req.URL = next
 //	}

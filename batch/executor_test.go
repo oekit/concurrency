@@ -1,12 +1,15 @@
 package batch
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // manualTicker 手动周期信号源：无缓冲 channel，fire 阻塞直至后台接收——
@@ -247,5 +250,120 @@ func TestPeriodicalExecutor_ConcurrentAddFlushNoLoss(t *testing.T) {
 	e.Wait()
 	if got := total.Load(); got != producers*perProducer {
 		t.Fatalf("task loss: expected %d executed, got %d", producers*perProducer, got)
+	}
+}
+
+// gateStopTicker Stop 可挂起的手动信号源：Stop 进入即关闭 stopped（同步点）、
+// 阻塞直至 release 放行。defer 次序保证「ticker.Stop() 先于 close(exit)」，
+// 挂起的 Stop 恰好把「旧循环已摘牌（background=false 且已解锁）、defer close
+// 尚未执行」的竞态窗口（#220）驻留下来供测试在窗口内注入 Add。
+type gateStopTicker struct {
+	ch      chan time.Time
+	stopped chan struct{}
+	release chan struct{}
+}
+
+func (t *gateStopTicker) C() <-chan time.Time { return t.ch }
+func (t *gateStopTicker) fire()               { t.ch <- time.Now() }
+func (t *gateStopTicker) Stop() {
+	close(t.stopped)
+	<-t.release
+}
+
+// TestPeriodicalExecutor_OldLoopOnlyClosesOwnExit 旧循环只关自己的 exit 通道
+// （#220）：修复前 defer close(e.exit) 重读字段——旧循环摘牌与 defer 执行之间
+// 的窗口里并发 Add 覆写 e.exit 拉起新一代循环，旧循环会关掉**新**通道：正在
+// Wait 的调用方提前返回（尾部批次丢失）、新循环退出时二次 close panic。
+//
+// 确定性构造：Stop 挂起把窗口驻留 → 窗口内 Add 拉起第二代 → 放行。修复后
+// 第一代关自己启动时固化的通道（exit1 被关闭、exit2 原样）；第二代照常交付、
+// 正常退出、全程零 panic。通道同步驱动，-race 稳定、无 sleep 编排。
+func TestPeriodicalExecutor_OldLoopOnlyClosesOwnExit(t *testing.T) {
+	// PanicHandler 间谍：修复前第二代退出时 close 已被第一代关掉的通道 →
+	// 「close of closed channel」被 GoSafe 收编成一条上报
+	panics := make(chan string, 8)
+	async.SetPanicHandler(func(_ context.Context, r any, _ []byte) { panics <- fmt.Sprint(r) })
+	t.Cleanup(func() { async.SetPanicHandler(nil) })
+
+	// 每一代循环从工厂各领一个可挂起的信号源
+	tickers := make(chan *gateStopTicker, 4)
+	factory := func(time.Duration) Ticker {
+		tk := &gateStopTicker{ch: make(chan time.Time), stopped: make(chan struct{}), release: make(chan struct{})}
+		tickers <- tk
+		return tk
+	}
+	col := newCollector(8)
+	e := NewPeriodicalExecutor(time.Hour, &bulkContainer{max: 100, do: col.execute}, WithBatchTicker(factory))
+
+	e.Add("a") // 拉起第一代循环（后台循环启动时才向工厂领 ticker）
+	var gen1 *gateStopTicker
+	select {
+	case gen1 = <-tickers:
+	case <-time.After(2 * time.Second):
+		t.Fatal("第一代循环未启动")
+	}
+	for i := 0; i < idleExitRounds; i++ {
+		gen1.fire() // 首 tick 交付 "a"，其后累计空闲恰在第 idleExitRounds 轮自退出
+	}
+	<-gen1.stopped // 同步点：摘牌（background=false）已完成且已解锁，defer close 尚未执行
+
+	// 首 tick 已把 "a" 交付进 collector，先取走再驱动第二代
+	if got := collectExec(t, col, 1); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("expected [a], got %v", got)
+	}
+
+	e.mu.Lock()
+	exit1 := e.exit // 第一代自己的退出通道（此刻尚未被覆写）
+	e.mu.Unlock()
+
+	// 竞态窗口内 Add：重拉第二代循环（覆写 e.exit）
+	e.Add("b")
+	e.mu.Lock()
+	running := e.background
+	exit2 := e.exit
+	e.mu.Unlock()
+	if !running {
+		t.Fatal("摘牌后的窗口 Add 应重拉后台循环")
+	}
+	if exit2 == exit1 {
+		t.Fatal("前置失效：窗口 Add 应分配新 exit 通道")
+	}
+
+	// 放行第一代 Stop → 第一代执行 close。修复后关自己的通道（exit1 被关闭、
+	// exit2 不受影响）；修复前重读字段关掉 exit2，exit1 永不关闭 ⇒ 超时红灯。
+	close(gen1.release)
+	select {
+	case <-exit1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("旧循环退出后未关闭自己的 exit 通道——defer 重读了 e.exit 字段（#220）")
+	}
+
+	// 第二代照常工作：交付 "b" 并在空闲到期时干净退出
+	var gen2 *gateStopTicker
+	select {
+	case gen2 = <-tickers:
+	case <-time.After(2 * time.Second):
+		t.Fatal("第二代循环未启动")
+	}
+	gen2.fire()
+	if got := collectExec(t, col, 1); len(got) != 1 || got[0] != "b" {
+		t.Fatalf("expected [b], got %v", got)
+	}
+	for i := 0; i < idleExitRounds-1; i++ {
+		gen2.fire()
+	}
+	<-gen2.stopped
+	close(gen2.release)
+	select {
+	case <-exit2: // 第二代正常退出，关闭自己的通道
+	case <-time.After(2 * time.Second):
+		t.Fatal("第二代循环退出后未关闭 exit")
+	}
+
+	// 全程零 panic（修复前：第二代 close 已被第一代关掉的通道 → panic 上报）
+	select {
+	case msg := <-panics:
+		t.Fatalf("不应有任何 panic（修复前此处为 close of closed channel）：%s", msg)
+	default:
 	}
 }

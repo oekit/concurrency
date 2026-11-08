@@ -16,13 +16,16 @@ import (
 // 本文件把该固化形态收编为原语。
 //
 // 用法：与 StripSensitiveHeaders 并行调用（两条独立泄漏面，缺一即漏），
-// 逐跳 RoundTrip 之前、跨宿主判定（CrossHostRedirect）之后：
+// 逐跳 RoundTrip 之前、跨宿主判定（CrossHostRedirect）之后；相对 Location
+// 先 ResolveReference 成绝对 URL 再判定（#214——直接 url.Parse 相对串的
+// Host 是空串，会被按跨宿主误剥）：
 //
 //	for redirects := 0; ; redirects++ {
 //	    resp, err := client.Do(req)
 //	    if err != nil { return err }
-//	    loc := resp.Header.Get("Location")
-//	    next, _ := url.Parse(loc)
+//	    ref, err := url.Parse(resp.Header.Get("Location"))
+//	    if err != nil { return err }
+//	    next := req.URL.ResolveReference(ref)
 //	    if httpx.CrossHostRedirect(req.URL.Host, next.Host) {
 //	        httpx.StripSensitiveHeaders(&req.Header, req.URL.Host, next.Host)
 //	        httpx.StripSensitiveQueryParams(req.URL) // token-in-query 面

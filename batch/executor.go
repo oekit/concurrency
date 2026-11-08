@@ -146,8 +146,17 @@ func (e *PeriodicalExecutor) ensureBackgroundLocked() {
 	}
 	e.background = true
 	e.stopRequested = false
-	e.exit = make(chan struct{})
-	async.GoSafe(e.backgroundLoop)
+	exit := make(chan struct{})
+	e.exit = exit
+	// 通道在本处固化、经参数交给循环（#220）：通道所有权显式化——循环只关
+	// 自己启动时的那一个。Go 语义下 defer close(e.exit) 的参数在 defer 语句
+	// 处求值、原实现亦无竞态（goroutine 创建建立 happens-before，新一代拉起
+	// 以旧一代摘牌为前提，读恰落在两者之间），但该正确性依赖一处极易误读的
+	// 语义（#220 即误读为「defer 执行时才读字段」；一旦有人改成 defer
+	// func(){ close(e.exit) }() 就真会跨代关错通道）。经参数固化后该不变量
+	// 不再依赖 defer 求值语义，回归钉测试（TestPeriodicalExecutor_OldLoopOnly
+	// ClosesOwnExit）守护之。
+	async.GoSafe(func() { e.backgroundLoop(exit) })
 }
 
 // trigger 非阻塞投递立即 flush 信号（cap 1，已有待处理信号时合并）。
@@ -159,9 +168,10 @@ func (e *PeriodicalExecutor) trigger() {
 }
 
 // backgroundLoop 后台主循环：等待周期或唤醒信号，取走积压批量执行；
-// 停机请求或空闲到期时退出（见 round/roundTick）。
-func (e *PeriodicalExecutor) backgroundLoop() {
-	defer close(e.exit)
+// 停机请求或空闲到期时退出（见 round/roundTick）。exit 为本代循环自己的
+// 退出通道（启动时固化，#220）——退出时只关它，不重读 e.exit 字段。
+func (e *PeriodicalExecutor) backgroundLoop(exit chan struct{}) {
+	defer close(exit)
 
 	var tickerC <-chan time.Time
 	var ticker Ticker

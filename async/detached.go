@@ -27,8 +27,10 @@ var contextEnricher atomic.Pointer[func(parent, bg context.Context) context.Cont
 //	}
 //
 // fn 为 nil 清除钩子（回到裸 Background）。钩子在后台 goroutine 启动前同步调用，
-// 注意自身不要 panic 或长时间阻塞（其自身 panic 由 GoSafe 家族收编，但观测注入
-// 会丢失）。重复注册以后一次为准（进程级单钩子，与 SetPanicHandler 同形态）。
+// 注意不要长时间阻塞。钩子自身的 panic 由 DetachedContext 就地收编（#217）：
+// 回退脱钩面并上报 PanicHandler——观测注入丢失，但调用方（含 GoDetached/
+// Spawn 的调用方 goroutine）不受影响，不会被打穿。重复注册以后一次为准
+// （进程级单钩子，与 SetPanicHandler 同形态）。
 func SetContextEnricher(fn func(parent, bg context.Context) context.Context) {
 	if fn == nil {
 		contextEnricher.Store(nil)
@@ -53,8 +55,8 @@ func SetContextEnricher(fn func(parent, bg context.Context) context.Context) {
 //	Values     | 保留——Value 委托 parent（请求作用域：会话 scope、
 //	           | 租户标识等照常可读，ScopeFrom 类收编件不再静默降级）
 //	trace      | 保留——经 SetContextEnricher 注册的钩子把 parent 的
-//	           | trace_id 等注入返回值（无钩子或钩子返回 nil 时退回
-//	           | 脱钩面），日志仍能跟请求串起来
+//	           | trace_id 等注入返回值（无钩子、钩子返回 nil 或钩子 panic
+//	           | 时退回脱钩面，#217），日志仍能跟请求串起来
 //
 // 与手拼五件套（WithoutCancel + traceid 注入 + GoSafeLabeled）等价；
 // 供需要自管 spawn 策略的调用方复用同一口径，常规后台任务直接用 GoDetached。
@@ -64,9 +66,18 @@ func DetachedContext(parent context.Context) context.Context {
 	}
 	bg := context.WithoutCancel(parent)
 	if fn := contextEnricher.Load(); fn != nil && *fn != nil {
-		if enriched := (*fn)(parent, bg); enriched != nil {
-			return enriched
-		}
+		enriched := bg
+		// #217：enricher 多为 tracing 模块 init 注册的三方代码，panic 是现实
+		// 输入。此前在调用方 goroutine 同步调用，panic 直接上抛打穿 GoDetached/
+		// Spawn 的调用方（HTTP handler 变 500、裸 goroutine 打死进程）——与
+		// 二者的「panic 收编、旁路安全」承诺正面冲突。就地 RunSafe 收编：
+		// panic 时回退脱钩面（观测注入丢失），并经 PanicHandler 上报。
+		RunSafe(func() {
+			if e := (*fn)(parent, bg); e != nil {
+				enriched = e
+			}
+		})
+		return enriched
 	}
 	return bg
 }

@@ -115,6 +115,76 @@ func TestGoDetached_EnricherPreservesTrace(t *testing.T) {
 	}
 }
 
+// ---- #217：enricher panic 收编在 DetachedContext 内部 ----
+
+// TestDetachedContext_EnricherPanicContained enricher（三方 init 注册的现实输入）
+// panic 不得同步打进调用方 goroutine：此前 DetachedContext 在调用方 goroutine
+// 里裸调钩子，GoDetached/Spawn 都在 go func() 之前构造后台 ctx——panic 直接
+// 上抛（HTTP handler 变 500、裸 goroutine 打死进程），与「panic 收编、旁路
+// 安全」承诺冲突。修复后就地 RunSafe 收编：回退脱钩面（values 仍保留、观测
+// 注入丢失）并上报 PanicHandler，调用方安全。
+func TestDetachedContext_EnricherPanicContained(t *testing.T) {
+	reports := make(chan string, 8)
+	async.SetPanicHandler(func(_ context.Context, r any, _ []byte) {
+		reports <- fmt.Sprint(r)
+	})
+	t.Cleanup(func() { async.SetPanicHandler(nil) })
+	async.SetContextEnricher(func(parent, bg context.Context) context.Context {
+		panic("enricher-boom")
+	})
+	t.Cleanup(func() { async.SetContextEnricher(nil) })
+
+	parent := context.WithValue(context.Background(), detachedKey{}, "scope-217")
+
+	// DetachedContext 自身不 panic，回退脱钩面且 values 保留
+	d := async.DetachedContext(parent)
+	if v, ok := d.Value(detachedKey{}).(string); !ok || v != "scope-217" {
+		t.Fatalf("enricher panic 后应回退脱钩 ctx（values 保留）, got (%q, %v)", v, ok)
+	}
+
+	// GoDetached 调用方安全，fn 正常执行
+	fnDone := make(chan struct{})
+	async.GoDetached(parent, "detached-217", func(ctx context.Context) {
+		if _, ok := ctx.Value(detachedKey{}).(string); !ok {
+			t.Error("回退 ctx 应保留 values")
+		}
+		close(fnDone)
+	})
+	select {
+	case <-fnDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("GoDetached 未执行")
+	}
+
+	// Spawn 调用方安全，句柄正常返回结果
+	h := async.Spawn(parent, "spawn-217", func(ctx context.Context) (string, error) {
+		v, _ := ctx.Value(detachedKey{}).(string)
+		return v, nil
+	})
+	val, err, timedOut := h.WaitUpTo(context.Background(), 2*time.Second)
+	if timedOut || err != nil || val != "scope-217" {
+		t.Fatalf("Spawn 结果 = (%q, %v, %v)，期望正常返回", val, err, timedOut)
+	}
+
+	// 每次 DetachedContext 派生恰好上报一次（直调 + GoDetached + Spawn 共 3 次）
+	for i := 0; i < 3; i++ {
+		select {
+		case msg := <-reports:
+			if !strings.Contains(msg, "enricher-boom") {
+				t.Fatalf("enricher panic 应上报 PanicHandler，got %q", msg)
+			}
+		default:
+			t.Fatalf("enricher panic 上报缺失（第 %d 次）——观测面漏接", i+1)
+		}
+	}
+	// 恰好三次，无多余上报
+	select {
+	case msg := <-reports:
+		t.Fatalf("enricher panic 上报多余: %q", msg)
+	default:
+	}
+}
+
 // ---- #211：DetachedContext 保留 parent values（WithoutCancel 标准语义）----
 
 // TestDetachedContext_KeepsParentValues 三对照收口（直测 DetachedContext）：

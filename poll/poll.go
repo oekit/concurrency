@@ -140,15 +140,14 @@ func RunCursor[T any](
 		}
 
 		if len(items) == 0 {
-			// 空批也是**成功轮**（fetch 无错误完成——长轮询「暂无新数据」的常态）：
-			// 失败计数在此归零，否则一次抖动累积的退避会跨过所有空批继续爬，
-			// Exponential 档单调涨到 MaxDelay 钉死不再回落（#191）。
-			failures = 0
 			// 游标通常不动；但有的服务端会把游标推到「当前读到的位置」，
 			// 那种形态下 next 会变，照常推进（否则下次重启会重扫）。
 			if next != "" && next != cursor {
 				advanced, advErr := advance(ctx, cfg, cursor, next)
 				if advErr != nil {
+					// 失败计数不归零、保持累计（#216）：OnAdvance 持续失败时
+					// 若每轮先归零再计到 1，退避恒 attempt=1 永不升级——对已死
+					// 存储按基础频率持续写打。与非空批分支的口径对齐。
 					failures++
 					if err := waitBackoff(ctx, cfg.ErrorBackoff, failures, advErr); err != nil {
 						return cursor, err
@@ -157,6 +156,11 @@ func RunCursor[T any](
 				}
 				cursor = advanced
 			}
+			// 失败计数归零点在「fetch 成功且游标落定（未变或推进成功）」之后
+			// （#216）：空批仍是成功轮（#191——否则一次抖动累积的退避会跨过
+			// 所有空批继续爬，Exponential 档单调涨到 MaxDelay 钉死不再回落），
+			// 但 advance 失败路径不算成功，不得归零。
+			failures = 0
 			if cfg.IdleDelay > 0 {
 				if err := sleepCtx(ctx, cfg.IdleDelay); err != nil {
 					return cursor, err
