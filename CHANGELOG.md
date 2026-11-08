@@ -1,3 +1,9 @@
+## [v0.30.0] — 2026-11-08
+
+- feat(retry/httpx): 新增 URL query 凭据参数剥离 `StripSensitiveQueryParams` / `StripSensitiveQueryParamsWith` + 词表导出 `DefaultSensitiveQueryParams`（#208）——token-in-query 泄漏面（#200 StripSensitiveHeaders 的姊妹篇）：部分平台 SDK 把令牌放 query 而非头部（go-gitea/go-gitee 的 tokenTransport 每一跳 `q.Set("access_token", token)`，包在 http.Client 的 Transport 外层 ⇒ 平台 302 到 CDN/对象存储（Gitee archive/附件端点实测形态）时令牌跟着 query 一起发给第三方主机；头部剥除帮不上忙——令牌根本不在头部；Go 自动跟随也不剥 query——stdlib 只处理头部；手动跟随 #200 同场景同样只顾头部）。纯函数原语：只改传入 `*url.URL` 的 RawQuery，跨宿主判定留给调用方（与 StripSensitiveHeaders 并行调用、CrossHostRedirect 之后逐跳剥离，两条独立泄漏面缺一即漏；同宿主跳转不调用——平台路径跳转的 query 凭据依赖同宿主认证）；内置词表 access_token / private_token / token（下游 go-git-platform transport/client.go v0.118.0 的 sensitiveQueryParams 固化组），经 `DefaultSensitiveQueryParams` 导出副本可组合扩展（无包级可变全局，与头部词表同一哲学）；匹配口径：键大小写不敏感折叠（EqualFold，ACCESS_TOKEN 同属凭据，保守方向多剥）+ 百分号解码键（`%61ccess_token=x` 服务端解码后同键），无下划线驼峰（AccessToken）是不同参数名不误剥；「无变更不重编码」：没剥掉任何参数时 RawQuery 逐字节原样保留（下游实测要点——无变更就 Encode 会扰动参数序与转义形态），发生删除时其余参数按原字节形态保序重接（不经 url.Values.Encode——Encode 会重编全部键值并按字典序重排）；包文档依赖红线更新：标准库外零依赖不变，不 import net/http（URL 形态原语只依赖 net/url）
+
+关联问题单：concurrency#208。
+
 ## [v0.29.0] — 2026-11-08
 
 - feat(syncx): 新增按键互斥原语 `KeyedMutex[K]`（#195）——「同名任务/通道/资源同刻只跑一个」的本地单源（收编 git-ferry localGuard 的 sync.Map 三件套手搓：LoadOrStore + 失败还名额 + Delete 回调三步各自易错，失效形态都是慢性的——忘还名额 ⇒ 慢性并发泄漏、Delete 抢跑 ⇒ 误删新执行流的标记）：`WithLock(key, fn)` / `Acquire(key)` 即拒形态（key 忙立刻 false，不排队不占名额，ok=false 唯一含义=该 key 正在执行中）、release 幂等（atomic CAS，Double-release 第二次 no-op 且不误删新持有者的标记）、release 即注销（条目生命周期=持有期，高基数 key 零残留——无需清扫协程、无需 Close，对比 KeyedGate 槽位常驻/KeyedLimiterOf 空闲 TTL 的原因见包文档）；16 段哈希分段锁（maphash.Comparable，Go 1.24）防单 map 热点；与 singleflight（同 key 合并成一次执行）的分工在包文档钉死
