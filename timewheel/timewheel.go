@@ -118,7 +118,9 @@ func NewTimingWheel(interval time.Duration, numSlots int, opts ...WheelOption) *
 }
 
 // SetTimer 注册定时任务：delay 后触发 task（key 已存在时替换旧任务）。
-// delay 不足一格自动取一格；key 必须为可比较类型（编程错误直接 panic）。
+// 延迟按格**向上取整**（#219）：不足一格自动取一格，非整数格不提前——
+// 1.5 格等 2 格，任务不早于 delay 触发（「delay 后触发」的契约）。
+// key 必须为可比较类型（编程错误直接 panic）。
 func (tw *TimingWheel) SetTimer(key any, task func(), delay time.Duration) {
 	if delay <= 0 {
 		panic("timewheel: delay must be positive")
@@ -131,6 +133,7 @@ func (tw *TimingWheel) SetTimer(key any, task func(), delay time.Duration) {
 }
 
 // MoveTimer 调整已存在 key 的触发延迟（保留原任务）；key 不存在为 no-op。
+// 延迟取整口径同 SetTimer（向上取整，#219）。
 func (tw *TimingWheel) MoveTimer(key any, delay time.Duration) {
 	if delay <= 0 {
 		panic("timewheel: delay must be positive")
@@ -258,8 +261,10 @@ func (tw *TimingWheel) advance() {
 
 // insertLocked 计算槽位与圈数并放入（事件循环内调用，无锁）。
 //
-// 延迟不足一格取一格：ticks = ceil 语义由 clamp + 整除近似——
-// ticks = delay/interval（下取整，clamp 后 ≥1）；circle = (ticks-1)/numSlots，
+// ticks = ceil(delay/interval)（#219）：「delay 后触发」的契约是不早于 delay，
+// 非整数格向下取整会**恒提前**（1.999 格按 1 格计，最多早近一整格）——floor
+// 不是 ceil 的近似，误差方向固定。ceil 对不足一格的 0.x 格给出 1，天然覆盖
+// 「delay 不足一格自动取一格」的既有口径。circle = (ticks-1)/numSlots，
 // pos = (current+ticks) mod numSlots。任一 ticks 值下"circle 整圈 + 走到 pos"
 // 恰等于 ticks 格。
 //
@@ -267,14 +272,15 @@ func (tw *TimingWheel) advance() {
 // 是调用方自然写法）时 ticks 可达 MaxInt64，pos 计算的加法回绕成负、Go 负数
 // 取模得负槽位下标 ⇒ 事件循环 goroutine panic 死亡——此后 SetTimer 静默丢任务、
 // HasTimer 永久挂起。按整轮饱和（对齐 retry 退避的溢出饱和口径）：超出
-// MaxInt64/numSlots 的延迟钉在该格数（≈ 不可达的远未来），不回绕。
+// MaxInt64/numSlots 的延迟钉在该格数（≈ 不可达的远未来），不回绕；ceil 的
+// +1 同样先判上界再递增，避免 MaxInt64 边界回绕成负（#219）。
 func (tw *TimingWheel) insertLocked(key any, task func(), delay time.Duration) {
-	if delay < tw.interval {
-		delay = tw.interval
-	}
 	ticks := int64(delay / tw.interval)
+	if delay%tw.interval != 0 && ticks < math.MaxInt64-1 {
+		ticks++ // 向上取整（#219）：非整数格不提前触发
+	}
 	if ticks < 1 {
-		ticks = 1
+		ticks = 1 // 不足一格取一格
 	}
 	if maxTicks := int64(math.MaxInt64) / int64(tw.numSlots); ticks > maxTicks {
 		ticks = maxTicks

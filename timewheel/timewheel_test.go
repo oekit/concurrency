@@ -51,7 +51,9 @@ func TestTimingWheel_FiresAfterOneTick(t *testing.T) {
 	tw, tk := newTestWheel(t, 10*time.Millisecond, 4)
 	ch, task := firedCh()
 
-	tw.SetTimer("k", func() { task("k") }, 15*time.Millisecond) // 不足一格取一格
+	// 5ms 不足一格取一格（ceil 口径下 0.5 格 → 1 格；非整数格的取整见
+	// TestTimingWheel_CeilRounding——15ms 那类 1.5 格现在等 2 格，#219）
+	tw.SetTimer("k", func() { task("k") }, 5*time.Millisecond)
 	barrier(tw)
 	if !tw.HasTimer("k") {
 		t.Fatal("timer should exist after SetTimer")
@@ -282,5 +284,88 @@ func TestTimingWheel_HugeDelayDoesNotKillLoop(t *testing.T) {
 	}
 	if !tw.HasTimer("huge") {
 		t.Fatal("饱和登记的巨大延迟任务应仍挂起（远未到期）")
+	}
+}
+
+// TestTimingWheel_CeilRounding 非整数格向上取整（#219）：「delay 后触发」=
+// 不早于 delay——每个 key 在 ceil(delay/interval) 格**恰好**触发（此前向下
+// 取整会恒提前：1.999 格按 1 格计，最多早近一整格）。整数格（1×、2×）不受
+// 影响，不足一格（0.5×）仍取一格。MoveTimer 走同一 insertLocked，口径一致。
+func TestTimingWheel_CeilRounding(t *testing.T) {
+	const interval = 10 * time.Millisecond
+	tw, tk := newTestWheel(t, interval, 4)
+	ch, task := firedCh()
+
+	// 1.001× / 1.5× / 1.999× / 2.001× interval——issue 点名的非整数格取值，
+	// 1× / 2× 为整数格对照，0.5× 为「不足一格取一格」既有口径对照
+	cases := []struct {
+		key        string
+		delay      time.Duration
+		fireAtTick int64
+	}{
+		{"half", interval / 2, 1},
+		{"one", interval, 1},
+		{"one-plus-001", interval + 10*time.Microsecond, 2},   // 1.001×
+		{"one-and-half", interval * 3 / 2, 2},                 // 1.5×
+		{"one-plus-999", interval*2 - 10*time.Microsecond, 2}, // 1.999×
+		{"two", interval * 2, 2},
+		{"two-plus-001", interval*2 + 10*time.Microsecond, 3}, // 2.001×
+	}
+	wantFired := map[int64][]string{} // tick → 该 tick 应触发的 key
+	for _, c := range cases {
+		tw.SetTimer(c.key, func() { task(c.key) }, c.delay)
+		wantFired[c.fireAtTick] = append(wantFired[c.fireAtTick], c.key)
+	}
+	barrier(tw)
+
+	fired := map[int64][]string{}
+	for tick := int64(1); tick <= 3; tick++ {
+		tk.fire()
+		barrier(tw)
+		for {
+			select {
+			case v := <-ch:
+				fired[tick] = append(fired[tick], v.(string))
+				continue
+			default:
+			}
+			break
+		}
+	}
+
+	for _, c := range cases {
+		for tick := int64(1); tick <= 3; tick++ {
+			seen := false
+			for _, k := range fired[tick] {
+				if k == c.key {
+					seen = true
+				}
+			}
+			if tick == c.fireAtTick && !seen {
+				t.Fatalf("key %s（delay %s）应在第 %d 格触发，实际未触发（fired=%v）", c.key, c.delay, tick, fired)
+			}
+			if tick != c.fireAtTick && seen {
+				t.Fatalf("key %s（delay %s）在第 %d 格提前/延后触发，期望恰在第 %d 格（#219：非整数格不得早于 delay）", c.key, c.delay, tick, c.fireAtTick)
+			}
+		}
+	}
+
+	// MoveTimer 同口径：移到 1.5 格后恰在 2 格触发（不在 1 格提前）
+	tw.SetTimer("mv", func() { task("mv") }, time.Hour)
+	barrier(tw)
+	tw.MoveTimer("mv", interval*3/2)
+	barrier(tw)
+	tk.fire()
+	barrier(tw)
+	assertIdle(t, ch) // 1.5 格不得按 1 格提前触发（#219）
+	tk.fire()
+	barrier(tw)
+	select {
+	case v := <-ch:
+		if v != "mv" {
+			t.Fatalf("expected mv, got %v", v)
+		}
+	default:
+		t.Fatal("MoveTimer 到 1.5 格应在第 2 格触发")
 	}
 }
