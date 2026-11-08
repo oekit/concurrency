@@ -1,3 +1,12 @@
+## [v0.29.0] — 2026-11-08
+
+- feat(syncx): 新增按键互斥原语 `KeyedMutex[K]`（#195）——「同名任务/通道/资源同刻只跑一个」的本地单源（收编 git-ferry localGuard 的 sync.Map 三件套手搓：LoadOrStore + 失败还名额 + Delete 回调三步各自易错，失效形态都是慢性的——忘还名额 ⇒ 慢性并发泄漏、Delete 抢跑 ⇒ 误删新执行流的标记）：`WithLock(key, fn)` / `Acquire(key)` 即拒形态（key 忙立刻 false，不排队不占名额，ok=false 唯一含义=该 key 正在执行中）、release 幂等（atomic CAS，Double-release 第二次 no-op 且不误删新持有者的标记）、release 即注销（条目生命周期=持有期，高基数 key 零残留——无需清扫协程、无需 Close，对比 KeyedGate 槽位常驻/KeyedLimiterOf 空闲 TTL 的原因见包文档）；16 段哈希分段锁（maphash.Comparable，Go 1.24）防单 map 热点；与 singleflight（同 key 合并成一次执行）的分工在包文档钉死
+- feat(async): 新增带句柄的旁路任务 `Spawn[T]` + `Handle[T]`（Wait/WaitUpTo/Done）（#197）——「主路径旁路发一个任务、限时收结果」的收编件（替代手拼 channel+WithoutCancel+GoSafe 五件套 15 行：缓冲 <1 且主路径提前 return ⇒ sender 永远阻塞、漏 WithoutCancel ⇒ 请求取消连带腰斩旁路任务、channel 元素类型手写 ⇒ 类型错误 run-time 才发现）：脱离 parent 生命周期（WithoutCancel 语义内置）+ 保留 trace（SetContextEnricher）+ panic 收编进结果（*PanicError，errors.As 可辨；汇报 ctx 为富化后台 ctx 并携带 task 标签，#184 新签名口径）；泛型结果类型把编译期对位交还给类型系统；WaitUpTo 的 timedOut 标记把「放弃后结果丢弃」显式化——超时任务继续跑完，迟到结果只对放弃等待的那一路不投递（fan-in 的其它等待方仍拿得到）；ctx 取消（ctx.Err()）与超时（timedOut=true）两条失败路径可区分
+- feat(retry/httpx): 新增 `ParseRetryAfter(v, now)`（#198）——Retry-After 头解析入口（RFC 7231 双形态：delay-seconds + HTTP-date；时刻三格式依 IMF-fixdate→RFC 850→asctime 次序尝试，与 net/http.ParseTime 同序同语义，零 net/http 依赖红线不破）：负秒数不可解析（0, false）、过去时刻钳 0（立即重试，不取负）、坏值/空值 (0, false) 走指数退避；bool 口径让「带了 0=立即重试」与「没建议=计算退避」分支清晰；值先做 OWS 修剪（#26 口径）；钳制（MaxDelay 上限）留给调用方——原语只负责「头值→时长」的忠实解析
+- feat(retry/httpx): 新增跨宿主重定向敏感头剥离 `StripSensitiveHeaders` / `StripSensitiveHeadersWith` + 判定 `CrossHostRedirect`（#200）——手动跟随重定向的调用方在逐跳 RoundTrip **之前**调用（go-github checkRedirection 同场景：std http.Client 自动跟随会剥离跨宿主 Authorization，手动跟随恰好绕开这层保护；剥离晚了就已经在跳转请求里带出去了）：同宿主跳转原样保留（平台路径跳转依赖同宿主认证），跨宿主（host[:port] 变化、大小写不敏感、scheme 不参与、缺省端口等价形态按不同宿主保守处理）剥离凭据族——Authorization / Proxy-Authorization / Cookie / Private-Token / X-Api-Key / X-Auth-Token，非凭据头保留；词表经 `DefaultSensitiveHeaders` 导出（返回副本，平台特化 Token 头追加后经 With 变体组合，无包级可变全局，与 logredact「规则表公开可组合」同一哲学）；`HeaderEditor`（HeaderSource+Del）零依赖接入 http.Header 与自研客户端
+
+关联问题单：concurrency#195、concurrency#197、concurrency#198、concurrency#200。
+
 ## [v0.28.4] — 2026-11-08
 
 - build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）

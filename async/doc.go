@@ -43,6 +43,17 @@
 //
 //	async.GoDetached(ctx, "deploy-trigger", func(ctx context.Context) { trigger(ctx) })
 //
+// 旁路任务带句柄（脱离请求生命周期 + 限时 join 主路径，主路径失败也不腰斩旁路）：
+//
+//	h := async.Spawn(ctx, "operation-stats", func(ctx context.Context) (Stats, error) {
+//	    return collectStats(ctx)
+//	})
+//	list, err := svc.ListOperations(ctx) // 主路径并行跑
+//	stats, serr, timedOut := h.WaitUpTo(context.Background(), 5*time.Second)
+//	if timedOut || serr != nil {
+//	    stats = degradedStats() // 旁路超时/失败 ⇒ 降级数据源（任务继续跑完、结果丢弃）
+//	}
+//
 // 在**别人的 goroutine 边界**上就地收编 panic（第三方 SDK 回调，外层监督够不着），
 // 且收编后要把 panic 连同 ctx 交给调用方自己记：
 //
