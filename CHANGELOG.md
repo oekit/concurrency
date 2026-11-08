@@ -1,3 +1,15 @@
+## [v0.31.0] — 2026-11-09
+
+- feat(loop): DisableBackgroundSignalHandling opt-out + RunBackground 信号抑制声明（#218）
+- fix(httpx): ParseRetryAfter 乘法溢出回绕拒绝（#213 #215）
+- fix(poll): RunCursor 空批 advance 失败退避升级恢复（#216）
+- fix(async): DetachedContext enricher panic 收编（#217）
+- fix(timewheel): 非整数格延迟向上取整——不再提前触发（#219）
+- fix(batch): exit 通道参数化固化 + 等价性回归钉（#220）
+- docs(httpx): 手动跟随重定向示例 ResolveReference+相对 Location pitfall（#214）
+
+关联问题单：concurrency#213、concurrency#214、concurrency#215、concurrency#216、concurrency#217、concurrency#218、concurrency#219、concurrency#220。
+
 ## [v0.30.1] — 2026-11-08
 
 - fix(async): Spawn/GoDetached/DetachedContext 保留 parent values——「WithoutCancel 语义内置」表述与实现对齐（concurrency#211）：实现原从 `context.Background()` 派生，parent 的 values 全部丢弃（仅经 SetContextEnricher 补 trace），与 `context.WithoutCancel` 的标准语义（仅去除取消信号、**Value 链原样继承**）相悖——Spawn 的定位是「手拼 channel+WithoutCancel+GoSafe 五件套的收编件」，凡原手拼用了 WithoutCancel（留 values）的场景收编后 values 静默丢失：values 缺失在下游深处往往是 `ScopeFrom(ctx)` 类读取返回 nil 后**静默降级**（不报错、不 panic），极难发现（下游 git-ferry delegate 后台委派实测踩坑：回填结果需要 ctx 里的会话 scope，收编 GoDetached 后拿不到 ⇒ 回填静默不执行，回归测试当场红才暴露）。改为 `context.WithoutCancel(parent)` 派生（go 地板 1.24 直接用 stdlib，不再手写自定义 context 类型）：Done 为 nil、Err 恒 nil、Deadline 不继承、Value 委托 parent——保留/丢弃对照表进 DetachedContext godoc；SetContextEnricher 钩子形态与注册口径不变（只补 trace 一层，与 values 继承正交）；nil parent 兜底 Background 口径不变。用例三对照表逐项钉住：DetachedContext 直测（values 可读且与 `context.WithoutCancel` 逐值一致、cancel parent 后 Err 恒 nil 且 Done 永不触发、带 1h 时限 parent 的 Deadline 不继承）；GoDetached/Spawn 无 enricher 时 fn 内读到 parent values（VALUES-LOST 回归钉住，Spawn 场景叠加主路径 cancel）；清 enricher 后 values 仍在（enricher 只管 trace）
