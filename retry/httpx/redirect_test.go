@@ -196,9 +196,10 @@ func TestStripSensitiveHeaders_RelativeLocation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ref, err := url.Parse(tt.location) // 解析错误不丢（doc 示例口径）
-			if err != nil {
-				t.Fatal(err)
+			// 解析错误不丢（doc 示例口径）；变量名避让外层 err（govet shadow）
+			ref, perr := url.Parse(tt.location)
+			if perr != nil {
+				t.Fatal(perr)
 			}
 			next := base.ResolveReference(ref)
 			if got := httpx.CrossHostRedirect(base.Host, next.Host); got != tt.wantCross {
