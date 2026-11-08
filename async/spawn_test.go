@@ -111,6 +111,26 @@ func TestSpawnDetachedFromParentCancel(t *testing.T) {
 	}
 }
 
+func TestSpawnKeepsParentValues(t *testing.T) {
+	// #211：values 经 Value 链保留（与 context.WithoutCancel 标准语义一致）
+	// ——fn 内照常读到 parent 的请求作用域，主路径取消不波及旁路任务
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, detachedKey{}, "spawn-scope")
+	h := async.Spawn(ctx, "scoped", func(ctx context.Context) (string, error) {
+		v, _ := ctx.Value(detachedKey{}).(string)
+		time.Sleep(10 * time.Millisecond) // 留出 parent cancel 的窗口
+		return v, nil
+	})
+	cancel()
+	v, err := h.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if v != "spawn-scope" {
+		t.Fatalf("val = %q, want spawn-scope（VALUES-LOST 回归）", v)
+	}
+}
+
 func TestSpawnWaitTimesOutTaskKeepsRunning(t *testing.T) {
 	started := make(chan struct{})
 	finished := make(chan struct{})

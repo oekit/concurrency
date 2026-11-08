@@ -97,7 +97,8 @@ func TestGoDetached_EnricherPreservesTrace(t *testing.T) {
 		t.Fatal("GoDetached 未执行")
 	}
 
-	// 清除钩子后：退回裸 Background（不含任何值）
+	// 清除钩子后 values 仍在（#211：values 由 WithoutCancel 继承、不依赖
+	// enricher——enricher 只补 trace 这一层）
 	async.SetContextEnricher(nil)
 	got2 := make(chan string, 1)
 	async.GoDetached(parent, "untraced", func(ctx context.Context) {
@@ -106,8 +107,67 @@ func TestGoDetached_EnricherPreservesTrace(t *testing.T) {
 	})
 	select {
 	case v := <-got2:
-		if v != "" {
-			t.Fatalf("清除钩子后 detached ctx 不应再携带值：got %q", v)
+		if v != "trace-abc" {
+			t.Fatalf("清除钩子后 values 应经 WithoutCancel 保留（#211）：got %q", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GoDetached 未执行")
+	}
+}
+
+// ---- #211：DetachedContext 保留 parent values（WithoutCancel 标准语义）----
+
+// TestDetachedContext_KeepsParentValues 三对照收口（直测 DetachedContext）：
+// values 可读（与 context.WithoutCancel 逐值一致）、cancel parent 不影响
+// （Done 为 nil / Err 恒 nil）、时限不继承（后台任务不受请求超时牵连）。
+func TestDetachedContext_KeepsParentValues(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), time.Hour)
+	parent = context.WithValue(parent, detachedKey{}, "session-scope")
+	defer cancel()
+
+	d := async.DetachedContext(parent)
+
+	// 对照一：values 可读，且与 stdlib WithoutCancel 同语义逐值一致
+	if v, ok := d.Value(detachedKey{}).(string); !ok || v != "session-scope" {
+		t.Fatalf("detached ctx 应继承 parent values, got (%q, %v)", v, ok)
+	}
+	if want := context.WithoutCancel(parent).Value(detachedKey{}); d.Value(detachedKey{}) != want {
+		t.Fatalf("应与 context.WithoutCancel 同语义, got %v want %v", d.Value(detachedKey{}), want)
+	}
+
+	// 对照二：cancel parent 不影响 detached ctx（Done 为 nil、Err 恒 nil）
+	cancel()
+	if err := d.Err(); err != nil {
+		t.Fatalf("detached ctx 不应随 parent 取消, err=%v", err)
+	}
+	select {
+	case <-d.Done():
+		t.Fatal("detached ctx 的 Done 应为 nil（永不取消）")
+	default:
+	}
+
+	// 对照三：时限不继承（parent 带 1h 超时，detached 侧不带）
+	if dl, ok := d.Deadline(); ok {
+		t.Fatalf("detached ctx 不应继承 parent 时限, got %v", dl)
+	}
+}
+
+// TestGoDetached_KeepsParentValues 无 enricher 时 fn 内照常读到 parent 的
+// values——手拼 WithoutCancel 场景（回填结果需要会话 scope）收编后不再
+// 静默丢 values（git-ferry delegate 实证形态）。
+func TestGoDetached_KeepsParentValues(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	parent = context.WithValue(parent, detachedKey{}, "scope-211")
+	got := make(chan string, 1)
+	async.GoDetached(parent, "scoped", func(ctx context.Context) {
+		v, _ := ctx.Value(detachedKey{}).(string)
+		got <- v
+	})
+	select {
+	case v := <-got:
+		if v != "scope-211" {
+			t.Fatalf("fn 内应读到 parent values（VALUES-LOST 回归）, got %q", v)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("GoDetached 未执行")
