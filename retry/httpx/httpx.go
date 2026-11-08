@@ -2,8 +2,9 @@
 // 收编消费方各自手写的同一段分类逻辑（429/5xx 重试、其余 4xx 拒收不重试、
 // ctx 取消不重试）。
 //
-// 零外部依赖（仅 errors/context/time 标准库）——不 import net/http：
-// 状态码以 int 传入，调用方用自己的 HTTP 客户端类型。
+// 零外部依赖（标准库之外零依赖）——不 import net/http：状态码以 int 传入，
+// 调用方用自己的 HTTP 客户端类型；URL 形态原语（#208 的 query 凭据剥离）
+// 只依赖 net/url。
 //
 // 接入形态（两问一体：「该不该重试」+「隔多久再试」）：
 //
@@ -16,7 +17,9 @@
 //
 // 拿得到响应头的调用方（平台限流语义平台化，如 GitHub 403 次级限流）用
 // RetryableWithHeaders(status, header) 做头感知判定，平台特化逻辑只留
-// 方法门控/body rewind 等传输层关注点。
+// 方法门控/body rewind 等传输层关注点。手动跟随重定向的调用方用
+// CrossHostRedirect + StripSensitiveHeaders（#200，头部凭据面）+
+// StripSensitiveQueryParams（#208，token-in-query 面）做逐跳凭据剥离。
 package httpx
 
 import (

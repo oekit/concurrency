@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/concurrency@v0.29.0
+go get github.com/oekit/concurrency@v0.30.0
 ```
 
 ## 这个仓库做什么
@@ -20,7 +20,7 @@ go get github.com/oekit/concurrency@v0.29.0
 
 | 包 | 做什么 |
 |---|---|
-| `async` | **GoSafe 系列** safe-go：`GoSafe`/`GoSafeWithErr`/`GoWithContext`/`GoSafeWithContext`/`GoSafeWithErrChannel`/`RunSafe`，以及带任务归属标签的 `RunSafeLabeled`/`GoSafeLabeled`（panic 日志 `task=…`，可按任务聚合告警）。panic 自动 recover + 可注入 panic 上报。全矩阵禁止裸 `go func` 的替代品；v0.26.0 起补 `RunSafeCtx`/`RunSafeCtxRet`——在**别人的 goroutine 边界**（第三方 SDK 回调，外层 `Supervise`/`GoSafe` 覆盖不到）就地收编 panic，收编成 `*PanicError` **交回调用方**并带 ctx 自己记日志/计数；v0.29.0 起补带句柄的旁路任务 `Spawn[T]`+`Handle[T]`（Wait/WaitUpTo/Done）——脱离请求生命周期（WithoutCancel 语义内置——values 经 Value 链照常继承，v0.29.1 起）+ 保留 trace + panic 收编进结果（`*PanicError`），泛型结果类型把「channel 元素类型手写」的类型错误移到 compile-time；`WaitUpTo` 的 `timedOut` 标记显式化「放弃后结果丢弃」（超时任务继续跑完、迟到结果只对放弃的那一路不投递；ctx 取消返回 `ctx.Err()` 与超时可区分），替代手拼 channel+WithoutCancel 五件套 |
+| `async` | **GoSafe 系列** safe-go：`GoSafe`/`GoSafeWithErr`/`GoWithContext`/`GoSafeWithContext`/`GoSafeWithErrChannel`/`RunSafe`，以及带任务归属标签的 `RunSafeLabeled`/`GoSafeLabeled`（panic 日志 `task=…`，可按任务聚合告警）。panic 自动 recover + 可注入 panic 上报。全矩阵禁止裸 `go func` 的替代品；v0.26.0 起补 `RunSafeCtx`/`RunSafeCtxRet`——在**别人的 goroutine 边界**（第三方 SDK 回调，外层 `Supervise`/`GoSafe` 覆盖不到）就地收编 panic，收编成 `*PanicError` **交回调用方**并带 ctx 自己记日志/计数；v0.29.0 起补带句柄的旁路任务 `Spawn[T]`+`Handle[T]`（Wait/WaitUpTo/Done）——脱离请求生命周期（WithoutCancel 语义内置）+ 保留 trace + panic 收编进结果（`*PanicError`），泛型结果类型把「channel 元素类型手写」的类型错误移到 compile-time；`WaitUpTo` 的 `timedOut` 标记显式化「放弃后结果丢弃」（超时任务继续跑完、迟到结果只对放弃的那一路不投递；ctx 取消返回 `ctx.Err()` 与超时可区分），替代手拼 channel+WithoutCancel 五件套 |
 | `gopool` | **自适应协程池**：惰性拉起 worker、队列满回退直接 `go`（不丢任务）、空闲按 WorkerMaxAge 老化退出、`Close(ctx)` 优雅排空。高频突发任务的并发数软上限（v0.2.0 吸收自 cloudwego/gopkg） |
 | `retry` | `Do(ctx, cfg, fn)` 重试/轮询：次数、固定/线性/**指数**退避（`Exponential` + 可选 `Jitter` 抖动、`MaxDelay` 封顶）、可重试判定；子包 `retry/httpx`（零依赖，不引 net/http）：HTTP 可重试性判定 `Retryable`（429/5xx）/`RetryableWithHeaders`（403 头感知——GitHub 次级限流 Retry-After / 主限流耗尽 Remaining:0，v0.12.0 起）、`RetryAfterHint` 服务端退避建议提取、`IsTransportRetryable` ctx 门；v0.29.0 起补 `ParseRetryAfter`（Retry-After 头解析入口：delay-seconds+HTTP-date 双形态与 net/http.ParseTime 同序，零 net/http 依赖不破——负秒数拒绝、过去时刻钳 0、坏值走指数退避）与跨宿主重定向敏感头剥离 `StripSensitiveHeaders`（`CrossHostRedirect` 判 host[:port] 变化；同宿主保留凭据、跨宿主剥 Authorization/Cookie 族等内置词表，`DefaultSensitiveHeaders` 副本可组合平台特化 Token 头；手动跟随重定向逐跳 RoundTrip 前调用） |
 | `loop` | **周期任务循环原语**：ctx 感知 + 单轮 panic 收编 + 忙时丢 tick + 排水（`Wait`/`Done`）。过期清理/心跳/快照落盘等手搓循环的收编件 |
