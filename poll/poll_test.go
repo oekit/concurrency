@@ -3,6 +3,7 @@ package poll
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -565,6 +566,59 @@ func TestRunCursor_EmptyBatchResetsBackoff(t *testing.T) {
 	}
 	if gap > 150*time.Millisecond {
 		t.Fatalf("空批成功轮后 #5 的退避 = %s（>150ms）——失败计数没有被空批归零，attempt 仍按 4 起算（#191）", gap)
+	}
+}
+
+// TestRunCursor_EmptyBatchAdvanceFailureBacksOff 空批推游标 + OnAdvance 持续失败
+// （#216）：失败计数归零点在游标落定之后——advance 失败路径保持累计，退避照常
+// 指数升级，与非空批口径一致；否则每轮从 0 计到 1 恒 attempt=1，对已死存储按
+// 基础频率持续写打。
+//
+// 序列：服务端每轮返回空批且把游标推到新位置（poll.go 明确支持的形态），
+// OnAdvance 恒失败。修复后第 3→4 次 OnAdvance 间隔 = attempt=3 的指数退避
+// （40ms×4=160ms）；修复前每轮归零恒 40ms。下界断言（time.Timer 不提前触发）。
+func TestRunCursor_EmptyBatchAdvanceFailureBacksOff(t *testing.T) {
+	const base = 40 * time.Millisecond
+
+	var (
+		mu sync.Mutex
+		at []time.Time // 每次 OnAdvance 失败的时刻
+	)
+	fetch := func(_ context.Context, _ string) ([]string, string, error) {
+		// 空批 + 游标推到新位置：服务端「空批推游标」形态
+		mu.Lock()
+		next := fmt.Sprintf("c%d", len(at)+1)
+		mu.Unlock()
+		return nil, next, nil
+	}
+	cfg := Config{
+		ErrorBackoff: retry.Config{Delay: base, Exponential: true},
+		OnAdvance: func(context.Context, string) error {
+			mu.Lock()
+			at = append(at, time.Now())
+			mu.Unlock()
+			return errors.New("存储不可用")
+		},
+	}
+
+	resCh, cancel := startRun(cfg, "c0", fetch, func(context.Context, string) error { return nil })
+	waitFor(t, "四次 OnAdvance 失败", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(at) >= 4
+	})
+	cancel()
+	<-resCh
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) < 4 {
+		t.Fatalf("OnAdvance 调用 %d 次，期望 ≥4", len(at))
+	}
+	gap := at[3].Sub(at[2])
+	// attempt=3 ⇒ 160ms；每轮归零的旧实现 ⇒ 恒 attempt=1 ⇒ 40ms。下界 120ms 分离。
+	if gap < 120*time.Millisecond {
+		t.Fatalf("OnAdvance 持续失败间隔 %s，小于 attempt=3 退避下界 120ms——空批分支失败计数被提前归零，退避永不升级（#216）", gap)
 	}
 }
 
