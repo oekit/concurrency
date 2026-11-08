@@ -2,6 +2,7 @@ package httpx_test
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/oekit/concurrency/retry/httpx"
@@ -56,6 +57,12 @@ func TestCrossHostRedirect(t *testing.T) {
 		{"default port vs explicit is cross host (conservative)", "example.com", "example.com:443", true},
 		{"same host with port", "example.com:8443", "example.com:8443", false},
 		{"subdomain is cross host", "example.com", "cdn.example.com", true},
+
+		// 空 toHost 按不同宿主处理（保守档，#214 显式钉住）：相对 Location
+		// 未解析的典型产物——「解析不出来」不等于「另一个信任域」，但判定
+		// 不确定时剥离是安全方向；调用方必须先 ResolveReference（见
+		// TestStripSensitiveHeaders_RelativeLocation）。
+		{"empty toHost is cross host (conservative, unresolved relative Location)", "api.github.com", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -162,6 +169,69 @@ func TestStripSensitiveHeadersWordList(t *testing.T) {
 			t.Fatal("same-host must keep credentials regardless of list")
 		}
 	})
+}
+
+// TestStripSensitiveHeaders_RelativeLocation 相对 Location 的判定口径（#214）：
+// 先 ResolveReference 成绝对 URL 再判定——同主机相对跳转（平台规范化跳转
+// 301 /a → /a/ 的最常见形态）不剥凭据、req.URL 保持绝对；负对照：绝对跨宿主
+// 仍剥（防止「为修相对跳转把泄漏面打开」）。
+func TestStripSensitiveHeaders_RelativeLocation(t *testing.T) {
+	base, err := url.Parse("https://git.example.com/api/v4/repos")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		location    string
+		wantCross   bool
+		wantNextURL string
+	}{
+		{name: "same-host path redirect keeps credentials", location: "/api/v4/repos/", wantCross: false, wantNextURL: "https://git.example.com/api/v4/repos/"},
+		{name: "relative path keeps credentials", location: "login", wantCross: false, wantNextURL: "https://git.example.com/api/v4/login"},
+		{name: "dotdot relative keeps credentials", location: "../x", wantCross: false, wantNextURL: "https://git.example.com/api/x"},
+		{name: "absolute same host keeps credentials", location: "https://git.example.com/a", wantCross: false, wantNextURL: "https://git.example.com/a"},
+		{name: "absolute cross host strips credentials", location: "https://evil.example.net/a", wantCross: true, wantNextURL: "https://evil.example.net/a"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ref, err := url.Parse(tt.location) // 解析错误不丢（doc 示例口径）
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := base.ResolveReference(ref)
+			if got := httpx.CrossHostRedirect(base.Host, next.Host); got != tt.wantCross {
+				t.Fatalf("CrossHostRedirect(%q, %q) = %v, want %v", base.Host, next.Host, got, tt.wantCross)
+			}
+
+			h := credentialsEditor()
+			httpx.StripSensitiveHeaders(h, base.Host, next.Host)
+			authKept := h.count("Authorization") == 1
+			if authKept == tt.wantCross {
+				t.Fatalf("cross=%v 时 Authorization kept=%v，与判定不符", tt.wantCross, authKept)
+			}
+			if !next.IsAbs() {
+				t.Fatalf("ResolveReference 后 req.URL 应保持绝对 URL，got %q", next.String())
+			}
+			if next.String() != tt.wantNextURL {
+				t.Fatalf("next = %q, want %q", next.String(), tt.wantNextURL)
+			}
+		})
+	}
+
+	// 反例钉死（doc 警告的现状语义）：跳过 ResolveReference 直接拿相对 URL
+	// 判定——Host 为空串被按跨宿主处理，同主机凭据被误剥。
+	rel, err := url.Parse("/api/v4/repos/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.Host != "" {
+		t.Fatalf("前置失效：相对 Location 解析出的 Host 应为空串，got %q", rel.Host)
+	}
+	if !httpx.CrossHostRedirect(base.Host, rel.Host) {
+		t.Fatal("未解析的相对 URL 按跨宿主处理（保守档）——该 pitfall 已在 CrossHostRedirect doc 点名")
+	}
 }
 
 // TestStripSensitiveHeadersMultiHop 手动多跳跟随的完整路径：逐跳判定，
