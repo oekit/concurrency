@@ -26,9 +26,12 @@ type Config struct {
 	// 唯一不参与的是 Attempts——本原语是常驻循环，失败会一直续拉到 ctx 取消，
 	// 「要不要继续」由 Retryable 而非次数决定（见 Retryable 字段说明）。
 	ErrorBackoff retry.Config
-	// Retryable 判定拉取错误是否可续拉；nil = 全部可续拉。
+	// Retryable 判定循环中的错误是否可续拉——fetch 错误、handle 单项错误、
+	// OnAdvance 错误**三处都过这道门**；nil = 全部可续拉。
 	// 返回 false 的错误会让 RunCursor **带着该错误返回**（如鉴权失效、游标被服务端
-	// 作废——这类错误重试一万次也不会好，只会把日志刷满）。
+	// 作废、毒丸消息、持久化存储被删——这类错误重试一万次也不会好，只会把日志
+	// 刷满；尤其 OnAdvance 持续失败时没有这道门就只剩退避续拉，契约承诺的逃生门
+	// 永远不触发）。
 	// 优先级高于 ErrorBackoff.Retryable（这里的是循环级口径）。
 	Retryable func(error) bool
 	// IdleDelay 空批等待。拉取成功但返回 0 项、且游标没变化时，等这么久再拉下一批。
@@ -145,6 +148,9 @@ func RunCursor[T any](
 			if next != "" && next != cursor {
 				advanced, advErr := advance(ctx, cfg, cursor, next)
 				if advErr != nil {
+					if !retryable(cfg, advErr) {
+						return cursor, advErr
+					}
 					// 失败计数不归零、保持累计（#216）：OnAdvance 持续失败时
 					// 若每轮先归零再计到 1，退避恒 attempt=1 永不升级——对已死
 					// 存储按基础频率持续写打。与非空批分支的口径对齐。
@@ -175,6 +181,12 @@ func RunCursor[T any](
 		}
 
 		if itemErr := dispatch(ctx, cfg, items, handle); itemErr != nil {
+			// 毒丸 item 不装门就是无退避紧循环（#226）：handle 失败 → 重拉同一批
+			// → 再失败，间隔只有退避公式给的值；Retryable 判 false 的错误在这里
+			// 与 fetch 错误同口径带错返回，不让契约承诺的逃生门漏掉这条路径。
+			if !retryable(cfg, itemErr) {
+				return cursor, itemErr
+			}
 			failures++
 			if err := waitBackoff(ctx, cfg.ErrorBackoff, failures, itemErr); err != nil {
 				return cursor, err
@@ -184,6 +196,9 @@ func RunCursor[T any](
 
 		advanced, advErr := advance(ctx, cfg, cursor, next)
 		if advErr != nil {
+			if !retryable(cfg, advErr) {
+				return cursor, advErr
+			}
 			failures++
 			if err := waitBackoff(ctx, cfg.ErrorBackoff, failures, advErr); err != nil {
 				return cursor, err
