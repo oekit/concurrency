@@ -87,8 +87,13 @@ type HTTPError struct {
 	Status int
 	// Err 是底层错误（响应体摘要、传输错误等）；可为 nil。
 	Err error
-	// hint 是服务端退避建议（Retry-After 秒数）；0 = 未携带。
+	// hint 是服务端退避建议（Retry-After 建议时长）；是否携带由 hasHint 承载。
 	hint time.Duration
+	// hasHint 标记 hint 是否显式携带（#228）：Retry-After: 0 是服务端合法建议
+	// （0 = 立即重试），与「未携带」必须可区分——布尔是语义承载，与
+	// ParseRetryAfter / hintOnly 的 (d, ok) 口径一致。零值 false = 未携带，
+	// RetryAfter 回落向 Err 链查找。
+	hasHint bool
 }
 
 func (e *HTTPError) Error() string {
@@ -101,10 +106,12 @@ func (e *HTTPError) Error() string {
 // Unwrap 保留错误链——上层 errors.Is(err, context.Canceled) 等判断不受包装影响。
 func (e *HTTPError) Unwrap() error { return e.Err }
 
-// RetryAfter 实现 retryAfterCarrier：优先取自身 hint，未携带则向 Err 链
-// 回退查找（fmt.Errorf("%w", httpx.NewRetryAfter(d)) 注入的内层建议可被发现）。
+// RetryAfter 实现 retryAfterCarrier：显式构造过建议（hasHint）时原样返回——
+// 哪怕是 0 秒（Retry-After: 0 = 立即重试，不得降级成「未携带」走计算退避，
+// #228）；未携带则向 Err 链回退查找（fmt.Errorf("%w", httpx.NewRetryAfter(d))
+// 注入的内层建议可被发现）。
 func (e *HTTPError) RetryAfter() (time.Duration, bool) {
-	if e.hint > 0 {
+	if e.hasHint {
 		return e.hint, true
 	}
 	var c retryAfterCarrier
@@ -115,8 +122,10 @@ func (e *HTTPError) RetryAfter() (time.Duration, bool) {
 }
 
 // NewRetryAfterError 构造携带 Retry-After 建议的 HTTPError（status 应为 429/503）。
+// d 可为 0（Retry-After: 0 合法，语义是立即重试）：显式构造即视为携带，
+// RetryAfter 返回 (d, true)，与 ParseRetryAfter("0") → (0, true) 口径一致。
 func NewRetryAfterError(status int, d time.Duration, err error) *HTTPError {
-	return &HTTPError{Status: status, Err: err, hint: d}
+	return &HTTPError{Status: status, Err: err, hint: d, hasHint: true}
 }
 
 // NewRetryAfter 构造仅携带建议的错误包装（用于把既有错误补上建议，

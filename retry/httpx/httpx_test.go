@@ -11,6 +11,47 @@ import (
 	"github.com/oekit/concurrency/retry/httpx"
 )
 
+// TestRetryAfterZeroHintPreserved 回归测试（#228）：Retry-After: 0 是服务端合法
+// 建议（0 = 立即重试），显式构造进 HTTPError 后不得被 `hint > 0` 当作「未携带」
+// 降级成计算退避——同一建议在 ParseRetryAfter / hintOnly 载体里是 (0, true)，
+// HTTPError 载体必须同口径（同一建议两种载体两种重试行为即契约破裂）。
+func TestRetryAfterZeroHintPreserved(t *testing.T) {
+	e := httpx.NewRetryAfterError(429, 0, errors.New("rate limited"))
+
+	// 载体直取：0 必须以 ok=true 返回。
+	if d, ok := e.RetryAfter(); !ok || d != 0 {
+		t.Fatalf("HTTPError.RetryAfter() = (%v, %v), want (0, true)", d, ok)
+	}
+	// DelayHint 通路：ok=true 且值为 0，retry 侧即立即重试；ok=false 才走计算退避。
+	if d, ok := httpx.RetryAfterHint()(e); !ok || d != 0 {
+		t.Fatalf("RetryAfterHint(HTTPError) = (%v, %v), want (0, true)", d, ok)
+	}
+	// 对照：hintOnly 载体对 0 本就保留。
+	if d, ok := httpx.RetryAfterHint()(httpx.NewRetryAfter(0)); !ok || d != 0 {
+		t.Fatalf("RetryAfterHint(hintOnly) = (%v, %v), want (0, true)", d, ok)
+	}
+	// hasHint 优先：显式建议不被 Err 链内层建议覆盖。
+	inner := fmt.Errorf("wrap: %w", httpx.NewRetryAfter(7*time.Second))
+	e2 := httpx.NewRetryAfterError(503, 2*time.Second, inner)
+	if d, ok := e2.RetryAfter(); !ok || d != 2*time.Second {
+		t.Fatalf("hint precedence = (%v, %v), want (2s, true)", d, ok)
+	}
+}
+
+// TestHTTPErrorWithoutHintFallsBackToChain 未携带建议的口径不变（向后兼容）：
+// hasHint=false（零值构造）时回落 Err 链找内层建议；链上没有就 (0, false)。
+func TestHTTPErrorWithoutHintFallsBackToChain(t *testing.T) {
+	e := &httpx.HTTPError{Status: 429}
+	if d, ok := e.RetryAfter(); ok || d != 0 {
+		t.Fatalf("hintless HTTPError.RetryAfter() = (%v, %v), want (0, false)", d, ok)
+	}
+	inner := fmt.Errorf("wrap: %w", httpx.NewRetryAfter(3*time.Second))
+	e2 := &httpx.HTTPError{Status: 429, Err: inner}
+	if d, ok := e2.RetryAfter(); !ok || d != 3*time.Second {
+		t.Fatalf("chain fallback = (%v, %v), want (3s, true)", d, ok)
+	}
+}
+
 func TestRetryable(t *testing.T) {
 	cases := map[int]bool{
 		429:  true,

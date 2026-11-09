@@ -26,12 +26,18 @@ type Config struct {
 	// 唯一不参与的是 Attempts——本原语是常驻循环，失败会一直续拉到 ctx 取消，
 	// 「要不要继续」由 Retryable 而非次数决定（见 Retryable 字段说明）。
 	ErrorBackoff retry.Config
-	// Retryable 判定拉取错误是否可续拉；nil = 全部可续拉。
+	// Retryable 判定循环中的错误是否可续拉——fetch 错误、handle 单项错误、
+	// OnAdvance 错误**三处都过这道门**；nil = 全部可续拉。
 	// 返回 false 的错误会让 RunCursor **带着该错误返回**（如鉴权失效、游标被服务端
-	// 作废——这类错误重试一万次也不会好，只会把日志刷满）。
+	// 作废、毒丸消息、持久化存储被删——这类错误重试一万次也不会好，只会把日志
+	// 刷满；尤其 OnAdvance 持续失败时没有这道门就只剩退避续拉，契约承诺的逃生门
+	// 永远不触发）。
 	// 优先级高于 ErrorBackoff.Retryable（这里的是循环级口径）。
 	Retryable func(error) bool
-	// IdleDelay 空批等待。拉取成功但返回 0 项、且游标没变化时，等这么久再拉下一批。
+	// IdleDelay 空批等待。拉取成功但返回 0 项时，等这么久再拉下一批（#229：
+	// 无论游标是否被服务端推进）。游标推进的只是读位置，本轮同样没有产出数据，
+	// 按空闲等待无害；且「空批推游标」的形态下每轮游标都在变，若按「推进即有
+	// 进展」豁免等待，不 hold 的服务端会退化成忙轮询——正是本字段要防的失效形态。
 	//
 	// <=0 = 立即再拉，正确性上只适用于**服务端 hold**（长轮询：请求会挂到有数据或
 	// 超时才返回）的接口。服务端不 hold 的接口必须给正值，否则就是忙轮询——
@@ -82,7 +88,8 @@ type Config struct {
 //
 //   - fetch 同步执行，ctx 原样传入（长轮询要能被取消）；fetch panic 收编后当作
 //     一次可续拉失败。
-//   - fetch 返回 **0 项**：游标允许不变（没新数据），此时按 IdleDelay 等待；
+//   - fetch 返回 **0 项**：按 IdleDelay 等待后再拉——游标被服务端推进也照等
+//     （推进的只是读位置，本轮同样没有产出数据，见 IdleDelay 说明）；
 //     next 非空且与当前不同则视为服务端把游标推到了当前位置，照常推进。
 //   - fetch 返回 **非空批**：游标必须前进（见 ErrCursorStuck）。
 //   - handle 逐项**串行**调用（不并发：消息处理通常有顺序语义），每项独立收编 panic。
@@ -145,6 +152,9 @@ func RunCursor[T any](
 			if next != "" && next != cursor {
 				advanced, advErr := advance(ctx, cfg, cursor, next)
 				if advErr != nil {
+					if !retryable(cfg, advErr) {
+						return cursor, advErr
+					}
 					// 失败计数不归零、保持累计（#216）：OnAdvance 持续失败时
 					// 若每轮先归零再计到 1，退避恒 attempt=1 永不升级——对已死
 					// 存储按基础频率持续写打。与非空批分支的口径对齐。
@@ -175,6 +185,12 @@ func RunCursor[T any](
 		}
 
 		if itemErr := dispatch(ctx, cfg, items, handle); itemErr != nil {
+			// 毒丸 item 不装门就是无退避紧循环（#226）：handle 失败 → 重拉同一批
+			// → 再失败，间隔只有退避公式给的值；Retryable 判 false 的错误在这里
+			// 与 fetch 错误同口径带错返回，不让契约承诺的逃生门漏掉这条路径。
+			if !retryable(cfg, itemErr) {
+				return cursor, itemErr
+			}
 			failures++
 			if err := waitBackoff(ctx, cfg.ErrorBackoff, failures, itemErr); err != nil {
 				return cursor, err
@@ -184,6 +200,9 @@ func RunCursor[T any](
 
 		advanced, advErr := advance(ctx, cfg, cursor, next)
 		if advErr != nil {
+			if !retryable(cfg, advErr) {
+				return cursor, advErr
+			}
 			failures++
 			if err := waitBackoff(ctx, cfg.ErrorBackoff, failures, advErr); err != nil {
 				return cursor, err

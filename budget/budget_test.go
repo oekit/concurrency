@@ -226,6 +226,32 @@ func TestUsed_ReflectsConsumption(t *testing.T) {
 	}
 }
 
+// TestWithClock_NilKeepsDefaultClock 回归测试（#227）：WithClock(nil) 曾直接把
+// nil 赋给 l.now，构造时静默通过，panic 延迟到两条最远的路径上——「预算首次被
+// 打穿」的存档记账（Consume 超限分支取时钟盖入档时间）与任意一次 Sweep（无条件
+// 先取时钟，空账也崩）。修复后 nil 等价不传，保留缺省 time.Now（与
+// WithThrottleClock/WithBatchClock/WithShedderClock 三个兄弟选项同口径）。
+func TestWithClock_NilKeepsDefaultClock(t *testing.T) {
+	l := NewLedger(map[Dimension]int64{"bytes": 10}, WithClock(nil))
+
+	// 超限记账路径：修复前在此 panic（nil 指针解引用）。
+	ref, err := l.Consume("bytes", 100, []byte("over"))
+	if !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("err = %v, want ErrOverBudget", err)
+	}
+	if ref == 0 {
+		t.Fatal("over-budget consume should return archive Ref")
+	}
+	if got, ok := l.Get(ref); !ok || string(got) != "over" {
+		t.Fatal("archived content not retrievable")
+	}
+
+	// Sweep 路径：修复前空账也先取时钟即崩。
+	if n := l.Sweep(0); n != 1 {
+		t.Fatalf("swept %d entries, want 1", n)
+	}
+}
+
 // fakeClock 是可注入时钟的最小实现（与 batch/shedding 测试同形）。
 type fakeClock struct{ t time.Time }
 

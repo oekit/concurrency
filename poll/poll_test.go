@@ -491,6 +491,42 @@ func TestRunCursor_IdleDelaySpacesEmptyPolls(t *testing.T) {
 	}
 }
 
+// TestRunCursor_IdleDelayAppliesAfterCursorAdvance 钉住 IdleDelay 的文档口径（#229）：
+// 空批即空闲——游标被服务端推进（空批推读位置的形态）也照等。推进的只是读位置，
+// 本轮没有产出数据；且该形态下每轮游标都在变，若按「推进即有进展」豁免等待，
+// 不 hold 的服务端会退化成忙轮询（正是 IdleDelay 要防的失效形态）。
+func TestRunCursor_IdleDelayAppliesAfterCursorAdvance(t *testing.T) {
+	const idle = 40 * time.Millisecond
+
+	var (
+		calls    atomic.Int64
+		advanced atomic.Int64
+	)
+	fetch := func(_ context.Context, cursor string) ([]string, string, error) {
+		// 每轮空批都把游标推到新位置（服务端推读位置的形态）
+		return nil, fmt.Sprintf("c%d", calls.Add(1)+1), nil
+	}
+	cfg := Config{
+		IdleDelay: idle,
+		OnAdvance: func(_ context.Context, _ string) error {
+			advanced.Add(1)
+			return nil
+		},
+	}
+
+	start := time.Now()
+	resCh, cancel := startRun(cfg, "c0", fetch, func(context.Context, string) error { return nil })
+	waitFor(t, "三次游标推进", func() bool { return advanced.Load() == 3 })
+	elapsed := time.Since(start)
+	cancel()
+	<-resCh
+
+	// 下界断言不会假红：三次推进之间必然隔着两个完整 idle（time.Timer 不提前触发）。
+	if min := 2 * idle; elapsed < min {
+		t.Fatalf("三次空批推进耗时 %s，小于下界 %s（游标推进后的空批没有按 IdleDelay 等待，与文档口径不符）", elapsed, min)
+	}
+}
+
 // TestRunCursor_BackoffGrowsWithFailures 退避按失败次数增长（下界断言）。
 func TestRunCursor_BackoffGrowsWithFailures(t *testing.T) {
 	const base = 20 * time.Millisecond
@@ -675,6 +711,100 @@ func TestRunCursor_RejectsNilCallbacks(t *testing.T) {
 				}
 			}()
 			_, _ = RunCursor(context.Background(), Config{}, "", tc.fetch, tc.handle)
+		})
+	}
+}
+
+// TestRunCursor_ItemErrorRespectsRetryable 毒丸 item 错误也过 Retryable 门（#226）：
+// 判 false 的 handle 错误首次发生即带错返回——缺门时是「重拉同一批 → 再失败」
+// 的无退避（或零退避档）紧循环，契约承诺的逃生门在这条路径上从不触发。
+func TestRunCursor_ItemErrorRespectsRetryable(t *testing.T) {
+	errPoison := errors.New("毒丸消息")
+
+	var (
+		fetches atomic.Int64
+		handles atomic.Int64
+	)
+	fetch := func(context.Context, string) ([]string, string, error) {
+		fetches.Add(1)
+		return []string{"poison", "ok"}, "c1", nil
+	}
+	handle := func(_ context.Context, item string) error {
+		handles.Add(1)
+		if item == "poison" {
+			return errPoison
+		}
+		return nil
+	}
+	cfg := Config{
+		ErrorBackoff: retry.Config{Delay: time.Millisecond},
+		Retryable:    func(error) bool { return false },
+	}
+
+	cursor, err := RunCursor(context.Background(), cfg, "c0", fetch, handle)
+
+	if !errors.Is(err, errPoison) {
+		t.Fatalf("err = %v，期望原样返回毒丸错误", err)
+	}
+	if cursor != "c0" {
+		t.Fatalf("游标 = %q，期望保持 c0（失败那批不推进）", cursor)
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("fetch 调用 %d 次，期望 1 次（首次 handle 错误即返回，不重拉同一批）", got)
+	}
+	if got := handles.Load(); got != 1 {
+		t.Fatalf("handle 调用 %d 次，期望 1 次（失败即停，后面项留待重拉）", got)
+	}
+}
+
+// TestRunCursor_AdvanceErrorRespectsRetryable OnAdvance 持久化错误也过 Retryable 门
+// （#226；#216 场景的契约出口——持续失败时除退避升级外还应有带错返回的逃生门）。
+// 两条推进路径（空批推游标 / 非空批推进）都要过门。
+func TestRunCursor_AdvanceErrorRespectsRetryable(t *testing.T) {
+	errStore := errors.New("存储表被删")
+
+	cases := []struct {
+		name  string
+		items []string
+	}{
+		{name: "空批推游标", items: nil},
+		{name: "非空批推进", items: []string{"a"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				fetches  atomic.Int64
+				advances atomic.Int64
+			)
+			fetch := func(context.Context, string) ([]string, string, error) {
+				fetches.Add(1)
+				return tc.items, "c1", nil
+			}
+			cfg := Config{
+				ErrorBackoff: retry.Config{Delay: time.Millisecond},
+				Retryable:    func(error) bool { return false },
+				OnAdvance: func(context.Context, string) error {
+					advances.Add(1)
+					return errStore
+				},
+			}
+
+			cursor, err := RunCursor(context.Background(), cfg, "c0", fetch,
+				func(context.Context, string) error { return nil })
+
+			if !errors.Is(err, errStore) {
+				t.Fatalf("err = %v，期望原样返回 OnAdvance 错误", err)
+			}
+			if cursor != "c0" {
+				t.Fatalf("游标 = %q，期望保持 c0（持久化失败不算推进）", cursor)
+			}
+			if got := fetches.Load(); got != 1 {
+				t.Fatalf("fetch 调用 %d 次，期望 1 次（不可续拉即退出）", got)
+			}
+			if got := advances.Load(); got != 1 {
+				t.Fatalf("OnAdvance 调用 %d 次，期望 1 次（判 false 不得退避续拉）", got)
+			}
 		})
 	}
 }
