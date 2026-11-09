@@ -491,6 +491,42 @@ func TestRunCursor_IdleDelaySpacesEmptyPolls(t *testing.T) {
 	}
 }
 
+// TestRunCursor_IdleDelayAppliesAfterCursorAdvance 钉住 IdleDelay 的文档口径（#229）：
+// 空批即空闲——游标被服务端推进（空批推读位置的形态）也照等。推进的只是读位置，
+// 本轮没有产出数据；且该形态下每轮游标都在变，若按「推进即有进展」豁免等待，
+// 不 hold 的服务端会退化成忙轮询（正是 IdleDelay 要防的失效形态）。
+func TestRunCursor_IdleDelayAppliesAfterCursorAdvance(t *testing.T) {
+	const idle = 40 * time.Millisecond
+
+	var (
+		calls    atomic.Int64
+		advanced atomic.Int64
+	)
+	fetch := func(_ context.Context, cursor string) ([]string, string, error) {
+		// 每轮空批都把游标推到新位置（服务端推读位置的形态）
+		return nil, fmt.Sprintf("c%d", calls.Add(1)+1), nil
+	}
+	cfg := Config{
+		IdleDelay: idle,
+		OnAdvance: func(_ context.Context, _ string) error {
+			advanced.Add(1)
+			return nil
+		},
+	}
+
+	start := time.Now()
+	resCh, cancel := startRun(cfg, "c0", fetch, func(context.Context, string) error { return nil })
+	waitFor(t, "三次游标推进", func() bool { return advanced.Load() == 3 })
+	elapsed := time.Since(start)
+	cancel()
+	<-resCh
+
+	// 下界断言不会假红：三次推进之间必然隔着两个完整 idle（time.Timer 不提前触发）。
+	if min := 2 * idle; elapsed < min {
+		t.Fatalf("三次空批推进耗时 %s，小于下界 %s（游标推进后的空批没有按 IdleDelay 等待，与文档口径不符）", elapsed, min)
+	}
+}
+
 // TestRunCursor_BackoffGrowsWithFailures 退避按失败次数增长（下界断言）。
 func TestRunCursor_BackoffGrowsWithFailures(t *testing.T) {
 	const base = 20 * time.Millisecond
