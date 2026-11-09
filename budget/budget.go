@@ -48,8 +48,16 @@ type Option func(*Ledger)
 
 // WithClock 注入时钟（按龄清理与入档时间的确定性测试入口；
 // 与 batch.WithBatchClock / shedding.WithShedderClock 同形）。
+//
+// now 为 nil 时保留缺省时钟（time.Now）：与三个兄弟时钟选项同口径——可选注入
+// 变量未赋值的自然形态不该被放大成 panic，而 panic 点离构造点最远（首次超限
+// 记账或任意一次 Sweep）、时机最敏感（生产过载时），必须消灭在构造期。
 func WithClock(now func() time.Time) Option {
-	return func(l *Ledger) { l.now = now }
+	return func(l *Ledger) {
+		if now != nil {
+			l.now = now
+		}
+	}
 }
 
 // NewLedger 创建记账器。caps 是各维度预算上限（拷贝存储，调用方后续修改
