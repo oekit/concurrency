@@ -1,3 +1,12 @@
+## [v0.31.1] — 2026-11-10
+
+- - fix(poll): RunCursor 的 Retryable 门扩到 item 与 advance 错误路径——毒丸 item 不再无退避紧循环（#226）
+- - fix(budget): WithClock(nil) 保留缺省时钟，不再首次超限记账即 panic（#227）
+- - fix(retry/httpx): HTTPError 显式 0 秒 Retry-After 建议经 hasHint 保留，与 ParseRetryAfter 口径统一（#228）
+- - docs(poll): 空批游标推进后等待 IdleDelay 的语义如实成文，测试钉住下界（#229）
+
+关联问题单：concurrency#226、concurrency#227、concurrency#228、concurrency#229。
+
 ## [v0.31.0] — 2026-11-09
 
 - feat(loop): DisableBackgroundSignalHandling opt-out + RunBackground 信号抑制声明（#218）
