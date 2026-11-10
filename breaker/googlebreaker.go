@@ -243,11 +243,8 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	// 失败清探测位重开、真探测的成功随之被降级成普通样本，熔断器多冷却一整轮；
 	// 反向则由 force-pass 的成功替真探测关闸。观察哨流量由 open 态的 forcePass
 	// 节奏承担，half-open 只等探测回报。
-	if st == stateOpen {
-		if lastPass := b.lastPass.Load(); lastPass > 0 && time.Duration(now-lastPass) > b.forcePass {
-			b.lastPass.Store(now)
-			return googlePromise{b: b, gen: gen}, gen, nil
-		}
+	if st == stateOpen && b.tryForcePass(now) {
+		return googlePromise{b: b, gen: gen}, gen, nil
 	}
 	b.markDrop()
 	return googlePromise{}, 0, ErrCircuitOpen
@@ -257,6 +254,27 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 func (b *googleBreaker) allow() (googlePromise, error) {
 	p, _, err := b.allowGen()
 	return p, err
+}
+
+// tryForcePass 尝试领取本 forcePass 间隔的强制探活名额（#251）：到期则把
+// lastPass 占位到 now 并返回 true——「每隔 d 放行一次」的**恰一次**由
+// CompareAndSwap 的线性化点保证：判断与占位是一步原子操作，并发下同刻只有
+// 恰一个领取者 CAS 成功，其余重读后已未到期、按拒绝处理。修复前是锁外
+// Load→判断→Store 三段竞态——open 态高并发（正是熔断生效的过载场景）下，
+// forcePass 到期瞬间所有已越过阈值的请求同时放行，探活风暴直击已过载后端。
+// lastPass 为 0（尚无放行记录）不授予：进入/重开 open 时已初始化（#25）。
+func (b *googleBreaker) tryForcePass(now int64) bool {
+	for {
+		lastPass := b.lastPass.Load()
+		if lastPass <= 0 || time.Duration(now-lastPass) <= b.forcePass {
+			return false // 未到期：无名额（或被并发方刚领走——重读即知）
+		}
+		if b.lastPass.CompareAndSwap(lastPass, now) {
+			return true // 领取成功：本间隔的探活名额归本请求
+		}
+		// CAS 失败＝并发方已刷新 lastPass：重读重判（now 固定，lastPass 已贴近
+		// now，下一轮必然未到期——循环至多再转一圈，无活锁）
+	}
 }
 
 // doReq 判定放行后执行 req 并按 acceptable 回填成败（经代绑定回报）；
