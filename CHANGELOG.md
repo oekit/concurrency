@@ -1,3 +1,15 @@
+## [v0.33.0] — 2026-11-11
+
+- fix(ratelimit): Limiter.Reserve 收敛为 (time.Duration, error) 双返回，「不可预留」统一规范哨兵 ErrNotReservable（#248 #250）——此前 TokenBucket 回最大 duration（≈292 年）、SlidingWindow 回 -1，两套互斥魔数、接口契约零声明：消费方持 Limiter 接口（KeyedLimiter factory 返回类型）写通用退避，按 d<0 判拒绝的换 TokenBucket 被判成「等 292 年」挂死、按最大值判拒绝的遇 SlidingWindow 把 -1 当立即可用紧循环锤击满窗限流器；判定一律 errors.Is（可穿透 %w 包装），占位值 -1 防误读成 0=立即可用。哨兵契约属 API 面收敛：自行实现 Limiter 的调用方需随签名更新（0.x minor 允许 breaking，同 v0.21.0 启用 Wait 的先例）
+- fix(ratelimit): SlidingWindow 补 RetryAfter 不消耗探测（#246）——AllowWithRetryAfter 对滑窗返回真实等待（下一个空位 = 最早一条滑出窗口的时刻，与 Wait 空位计算同口径），不再恒回 wait=0 引发 429 + Retry-After: 0 重试风暴；peekRetryAfter 删除永不可达的 *TokenBucket「Reserve+Cancel 等价探测」死分支（TokenBucket 本就实现 retryProber），不可探测的自定义实现与「限流器本身不可用」探测一律回退 WithOverCapRetryAfter 保守建议而非 0
+- fix(ratelimit): KeyedLimiterOf.Replace 对未登记 key 走与 Create 同款 allowNew 容量护栏（#252）——表满先回收空闲条目、仍满拒绝并计一次 OverCapHits，返回 bool 使拒绝可观测（l 为 nil 同样返回 false，对齐 Create 拒 nil 契约）；已登记 key 换桶不受护栏影响（速率热更不被卡，契约「已登记 key 不受影响」原样）。修复前 Replace 是四个登记入口（Get/Create/ReplaceIfChanged/Replace）唯一不查护栏的——速率热更/配置下发为外部输入驱动的新 key 建桶，表可无限涨过 WithMaxEntries，护栏与 OverCapHits/Evictions 观测面双双静默失效
+- fix(breaker): forcePass 探活领取原子化（#251）——抽 tryForcePass 用 atomic.Int64.CompareAndSwap 把「判断+占位」收成单步线性化操作，open 态「每隔 d 放行一次」在并发下恰一次：修复前锁外 Load→判断→Store 三段竞态，forcePass 到期瞬间所有已越过阈值的请求同时放行（真并行 12 核实测多赢家率 ≈2.5%/轮），探活风暴直击已过载后端；CAS 失败方重读即知名额已归属他人，循环无活锁
+- fix(shedding): adaptiveShedder/nopShedder 的 Allow 入口 nil ctx 兜底为 context.Background（#249）——Shedder 接口契约如实声明，与 retry/loop/syncx/breaker 的 #159 口径统一；此前直接解引用 ctx.Err() nil panic 打死请求 goroutine
+- fix(singleflight): Do/DoShared/DoChan 入口 nil ctx 兜底为 context.Background（#249）——DoChan 的 context.WithoutCancel(nil) 与 waiter 路径的 select <-ctx.Done() 均 nil panic；fn 现收到兜底后的 Background，#159 口径清尾
+- fix(progress): UpdatePhase 自动完成循环跳过 PhaseFailed 阶段（#247）——失败痕迹（Status/Progress/EndTime）不再被改写成 Completed/100，与 Complete() 的 #193 不变量同口径（同文件测试钉住的断言延伸到第二个入口）；pending 前置照旧自动完成，其余不变量不动
+
+关联问题单：concurrency#246、concurrency#247、concurrency#248、concurrency#249、concurrency#250、concurrency#251、concurrency#252。
+
 ## [v0.32.0] — 2026-11-10
 
 - - feat(poll): HandleRetries + DeadLetter 毒丸死信档——可续拉失败重试至上限后交钩子出档，与 Retryable 门正交且门优先（#231）
