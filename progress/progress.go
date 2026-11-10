@@ -124,8 +124,13 @@ func (t *Tracker) UpdatePhase(name string, status PhaseStatus, progress float64)
 		}
 	}
 
-	// 自动完成之前的阶段
+	// 自动完成之前的阶段（#247：失败阶段保留失败痕迹——与 Complete() 同口径。
+	// 流程「Fail 后继续跑收尾阶段」时，自动完成循环不得把失败抹成 Completed/100，
+	// 否则进度条与 GetOverallProgress 系统性谎报 100% 成功）
 	for i := 0; i < idx; i++ {
+		if t.phases[i].Status == PhaseFailed {
+			continue
+		}
 		if t.phases[i].Status != PhaseCompleted && t.phases[i].Status != PhaseSkipped {
 			t.phases[i].Status = PhaseCompleted
 			t.phases[i].Progress = 100

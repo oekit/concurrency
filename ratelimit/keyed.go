@@ -335,6 +335,10 @@ func (kl *KeyedLimiterOf[K]) AllowN(key K, n int) bool {
 //     不消耗令牌），容量护栏拒绝时返回建议 Retry-After
 //
 // 探测语义：被拒请求不会自我消耗配额，避免放大限流（429 + Retry-After 场景）。
+// TokenBucket / SlidingWindow 均支持真实探测（#246——滑窗此前恒回 wait=0，
+// 429 + Retry-After: 0 直接引发重试风暴）；自定义实现未提供 RetryAfter、或
+// 探测报告「限流器本身不可用」时，回退 WithOverCapRetryAfter 的保守建议值，
+// 绝不静默回 0。
 func (kl *KeyedLimiterOf[K]) AllowWithRetryAfter(key K) (wait time.Duration, ok bool) {
 	l := kl.Get(key)
 	if l == nil {
@@ -343,24 +347,46 @@ func (kl *KeyedLimiterOf[K]) AllowWithRetryAfter(key K) (wait time.Duration, ok 
 	if l.Allow() {
 		return 0, true
 	}
-	return peekRetryAfter(l), false
+	if wait, probeOK := peekRetryAfter(l); probeOK {
+		return wait, false
+	}
+	return kl.retryAfter, false // 不可探测/限流器不可用：保守建议，不回 0
 }
 
 // Replace 将指定 key 的限流器替换为新实例（速率热更）。
-// 换桶即新配额，桶内余量归零（调用方接受）。key 不存在时等价登记新桶。
+// 换桶即新配额，桶内余量归零（调用方接受）。
+//
+// 返回 true 表示已登记/已替换；false 表示 l 为 nil 或**容量护栏拒绝**——
+// key 未登记且表满时与 Create 同款走 allowNew（先回收空闲条目，仍满拒绝并计
+// 一次 OverCapHits，#252）：四个登记入口的护栏必须一视同仁，否则速率热更/
+// 配置下发路径为外部输入驱动的新 key 建桶时，表可无限涨过 WithMaxEntries，
+// 护栏与 OverCapHits/Evictions 观测面双双静默失效。已登记 key 换桶不受护栏
+// 影响（契约「已登记 key 不受影响」——热更不被卡）。
 //
 // Replace 不登记速率元数据——走 Replace 后，AllowWithRate / ReplaceIfChanged
 // 下次调用会因「未登记元数据」重建一次。速率热更口径请统一走 WithRate 家族
 // （ReplaceIfChanged / AllowWithRate，#141），元数据才是事实单源。
-func (kl *KeyedLimiterOf[K]) Replace(key K, l Limiter) {
+func (kl *KeyedLimiterOf[K]) Replace(key K, l Limiter) bool {
 	if l == nil {
-		return
+		return false
 	}
 	kl.mu.Lock()
-	defer kl.mu.Unlock()
+	_, exists := kl.limiters[key]
+	var evicted []evictedEntry[K]
+	if !exists {
+		if !kl.allowNew(time.Now(), &evicted) {
+			kl.overCapHits.Add(1)
+			kl.mu.Unlock()
+			kl.reportEvicts(evicted) // 拒绝路径的回收也要可观测，且回调在锁外
+			return false
+		}
+	}
 	entry := &limiterEntry{limiter: l}
 	entry.lastSeen.Store(time.Now().UnixNano())
 	kl.limiters[key] = entry
+	kl.mu.Unlock()
+	kl.reportEvicts(evicted) // 回调在锁外（消费方可重入本管理器，#142）
+	return true
 }
 
 // ReplaceIfChanged 带速率元数据的热更登记（#141）：以库内登记的元数据为事实
@@ -587,16 +613,20 @@ type retryProber interface {
 	RetryAfter() (time.Duration, bool)
 }
 
-// peekRetryAfter 尽力探测等待时长；不支持探测的 Limiter 返回 0。
-func peekRetryAfter(l Limiter) time.Duration {
+// peekRetryAfter 不消耗配额地探测等待时长（#246）：支持探测的实现返回
+// (真实等待, true)；不支持探测的 Limiter（自定义实现未提供 RetryAfter）返回
+// (0, false)——由调用方回退保守建议值，绝不静默回 0（429 + Retry-After: 0
+// 会让客户端立即重试再被打回，重试风暴）。探测报 ok=false（限流器本身不可用，
+// 如 TokenBucket burst=0 且 rps=0——该请求永远等不到，无诚实的有限等待）同样
+// 交调用方回退保守建议。
+//
+// 此前的实现有两个缺陷（#246）：对 *TokenBucket 的「Reserve+Cancel 等价探测」
+// 分支是死代码（TokenBucket 本就实现 retryProber，上一分支必然先拦）；对无
+// RetryAfter 的实现（SlidingWindow）恒回 0——探测承诺对最常见形态静默失效。
+func peekRetryAfter(l Limiter) (time.Duration, bool) {
 	if p, ok := l.(retryProber); ok {
-		d, _ := p.RetryAfter()
-		return d
+		d, probeOK := p.RetryAfter()
+		return d, probeOK
 	}
-	// 退回 Reserve 语义会消耗令牌——只在无 prober 时用 Reserve+Cancel 等价探测
-	if tb, ok := l.(*TokenBucket); ok {
-		d, _ := tb.RetryAfter()
-		return d
-	}
-	return 0
+	return 0, false
 }

@@ -537,3 +537,25 @@ func TestSetCPUUsageFunc_ResetToDefault(t *testing.T) {
 		t.Fatalf("re-injected currentCPUUsage = (%d, %v), want (777, nil)", v, err)
 	}
 }
+
+// TestShedder_NilCtxTreatedAsBackground 锁定 #249（#159 口径清尾）：nil ctx =
+// context.Background()——elastic 库不得把崩溃带给宿主。修复前 adaptiveShedder
+// 与 nopShedder 的 Allow 直接解引用 ctx（ctx.Err()）nil panic。
+func TestShedder_NilCtxTreatedAsBackground(t *testing.T) {
+	clock := newFakeClock()
+	stub := &cpuStub{}
+	as := newTestShedder(t, clock, stub)
+	stub.set(500) // 低 CPU：恒放行档，专注验证 nil ctx 不 panic
+
+	p, err := as.Allow(nil) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
+	if err != nil || p == nil {
+		t.Fatalf("adaptiveShedder.Allow(nil) = (%v, %v), want (promise, nil)", p, err)
+	}
+	p.Pass()
+
+	np, err := NewNopShedder().Allow(nil) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
+	if err != nil || np == nil {
+		t.Fatalf("nopShedder.Allow(nil) = (%v, %v), want (promise, nil)", np, err)
+	}
+	np.Pass()
+}

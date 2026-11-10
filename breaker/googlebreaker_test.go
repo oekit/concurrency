@@ -2,6 +2,8 @@ package breaker
 
 import (
 	"errors"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -264,5 +266,130 @@ func TestGoogleBreaker_WindowExpiryNoTrafficResume(t *testing.T) {
 		return nil
 	}, defaultAcceptable); err != nil || rejected || !ran {
 		t.Fatalf("force pass must execute: err=%v rejected=%v ran=%v", err, rejected, ran)
+	}
+}
+
+// TestGoogleBreaker_ForcePassConcurrentExactlyOne 锁定 #251：open 态「每隔 d
+// 放行一次」必须是**恰一次**——修复前 lastPass 是锁外 Load→判断→Store 三段
+// 竞态，forcePass 到期瞬间并发请求全部越过判断、放行一片（探活风暴直击已过载
+// 后端）。修复后 CompareAndSwap 把「判断+占位」收成一步，放行名额恰一。
+//
+// 确定性手段：注入时钟冻结在同一时刻（所有并发方拿到同一 now、同一判定输入）+
+// 屏障同时放行 N 路；「恰一次」由 CAS 的线性化点保证，对任意交错成立。假时钟
+// 起点取真实量级（lastPass 语义为 UnixNano > 0 才有效，对齐 TestGoogleBreaker_ForcePass）。
+func TestGoogleBreaker_ForcePassConcurrentExactlyOne(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	b := newTestGoogleBreaker(clock)
+
+	// 白盒置 open 态：openSince=now（冷却未满，半开探测通道关闭），lastPass 距今
+	// 2s > forcePass(1s)——forcePass 通道已到期，next 判定即探活名额之争
+	now := clock.Now().UnixNano()
+	b.mu.Lock()
+	b.state = stateOpen
+	b.openSince = now
+	b.probeGen = 0
+	b.lastPass.Store(now - int64(2*time.Second))
+	b.mu.Unlock()
+
+	const callers = 64
+	results := make([]error, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range callers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			err, _ := b.doReq(func() error { return nil }, defaultAcceptable)
+			results[i] = err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	passed := 0
+	for i, err := range results {
+		switch {
+		case err == nil:
+			passed++
+		case !errors.Is(err, ErrCircuitOpen):
+			t.Fatalf("caller %d unexpected err %v", i, err)
+		}
+	}
+	if passed != 1 {
+		t.Fatalf("forcePass 到期瞬间放行 %d 次（want 恰 1 次）——探活风暴复现，契约「每隔 d 放行一次」被打穿", passed)
+	}
+
+	// 放行后 lastPass 已刷新为 now：同刻后续请求全部拒绝（探测级流量收敛不变量）
+	if err, _ := b.doReq(func() error { return nil }, defaultAcceptable); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatal("放行后同刻请求应拒绝（每 forcePass 间隔恰一次放行）")
+	}
+}
+
+// TestGoogleBreaker_ForcePassGrantRacesExactlyOne 锁定 #251 的核心原子性契约：
+// forcePass 名额的领取（判断+占位）必须是单步原子操作——open 态高并发下同一
+// 到期时刻 N 路并发领取，恰一个成功、其余全部失败。直接并发驱动 tryForcePass
+// （无锁前置，goroutine 在 Load→占位窗口内真并行重叠）：
+//
+//   - 自旋屏障把「同时开跑」的抖动压到缓存一致性量级（channel 唤醒是 µs 级
+//     调度抖动，盖不住 Load→Store 的 ns 级竞态窗口——实测普通屏障下竞态
+//     200 轮不复现）；并发方取 GOMAXPROCS（=真并行核数；再多只会排队，
+//     不会重叠，且自旋等待者会饿死在核外）。
+//   - 时钟冻结：所有并发方同一 now、同一判定输入，胜负只取决于原子性。
+//   - 修复前（Load→判断→Store 三段竞态）真并行的 goroutine 读到陈旧
+//     lastPass、全部 Store、全部放行——本机 12 核实测多赢家率 ≈2.5%/轮，
+//     300 轮全单赢的概率 ≈0.05%（稳定复现红）；修复后「恰一」由 CAS
+//     线性化点给出数学保证，对任意交错成立（确定性绿）。
+func TestGoogleBreaker_ForcePassGrantRacesExactlyOne(t *testing.T) {
+	clock := &fakeClock{}
+	clock.Set(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	b := newTestGoogleBreaker(clock)
+	now := clock.Now().UnixNano()
+
+	callers := runtime.GOMAXPROCS(0)
+	const trials = 300
+	granted := make([]bool, callers)
+	for tr := 0; tr < trials; tr++ {
+		b.lastPass.Store(now - int64(2*time.Second)) // 距今 2s > forcePass(1s)：名额已到期
+
+		var arrived atomic.Int32
+		var goFlag atomic.Bool
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := range callers {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				// 计数屏障：最后一个到达者翻转闸门——所有并发方都已停在
+				// 自旋点上，翻转经缓存一致性传播后大家同一瞬间冲向领取点
+				//（不 sleep、不猜时序；主 goroutine 不参与等待，避免与
+				// 自旋者抢核被 sysmon 拖到 10ms 级）。
+				if arrived.Add(1) == int32(callers) {
+					goFlag.Store(true)
+				}
+				for !goFlag.Load() {
+				}
+				granted[i] = b.tryForcePass(now)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		wins := 0
+		for i, ok := range granted {
+			if !ok {
+				continue
+			}
+			wins++
+			granted[i] = false // 复位，下一轮复用
+		}
+		if wins != 1 {
+			t.Fatalf("第 %d 轮：并发领取 %d 次成功（want 恰 1）——「每隔 d 放行一次」被打穿成探活风暴", tr+1, wins)
+		}
+		if last := b.lastPass.Load(); last != now {
+			t.Fatalf("第 %d 轮：领取后 lastPass=%d，want %d（占位时刻）", tr+1, last, now)
+		}
 	}
 }
