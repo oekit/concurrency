@@ -52,6 +52,9 @@ type Config struct {
 	// true = 失败项由 handle 自己落账（死信表/重试表），库处理后继续、整批处理完
 	// 推进游标。本档要求 handle 承担落账责任：库不会把该项错误再交给任何人。
 	// 选本档的理由只能是「重复投递的代价高于漏处理」，例如平台侧消息 id 不可去重。
+	//
+	// 与死信档（HandleRetries>0，#231）同开时以死信档为准：失败项先就地重试、
+	// 预算耗尽走 DeadLetter 出档，本档「handle 自己落账」的口径被其覆盖。
 	AdvanceOnItemError bool
 	// OnAdvance 游标推进回调：库在**推进之后**同步调用一次，供调用方持久化
 	// （各消费方的存储不同，库不碰）。返回错误 ⇒ 视为本轮失败：游标退回旧值、
@@ -59,6 +62,35 @@ type Config struct {
 	// 一个从未落盘的游标继续，等于凭记忆跳读。
 	// nil = 不做持久化（内存游标，进程重启即重置）。
 	OnAdvance func(ctx context.Context, cursor string) error
+	// HandleRetries 单条 item 的 handle 就地重试上限（缺省 0 = 不开死信档：
+	// 首项失败即停批回退，行为与没有本字段时完全一致）。
+	//
+	// 开档后单项失败不再立即停批：可续拉的错误就地重试（不退避——毒丸的出口
+	// 是出档而非时间）至多 HandleRetries 次，仍败则交 DeadLetter 出档、批次
+	// 继续——毒丸不再绑架整条游标（#231）。
+	//
+	// 与 Retryable 正交且门优先（#226）：门答「这个错误还值得重试吗」，死信档
+	// 答「这条消息还值得留在队列里吗」。任一次失败被门判 false 仍即刻带错返回
+	// ——开档不放行调用方显式判死的错误（如鉴权失效），否则故障期会把每条
+	// 消息逐个出档丢掉。
+	//
+	// >0 必须同时配置 DeadLetter（RunCursor 入口 panic 校验）：出档没有接收方
+	// 等于静默丢消息，那是比 panic 更坏的失败形态。
+	HandleRetries int
+	// DeadLetter 毒丸出档钩子：重试预算耗尽后拿到该 item（以 any 传入——Config
+	// 保持非泛型、不改既有调用方签名，钩子内断言回自身类型）、最后一次错误与
+	// 已试次数（含首次：HandleRetries=2 ⇒ attempts=3）。
+	//
+	// 返回 nil 即视为钩子已接管该消息（落死信库/告警由钩子负责，库不再保证
+	// 重投）；返回错误则死信本身失败，与其他失败路径同口径过 Retryable 门——
+	// 可续拉按 ErrorBackoff 退避后重拉同一批（该项下一轮重新入档重试，钩子须
+	// 可重入），不可续拉带错返回。
+	//
+	// 游标语义不变：钩子本身不推游标，出档项是否再来由既有 advance 语义决定
+	// （OnAdvance 失败回退、进程在 advance 前崩溃——at-least-once 形态下毒丸
+	// 会在下一轮再次入档）。持久化死信是调用方的决定，库只保证钩子被调用到。
+	// nil = 钩子未配置（HandleRetries>0 时不允许）。
+	DeadLetter func(ctx context.Context, item any, err error, attempts int) error
 }
 
 // RunCursor 运行「带单调游标的长轮询批量拉取」循环，直到 ctx 取消或发生不可续拉的错误。
@@ -95,6 +127,9 @@ type Config struct {
 //   - handle 逐项**串行**调用（不并发：消息处理通常有顺序语义），每项独立收编 panic。
 //   - 缺省档下某一项失败即**停止处理本批**（后面的项留到重拉时再处理，不会被跳过）、
 //     不推进游标、按退避重拉。
+//   - 死信档（HandleRetries>0，#231）：单项失败先过 Retryable 门（判 false 仍带错
+//     返回，#226 语义不变），可续拉的就地重试至多 HandleRetries 次，仍败交
+//     DeadLetter 出档、批次继续；钩子失败同样过门（可续拉则退避重拉同一批）。
 //   - 退避等待期间 ctx 取消 ⇒ 立即返回（不睡满）。
 //   - 续拉失败次数在成功一轮后归零（退避不会一路涨到 MaxDelay 卡死）。
 //
@@ -124,6 +159,9 @@ func RunCursor[T any](
 	}
 	if handle == nil {
 		panic("poll: handle 不能为 nil——静默消费掉已拉到的批次是比 panic 更坏的失败形态")
+	}
+	if cfg.HandleRetries > 0 && cfg.DeadLetter == nil {
+		panic("poll: HandleRetries > 0 必须配置 DeadLetter 钩子——出档没有接收方等于静默丢消息")
 	}
 
 	cursor := from
@@ -216,24 +254,66 @@ func RunCursor[T any](
 
 // dispatch 逐项串行执行 handle，每项独立收编 panic。
 //
-// 缺省档下第一项失败即返回该错误（停止处理本批）——继续处理后面的项意味着重拉时
-// 每一项都要再处理一遍（已成功的项被重复执行，副作用翻倍），而停在失败处则
-// 「已处理的再处理一次、未处理的一项不丢」，重复面最小。
+// 缺省档（不开死信档）下第一项失败即返回该错误（停止处理本批）——继续处理后面
+// 的项意味着重拉时每一项都要再处理一遍（已成功的项被重复执行，副作用翻倍），
+// 而停在失败处则「已处理的再处理一次、未处理的一项不丢」，重复面最小。
 //
 // AdvanceOnItemError 档下必须处理完**整批**：本档会推进游标，中途返回会让本批
 // 剩余项再也不会被拉回来（这是真正的丢数据）。
+//
+// 死信档（#231：HandleRetries>0 + DeadLetter）下同样处理完整批：单项失败先过
+// Retryable 门——判 false 仍带错返回（门优先于档：调用方显式判死的错误，如
+// 鉴权失效，不得被逐项出档吞掉）；可续拉的就地重试（不退避）至多 HandleRetries
+// 次，预算耗尽交 DeadLetter 出档后批次继续。钩子失败也返回给调用方过门
+// （可续拉 ⇒ 退避重拉同一批，该项下一轮重新入档）。
 func dispatch[T any](ctx context.Context, cfg Config, items []T, handle func(context.Context, T) error) error {
+	deadletter := cfg.HandleRetries > 0 // 入口已校验：开档必有钩子
 	for _, item := range items {
 		err := handleSafe(ctx, handle, item)
 		if err == nil {
 			continue
 		}
-		if !cfg.AdvanceOnItemError {
-			return err
+		if !deadletter {
+			if !cfg.AdvanceOnItemError {
+				return err
+			}
+			// 本档由 handle 自己落账；库这边只保证「本批跑完再推进」。
+			continue
 		}
-		// 本档由 handle 自己落账；库这边只保证「本批跑完再推进」。
+		lastErr := err
+		attempts := 1
+		for {
+			if !retryable(cfg, lastErr) {
+				return lastErr
+			}
+			if attempts > cfg.HandleRetries {
+				break // 预算耗尽：交 DeadLetter 出档
+			}
+			attempts++
+			if lastErr = handleSafe(ctx, handle, item); lastErr == nil {
+				break // 重试成功：不出档
+			}
+		}
+		if lastErr == nil {
+			continue
+		}
+		if dlErr := deadLetterSafe(ctx, cfg.DeadLetter, item, lastErr, attempts); dlErr != nil {
+			return dlErr
+		}
 	}
 	return nil
+}
+
+// deadLetterSafe 就地收编死信钩子的 panic，转成 *async.PanicError 返回
+// （与 OnAdvance 同口径：钩子崩了不能打死循环，由调用方按失败路径过门）。
+func deadLetterSafe(ctx context.Context, hook func(context.Context, any, error, int) error, item any, lastErr error, attempts int) error {
+	var dlErr error
+	if panicErr := async.RunSafeCtx(ctx, func(inner context.Context) {
+		dlErr = hook(inner, item, lastErr, attempts)
+	}); panicErr != nil {
+		return panicErr
+	}
+	return dlErr
 }
 
 // handleSafe 就地收编单项处理的 panic，转成 *async.PanicError 返回。
