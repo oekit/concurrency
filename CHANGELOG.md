@@ -1,3 +1,7 @@
+## [v0.31.2] — 2026-11-10
+
+- - build: 依赖地板对齐——pkg v0.41.0 → v0.41.1（floor sync，无代码变更）
+
 ## [v0.31.1] — 2026-11-10
 
 - - fix(poll): RunCursor 的 Retryable 门扩到 item 与 advance 错误路径——毒丸 item 不再无退避紧循环（#226）
