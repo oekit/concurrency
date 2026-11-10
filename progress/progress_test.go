@@ -220,3 +220,49 @@ func TestGetPhases_ReturnsCopy(t *testing.T) {
 		t.Error("GetPhases() should return a copy; internal state was mutated")
 	}
 }
+
+// TestUpdatePhase_DoesNotOverrideFail 锁定 #247（#193 残留）：UpdatePhase 的
+// 「自动完成前置阶段」与 Complete() 同款不变量——失败阶段保留失败痕迹，
+// 自动完成循环不得把 PhaseFailed 改写成 Completed/100（否则流程继续跑收尾
+// 阶段时，失败痕迹被抹成 100% 成功，报表与 GetOverallProgress 系统性谎报）。
+func TestUpdatePhase_DoesNotOverrideFail(t *testing.T) {
+	tr := NewTracker([]PhaseConfig{
+		{Name: "a"},
+		{Name: "b"},
+		{Name: "c"},
+	})
+	tr.UpdatePhase("a", PhaseActive, 0)
+	tr.UpdatePhase("b", PhaseActive, 0)
+	tr.UpdatePhase("b", PhaseFailed, 50)
+
+	// 流程继续跑收尾阶段：自动完成循环触发（修复前把 b 改写成 completed+100）
+	tr.UpdatePhase("c", PhaseActive, 0)
+
+	b, ok := tr.GetPhase("b")
+	if !ok {
+		t.Fatal("phase b not found")
+	}
+	if b.Status != PhaseFailed {
+		t.Errorf("失败阶段被自动完成改写：b.Status = %q, want %q", b.Status, PhaseFailed)
+	}
+	if b.Progress != 50 {
+		t.Errorf("失败阶段进度被改写：b.Progress = %v, want 50", b.Progress)
+	}
+	if b.EndTime.IsZero() {
+		t.Error("失败阶段的 EndTime 不应被清掉（报表要耗时数据）")
+	}
+
+	// 不变量不被破坏：失败痕迹之外，pending 前置仍按原语义自动完成
+	a, _ := tr.GetPhase("a")
+	if a.Status != PhaseCompleted || a.Progress != 100 {
+		t.Errorf("前置 pending 阶段应照旧自动完成：a = (%q, %v), want (completed, 100)", a.Status, a.Progress)
+	}
+	c, _ := tr.GetPhase("c")
+	if c.Status != PhaseActive {
+		t.Errorf("目标阶段状态不应受影响：c.Status = %q, want %q", c.Status, PhaseActive)
+	}
+
+	if got := tr.GetOverallProgress(); got >= 100 {
+		t.Errorf("GetOverallProgress() = %v, 含失败阶段的任务不应被抹成 100%%", got)
+	}
+}
