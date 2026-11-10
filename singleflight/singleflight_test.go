@@ -3,6 +3,7 @@ package singleflight
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -414,4 +415,90 @@ func TestFlight_ResultWaiters(t *testing.T) {
 		t.Fatalf("leader Waiters = %d, want >= 1（折叠掉的 waiter 数）", res.Waiters)
 	}
 	_ = got
+}
+
+// TestFlight_NilCtxTreatedAsBackground 锁定 #249（#159 口径清尾）：nil ctx =
+// context.Background()。修复前 waiter 路径 select <-ctx.Done()、DoChan 的
+// context.WithoutCancel(nil) 直接 nil panic 打死请求 goroutine。
+func TestFlight_NilCtxTreatedAsBackground(t *testing.T) {
+	sf := New[string]()
+
+	// leader 路径：fn 收到的 ctx 已兜底为 Background（fn 解引用 ctx 不 panic）
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	leaderDone := make(chan struct{})
+	var leaderCtx context.Context
+	go func() {
+		defer close(leaderDone)
+		val, err := sf.Do(nil, "k", func(ctx context.Context) (string, error) {
+			leaderCtx = ctx
+			close(entered)
+			<-release // 挂起 leader：让下方 waiter 确定性走到等待分支
+			return "leader", nil
+		})
+		if err != nil || val != "leader" {
+			t.Errorf("leader = (%q, %v), want (leader, nil)", val, err)
+		}
+	}()
+	<-entered // leader 已登记 call 条目：下一次同 key 调用必为 waiter 路径
+
+	// waiter 路径：修复前 select <-ctx.Done() nil panic
+	waiterDone := make(chan struct{})
+	go func() {
+		defer close(waiterDone)
+		val, err := sf.Do(nil, "k", func(context.Context) (string, error) {
+			return "should-not-run", nil
+		})
+		if err != nil || val != "leader" {
+			t.Errorf("waiter = (%q, %v), want (leader, nil)", val, err)
+		}
+	}()
+
+	// 等 waiter 确定性注册进等待分支：leader 的 call 条目在 fn 返回前不会被
+	// 清理（fn 挂在 <-release 上），waiter 命中条目后 waiters.Add(1)——读到
+	// 计数 ≥1 即 waiter 已走到等待分支，此时才放行 leader。包内测试直读
+	// call.waiters，不 sleep 猜时序。
+	for registered := false; !registered; {
+		if v, ok := sf.calls.Load("k"); ok {
+			registered = v.(*call[string]).waiters.Load() >= 1
+		}
+		if !registered {
+			runtime.Gosched()
+		}
+	}
+
+	close(release)
+	<-leaderDone
+	<-waiterDone
+	if leaderCtx == nil {
+		t.Error("fn 应收到兜底后的 Background，而非 nil ctx")
+	}
+	if got := leaderCtx.Err(); got != nil {
+		t.Errorf("Background.Err() = %v, want nil", got)
+	}
+}
+
+// TestFlight_NilCtxDoSharedAndDoChan 同口径覆盖 DoShared 与 DoChan 两个入口。
+func TestFlight_NilCtxDoSharedAndDoChan(t *testing.T) {
+	sf := New[int]()
+
+	val, shared, err := sf.DoShared(nil, "k", func(ctx context.Context) (int, error) {
+		if ctx == nil {
+			t.Error("DoShared fn 应收到兜底后的 Background")
+		}
+		return 42, nil
+	})
+	if err != nil || val != 42 || shared {
+		t.Fatalf("DoShared(nil) = (%v, %v, %v), want (42, false, nil)", val, shared, err)
+	}
+
+	res := <-sf.DoChan(nil, "k", func(ctx context.Context) (int, error) {
+		if ctx == nil {
+			t.Error("DoChan fn 应收到兜底后的 Background")
+		}
+		return 7, nil
+	})
+	if res.Err != nil || res.Val != 7 || res.Shared {
+		t.Fatalf("DoChan(nil) = %+v, want {Val:7, Shared:false, Err:nil}", res)
+	}
 }

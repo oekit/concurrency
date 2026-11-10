@@ -41,7 +41,13 @@ type call[T any] struct {
 //   - waiter 被唤醒并拿到由 panic 转化的 error（而非零值+nil 的伪成功——
 //     调用方无法区分"合法零值"与"执行失败"，会静默污染下游缓存/状态）
 //   - map 中的 key 记录会被清理，不会因 panic 残留导致后续调用死锁
+//
+// ctx 为 nil 时按 context.Background() 处理（永不取消）——与 retry/loop/
+// syncx/breaker 的 nil ctx 口径一致（#159/#249）。
 func (f *Flight[T]) Do(ctx context.Context, key string, fn func(ctx context.Context) (T, error)) (T, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c := &call[T]{
 		ready: make(chan struct{}),
 	}
@@ -103,7 +109,11 @@ type Result[T any] struct {
 // 本次调用与其他调用方共享了同一次 fn（自己是 waiter 而非 leader）。
 // 用于埋点区分「本轮真采集」与「复用了并发中的那一轮」；Do 保持 (T, error)
 // 不动，不破坏现有调用点。
+// ctx 为 nil 时按 context.Background() 处理（与 Do 同口径，#159/#249）。
 func (f *Flight[T]) DoShared(ctx context.Context, key string, fn func(ctx context.Context) (T, error)) (T, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c := &call[T]{ready: make(chan struct{})}
 
 	actual, loaded := f.calls.LoadOrStore(key, c)
@@ -156,7 +166,12 @@ func (f *Flight[T]) DoShared(ctx context.Context, key string, fn func(ctx contex
 // context.WithoutCancel(ctx) 执行——即使传入可取消 ctx，fn 也不会被调用方的
 // 放弃等待腰斩（合并语义：同 key 的其他调用方还在等这次结果）。
 // 需要「调用方取消即中止执行」的取消传播用 Do/DoShared（fn 直接收到调用方 ctx）。
+// ctx 为 nil 时按 context.Background() 处理（WithoutCancel(nil) 会 panic，
+// 与 Do/DoShared 同口径兜底，#159/#249）。
 func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.Context) (T, error)) <-chan Result[T] {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	innerCtx := context.WithoutCancel(ctx)
 	ch := make(chan Result[T], 1)
 
