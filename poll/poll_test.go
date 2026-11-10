@@ -809,6 +809,312 @@ func TestRunCursor_AdvanceErrorRespectsRetryable(t *testing.T) {
 	}
 }
 
+// TestRunCursor_DeadLetterTierPoisonDoesNotHijackCursor 死信档主链路（#231 验收）：
+// 毒丸 + HandleRetries=2 + DeadLetter 记录 ⇒ 该 item 试 3 次后入档（attempts=3、
+// 最后一次错误原样上交）、批次继续、其余 item 照常处理、整批处理完推进游标。
+func TestRunCursor_DeadLetterTierPoisonDoesNotHijackCursor(t *testing.T) {
+	errPoison := errors.New("毒丸消息")
+
+	var (
+		advanced atomic.Int64
+		poison   atomic.Int64
+	)
+	var (
+		dlItems    []any
+		dlErrs     []error
+		dlAttempts []int
+		got        []string
+	)
+
+	fetch := func(ctx context.Context, cursor string) ([]string, string, error) {
+		if cursor != "" {
+			<-ctx.Done()
+			return nil, "", ctx.Err()
+		}
+		return []string{"poison", "ok", "tail"}, "c1", nil
+	}
+	handle := func(_ context.Context, item string) error {
+		got = append(got, item)
+		if item == "poison" {
+			poison.Add(1)
+			return errPoison
+		}
+		return nil
+	}
+	cfg := Config{
+		ErrorBackoff:  retry.Config{Delay: time.Millisecond},
+		HandleRetries: 2,
+		DeadLetter: func(_ context.Context, item any, err error, attempts int) error {
+			dlItems = append(dlItems, item)
+			dlErrs = append(dlErrs, err)
+			dlAttempts = append(dlAttempts, attempts)
+			return nil
+		},
+		OnAdvance: func(_ context.Context, _ string) error {
+			advanced.Add(1)
+			return nil
+		},
+	}
+
+	resCh, cancel := startRun(cfg, "", fetch, handle)
+	waitFor(t, "批次推进", func() bool { return advanced.Load() == 1 })
+	cancel()
+	res := <-resCh
+
+	if got := poison.Load(); got != 3 {
+		t.Fatalf("毒丸 handle %d 次，期望 3 次（首次 + HandleRetries=2）", got)
+	}
+	// 毒丸出档后批次继续：ok、tail 照常处理
+	if want := []string{"poison", "poison", "poison", "ok", "tail"}; !equalStrings(got, want) {
+		t.Fatalf("处理序列 = %v，期望 %v（毒丸就地重试后出档，批次继续）", got, want)
+	}
+	if len(dlItems) != 1 || dlItems[0] != "poison" {
+		t.Fatalf("死信项 = %v，期望 [poison]（恰好一次出档）", dlItems)
+	}
+	if len(dlErrs) != 1 || !errors.Is(dlErrs[0], errPoison) {
+		t.Fatalf("死信错误 = %v，期望最后一次错误原样上交", dlErrs)
+	}
+	if len(dlAttempts) != 1 || dlAttempts[0] != 3 {
+		t.Fatalf("死信已试次数 = %v，期望 [3]（含首次）", dlAttempts)
+	}
+	if res.cursor != "c1" {
+		t.Fatalf("退出游标 = %q，期望 c1（出档后批次照常推进）", res.cursor)
+	}
+	if !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("err = %v，期望循环存活到 ctx 取消", res.err)
+	}
+}
+
+// TestRunCursor_DeadLetterTierRetryThenSuccess 重试成功不出档：预算内第 2 次成功
+// ⇒ DeadLetter 一次都不调，批次照常推进。
+func TestRunCursor_DeadLetterTierRetryThenSuccess(t *testing.T) {
+	errPoison := errors.New("瞬时失败")
+
+	var (
+		fail     atomic.Bool
+		dlCalled atomic.Int64
+		advanced atomic.Int64
+	)
+	fetch := func(ctx context.Context, cursor string) ([]string, string, error) {
+		if cursor != "" {
+			<-ctx.Done()
+			return nil, "", ctx.Err()
+		}
+		return []string{"flaky"}, "c1", nil
+	}
+	handle := func(_ context.Context, item string) error {
+		if item == "flaky" && !fail.Load() {
+			fail.Store(true)
+			return errPoison
+		}
+		return nil
+	}
+	cfg := Config{
+		ErrorBackoff:  retry.Config{Delay: time.Millisecond},
+		HandleRetries: 2,
+		DeadLetter: func(context.Context, any, error, int) error {
+			dlCalled.Add(1)
+			return nil
+		},
+		OnAdvance: func(_ context.Context, _ string) error {
+			advanced.Add(1)
+			return nil
+		},
+	}
+
+	resCh, cancel := startRun(cfg, "", fetch, handle)
+	waitFor(t, "批次推进", func() bool { return advanced.Load() == 1 })
+	cancel()
+	res := <-resCh
+
+	if got := dlCalled.Load(); got != 0 {
+		t.Fatalf("DeadLetter 调用 %d 次，期望 0 次（预算内重试成功不出档）", got)
+	}
+	if res.cursor != "c1" {
+		t.Fatalf("退出游标 = %q，期望 c1", res.cursor)
+	}
+}
+
+// TestRunCursor_DeadLetterHookFailureRepulls 死信钩子失败：与其他失败路径同口径
+// 过 Retryable 门——可续拉则退避后重拉**同一批**（游标不动），该项下一轮重新
+// 入档；钩子须可重入。
+func TestRunCursor_DeadLetterHookFailureRepulls(t *testing.T) {
+	errPoison := errors.New("毒丸消息")
+	errHook := errors.New("死信库不可写")
+
+	var (
+		dlCalls    atomic.Int64
+		handles    atomic.Int64
+		advanced   atomic.Int64
+		hookFailed atomic.Bool
+	)
+	var fetchSeen []string
+
+	fetch := func(ctx context.Context, cursor string) ([]string, string, error) {
+		fetchSeen = append(fetchSeen, cursor)
+		if cursor != "" {
+			<-ctx.Done()
+			return nil, "", ctx.Err()
+		}
+		return []string{"poison"}, "c1", nil
+	}
+	handle := func(context.Context, string) error {
+		handles.Add(1)
+		return errPoison
+	}
+	cfg := Config{
+		ErrorBackoff:  retry.Config{Delay: time.Millisecond},
+		HandleRetries: 1,
+		DeadLetter: func(_ context.Context, _ any, _ error, attempts int) error {
+			if dlCalls.Add(1) == 1 {
+				hookFailed.Store(true)
+				return errHook
+			}
+			if attempts != 2 {
+				t.Errorf("第二轮出档 attempts = %d，期望 2（HandleRetries=1）", attempts)
+			}
+			return nil
+		},
+		OnAdvance: func(_ context.Context, _ string) error {
+			advanced.Add(1)
+			return nil
+		},
+	}
+
+	resCh, cancel := startRun(cfg, "", fetch, handle)
+	waitFor(t, "重拉后出档成功并推进", func() bool { return advanced.Load() == 1 })
+	cancel()
+	res := <-resCh
+
+	if got := dlCalls.Load(); got != 2 {
+		t.Fatalf("DeadLetter 调用 %d 次，期望 2 次（首次失败重拉后重新出档）", got)
+	}
+	if !hookFailed.Load() {
+		t.Fatal("用例编排失效：首次出档没有失败")
+	}
+	// 两轮 handle 各试 2 次（1 + HandleRetries=1）
+	if got := handles.Load(); got != 4 {
+		t.Fatalf("handle 调用 %d 次，期望 4 次（两轮 × (1+1)）", got)
+	}
+	if len(fetchSeen) < 2 || fetchSeen[0] != "" || fetchSeen[1] != "" {
+		t.Fatalf("重拉游标 = %v，期望前两次都是空游标（钩子失败那轮不推进）", fetchSeen)
+	}
+	if res.cursor != "c1" {
+		t.Fatalf("退出游标 = %q，期望 c1", res.cursor)
+	}
+}
+
+// TestRunCursor_DeadLetterTierRespectsRetryableGate 门优先于档（#226 语义不变）：
+// 开档下 Retryable 判 false 的错误仍首次失败即带错返回——不重试、不出档，
+// 否则故障期会把每条消息逐个出档丢掉。
+func TestRunCursor_DeadLetterTierRespectsRetryableGate(t *testing.T) {
+	errAuth := errors.New("鉴权失效")
+
+	var (
+		fetches  atomic.Int64
+		handles  atomic.Int64
+		dlCalled atomic.Int64
+	)
+	fetch := func(context.Context, string) ([]string, string, error) {
+		fetches.Add(1)
+		return []string{"a", "b"}, "c1", nil
+	}
+	handle := func(_ context.Context, item string) error {
+		handles.Add(1)
+		if item == "a" {
+			return errAuth
+		}
+		return nil
+	}
+	cfg := Config{
+		ErrorBackoff:  retry.Config{Delay: time.Millisecond},
+		HandleRetries: 5,
+		DeadLetter: func(context.Context, any, error, int) error {
+			dlCalled.Add(1)
+			return nil
+		},
+		Retryable: func(error) bool { return false },
+	}
+
+	cursor, err := RunCursor(context.Background(), cfg, "c0", fetch, handle)
+
+	if !errors.Is(err, errAuth) {
+		t.Fatalf("err = %v，期望原样返回鉴权错误（开档不放行判死错误）", err)
+	}
+	if cursor != "c0" {
+		t.Fatalf("游标 = %q，期望保持 c0（失败那批不推进）", cursor)
+	}
+	if got := handles.Load(); got != 1 {
+		t.Fatalf("handle 调用 %d 次，期望 1 次（门判死不重试）", got)
+	}
+	if got := dlCalled.Load(); got != 0 {
+		t.Fatalf("DeadLetter 调用 %d 次，期望 0 次（门判死的错误不出档）", got)
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("fetch 调用 %d 次，期望 1 次（立即返回不重拉）", got)
+	}
+}
+
+// TestRunCursor_DeadLetterRequiresHook HandleRetries>0 而 DeadLetter 为 nil 是
+// 编程错误，当场 panic（出档没有接收方等于静默丢消息）。
+func TestRunCursor_DeadLetterRequiresHook(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("期望 panic（静默丢消息比 panic 更坏）")
+		}
+	}()
+	fetch := func(context.Context, string) ([]string, string, error) { return nil, "", nil }
+	cfg := Config{HandleRetries: 1} // DeadLetter 缺席
+	_, _ = RunCursor(context.Background(), cfg, "", fetch,
+		func(context.Context, string) error { return nil })
+}
+
+// TestRunCursor_TierClosedIsStatusQuo 未开档（HandleRetries=0）：DeadLetter 即使
+// 配置了也不参与——首项失败即停批回退，行为与 #226 修复后的现状一致。
+func TestRunCursor_TierClosedIsStatusQuo(t *testing.T) {
+	errPoison := errors.New("毒丸消息")
+
+	var (
+		fetches  atomic.Int64
+		handles  atomic.Int64
+		dlCalled atomic.Int64
+	)
+	fetch := func(ctx context.Context, cursor string) ([]string, string, error) {
+		fetches.Add(1)
+		if cursor != "" {
+			<-ctx.Done()
+			return nil, "", ctx.Err()
+		}
+		return []string{"poison", "ok"}, "c1", nil
+	}
+	handle := func(_ context.Context, item string) error {
+		handles.Add(1)
+		if item == "poison" {
+			return errPoison
+		}
+		return nil
+	}
+	cfg := Config{
+		ErrorBackoff: retry.Config{Delay: time.Millisecond},
+		DeadLetter:   func(context.Context, any, error, int) error { dlCalled.Add(1); return nil },
+	}
+
+	resCh, cancel := startRun(cfg, "", fetch, handle)
+	waitFor(t, "停批回退后重拉成功", func() bool { return fetches.Load() >= 2 })
+	cancel()
+	res := <-resCh
+
+	if got := dlCalled.Load(); got != 0 {
+		t.Fatalf("DeadLetter 调用 %d 次，期望 0 次（HandleRetries=0 档未开）", got)
+	}
+	if got := handles.Load(); got < 2 {
+		t.Fatalf("handle 调用 %d 次，期望 ≥2（首项失败停批、重拉后再处理）", got)
+	}
+	if !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, errPoison) {
+		t.Fatalf("err = %v，期望取消或毒丸错误", res.err)
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
