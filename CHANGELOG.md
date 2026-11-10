@@ -1,3 +1,9 @@
+## [v0.32.0] — 2026-11-10
+
+- - feat(poll): HandleRetries + DeadLetter 毒丸死信档——可续拉失败重试至上限后交钩子出档，与 Retryable 门正交且门优先（#231）
+
+关联问题单：concurrency#231。
+
 ## [v0.31.2] — 2026-11-10
 
 - - build: 依赖地板对齐——pkg v0.41.0 → v0.41.1（floor sync，无代码变更）
