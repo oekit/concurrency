@@ -304,8 +304,11 @@ func TestKeyedLimiter_AllowWithRetryAfter_SlidingWindowProbe(t *testing.T) {
 	defer kl.Close()
 
 	// 打满窗口
-	if !kl.Allow("k") || !kl.Allow("k") {
-		t.Fatal("前两笔应放行")
+	if !kl.Allow("k") {
+		t.Fatal("第一笔应放行")
+	}
+	if !kl.Allow("k") {
+		t.Fatal("第二笔应放行")
 	}
 
 	wait, ok := kl.AllowWithRetryAfter("k")

@@ -547,13 +547,13 @@ func TestShedder_NilCtxTreatedAsBackground(t *testing.T) {
 	as := newTestShedder(t, clock, stub)
 	stub.set(500) // 低 CPU：恒放行档，专注验证 nil ctx 不 panic
 
-	p, err := as.Allow(nil)
+	p, err := as.Allow(nil) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
 	if err != nil || p == nil {
 		t.Fatalf("adaptiveShedder.Allow(nil) = (%v, %v), want (promise, nil)", p, err)
 	}
 	p.Pass()
 
-	np, err := NewNopShedder().Allow(nil)
+	np, err := NewNopShedder().Allow(nil) //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
 	if err != nil || np == nil {
 		t.Fatalf("nopShedder.Allow(nil) = (%v, %v), want (promise, nil)", np, err)
 	}

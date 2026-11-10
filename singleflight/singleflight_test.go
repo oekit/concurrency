@@ -430,7 +430,7 @@ func TestFlight_NilCtxTreatedAsBackground(t *testing.T) {
 	var leaderCtx context.Context
 	go func() {
 		defer close(leaderDone)
-		val, err := sf.Do(nil, "k", func(ctx context.Context) (string, error) {
+		val, err := sf.Do(nil, "k", func(ctx context.Context) (string, error) { //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
 			leaderCtx = ctx
 			close(entered)
 			<-release // 挂起 leader：让下方 waiter 确定性走到等待分支
@@ -446,7 +446,7 @@ func TestFlight_NilCtxTreatedAsBackground(t *testing.T) {
 	waiterDone := make(chan struct{})
 	go func() {
 		defer close(waiterDone)
-		val, err := sf.Do(nil, "k", func(context.Context) (string, error) {
+		val, err := sf.Do(nil, "k", func(context.Context) (string, error) { //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
 			return "should-not-run", nil
 		})
 		if err != nil || val != "leader" {
@@ -482,7 +482,7 @@ func TestFlight_NilCtxTreatedAsBackground(t *testing.T) {
 func TestFlight_NilCtxDoSharedAndDoChan(t *testing.T) {
 	sf := New[int]()
 
-	val, shared, err := sf.DoShared(nil, "k", func(ctx context.Context) (int, error) {
+	val, shared, err := sf.DoShared(nil, "k", func(ctx context.Context) (int, error) { //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
 		if ctx == nil {
 			t.Error("DoShared fn 应收到兜底后的 Background")
 		}
@@ -492,7 +492,7 @@ func TestFlight_NilCtxDoSharedAndDoChan(t *testing.T) {
 		t.Fatalf("DoShared(nil) = (%v, %v, %v), want (42, false, nil)", val, shared, err)
 	}
 
-	res := <-sf.DoChan(nil, "k", func(ctx context.Context) (int, error) {
+	res := <-sf.DoChan(nil, "k", func(ctx context.Context) (int, error) { //nolint:staticcheck // 契约：nil ctx 按 Background 处理（#249 测试目标）
 		if ctx == nil {
 			t.Error("DoChan fn 应收到兜底后的 Background")
 		}
