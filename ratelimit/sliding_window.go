@@ -83,22 +83,24 @@ func (sw *SlidingWindow) AllowN(n int) bool {
 	return true
 }
 
-// Reserve 预留一个请求，返回需要等待的时间。
-// 返回 0 表示立即放行（槽位已计入窗口）；返回 d>0 表示需等待 d 后放行，
+// Reserve 预留一个请求，返回需要等待的时间与错误。
+// (0, nil) 表示立即放行（槽位已计入窗口）；(d>0, nil) 表示需等待 d 后放行，
 // 槽位已按 now+d 预占——与 x/time/rate 的 Reserve 语义一致：预留即消费，
 // 并发调用者拿到的是互不相同的槽位而非同一个"虚拟许可"（#190）。
 //
-// 返回 -1 表示不可预留：在册预占（尚未到期的未来槽位）已达 maxCount——整窗
-// 额度已被订满，再受理只会无限透支未来窗口。调用方应改用 Wait 或放弃。
+// (-1, ErrNotReservable) 表示不可预留：在册预占（尚未到期的未来槽位）已达
+// maxCount——整窗额度已被订满，再受理只会无限透支未来窗口。判定一律
+// errors.Is(err, ErrNotReservable)（#248/#250：此前回裸 -1，与 TokenBucket
+// 的最大 duration 互斥、接口零声明）。调用方应改用 Wait 或放弃。
 //
 // 预占槽位的算法：timestamps 升序，预占时刻 t 必须满足「t 那一刻在窗条目数
 // ≤ maxCount-1」⇒ 至少 len-maxCount+1 条已滑出窗口 ⇒ 最早的可行时刻是
 // timestamps[len-maxCount]+window（无预占时即最老一条的到期时刻）。每受理
 // 一笔预占，该边界下标随 len 前移 ⇒ 之后的并发预留者天然排到更晚的槽位，
 // 互不相同；同刻腾出的多槽由 1ns 错开兜底。
-func (sw *SlidingWindow) Reserve() time.Duration {
+func (sw *SlidingWindow) Reserve() (time.Duration, error) {
 	if sw.maxCount <= 0 {
-		return 0 // 不限流档（#135）：立即放行、不记账
+		return 0, nil // 不限流档（#135）：立即放行、不记账
 	}
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -110,7 +112,7 @@ func (sw *SlidingWindow) Reserve() time.Duration {
 
 	if len(sw.timestamps) < sw.maxCount {
 		sw.insertLocked(now)
-		return 0
+		return 0, nil
 	}
 
 	// 在册预占（晚于当下的未来槽位）以 maxCount 为上限：超限不再受理（#190
@@ -120,7 +122,7 @@ func (sw *SlidingWindow) Reserve() time.Duration {
 		pending++
 	}
 	if pending >= sw.maxCount {
-		return -1
+		return -1, ErrNotReservable
 	}
 
 	// 窗口已满：预占「有槽位腾出」的最早时刻（见函数注释的推导）。
@@ -129,7 +131,7 @@ func (sw *SlidingWindow) Reserve() time.Duration {
 		t = last.Add(time.Nanosecond) // 同刻腾出多槽时错开 1ns，保证槽位互不相同
 	}
 	sw.timestamps = append(sw.timestamps, t)
-	return t.Sub(now)
+	return t.Sub(now), nil
 }
 
 // cleanOld 清理过期的**头部**时间戳（列表升序，过期条目只出现在头部；
@@ -158,6 +160,30 @@ func (sw *SlidingWindow) insertLocked(t time.Time) {
 	sw.timestamps = append(sw.timestamps, time.Time{})
 	copy(sw.timestamps[i+1:], sw.timestamps[i:])
 	sw.timestamps[i] = t
+}
+
+// RetryAfter 探测下一个可用槽位的等待时长，不消耗配额（#246）：窗口有空位
+// 返回 (0, true)——立即可用；窗口满返回最早一条滑出窗口的时刻距今的等待
+// （与 Wait 的空位计算同一口径），ok 恒 true——滑窗没有「限流器本身不可用」
+// 的形态（maxCount<=0 是不限流档，恒 (0, true)）。
+//
+// 与 TokenBucket.RetryAfter 对齐的 429 探测语义：被拒请求不自我消耗配额——
+// KeyedLimiterOf.AllowWithRetryAfter 据此回 Retry-After 而不会放大限流。
+func (sw *SlidingWindow) RetryAfter() (time.Duration, bool) {
+	if sw.maxCount <= 0 {
+		return 0, true // 不限流档（#135）：立即可用、不记账
+	}
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	now := time.Now()
+	sw.cleanOld(now.Add(-sw.window))
+	if len(sw.timestamps) < sw.maxCount {
+		return 0, true // 有空位：立即可用
+	}
+	// 满：下一个空位到来的时刻 = 最早一条滑出窗口的时刻（含 Reserve 预占的
+	// 未来槽位——它们到期前不腾位）。
+	return max(sw.timestamps[0].Add(sw.window).Sub(now), 0), true
 }
 
 // Count 返回当前窗口内**已落账**的请求数（不含 Reserve 已预占、尚未到期的

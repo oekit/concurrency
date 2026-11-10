@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -236,5 +237,121 @@ func TestKeyedLimiter_Create_Concurrent(t *testing.T) {
 	wg.Wait()
 	if success.Load() != 1 {
 		t.Fatalf("concurrent Create on same key should succeed exactly once, got %d", success.Load())
+	}
+}
+
+// TestKeyedLimiter_ReplaceRespectsMaxEntries 锁定 #252：四个登记入口的容量护栏
+// 必须一视同仁——Replace 对**未登记 key**（文档明说「key 不存在时等价登记新桶」，
+// 速率热更/配置下发路径正是这么用的）走与 Create 同款 allowNew：表满先回收空闲、
+// 仍满拒绝并计 OverCapHits，表不再无限涨过 WithMaxEntries；已登记 key 换桶不受
+// 护栏影响（契约「已登记 key 不受影响」，热更不被卡）。修复前 Replace 是唯一
+// 不查护栏的登记入口——新 key 直写 map，护栏与 OverCapHits/Evictions 观测面
+// 双双静默失效。
+func TestKeyedLimiter_ReplaceRespectsMaxEntries(t *testing.T) {
+	kl := NewKeyedLimiterOf[string](func() Limiter {
+		return NewTokenBucket(10, 1)
+	}, WithMaxEntries[string](2), WithIdleTTL[string](time.Hour))
+	defer kl.Close()
+
+	if !kl.Create("k1", NewTokenBucket(10, 1)) {
+		t.Fatal("护栏内登记 k1 应成功")
+	}
+
+	// 护栏内还有空位：新 key 走 Replace 照常登记（正常热更路径不受影响）
+	if !kl.Replace("k2", NewTokenBucket(10, 1)) {
+		t.Fatal("护栏内有空位时 Replace 新 key 应登记成功")
+	}
+	if got := kl.Len(); got != 2 {
+		t.Fatalf("登记 k2 后 Len=%d, want 2", got)
+	}
+
+	// 新 key 走 Replace：表满（len=2=maxEntries）且无空闲条目，护栏必须拒绝
+	if kl.Replace("k3", NewTokenBucket(10, 1)) {
+		t.Fatal("表满时 Replace 新 key 应被护栏拒绝")
+	}
+	if got := kl.Len(); got != 2 {
+		t.Fatalf("护栏拒绝后 Len=%d, want 2（表不无限涨过 WithMaxEntries）", got)
+	}
+	if kl.OverCapHits() == 0 {
+		t.Fatal("护栏拒绝应计一次 OverCapHits（可观测面不留盲区）")
+	}
+	if kl.Get("k3") != nil {
+		t.Fatal("被护栏拒绝的 key 不应有桶")
+	}
+
+	// 已登记 key 换桶：不受护栏影响（速率热更不被卡，契约「已登记 key 不受影响」）
+	if !kl.Replace("k1", NewTokenBucket(100, 100)) {
+		t.Fatal("已登记 key 的 Replace（换桶）应成功")
+	}
+	if got := kl.Len(); got != 2 {
+		t.Fatalf("换桶后 Len=%d, want 2", got)
+	}
+	tb, ok := kl.Get("k1").(*TokenBucket)
+	if !ok || tb.Burst() != 100 {
+		t.Fatalf("k1 应已换成 burst=100 的新桶，got %T", kl.Get("k1"))
+	}
+}
+
+// TestKeyedLimiter_AllowWithRetryAfter_SlidingWindowProbe 锁定 #246：文档承诺
+// 「wait 是下一个可用令牌的等待时长（不消耗令牌）」必须对最常见的 SlidingWindow
+// factory 形态成立——修复前滑窗没有 RetryAfter 方法，peekRetryAfter 恒回 0，
+// 429 + Retry-After: 0 直接引发重试风暴；「Reserve+Cancel 探测」分支是死代码
+// （*TokenBucket 本就实现 retryProber，永远走不到）。
+func TestKeyedLimiter_AllowWithRetryAfter_SlidingWindowProbe(t *testing.T) {
+	kl := NewKeyedLimiterOf[string](func() Limiter {
+		return NewSlidingWindow(time.Hour, 2)
+	})
+	defer kl.Close()
+
+	// 打满窗口
+	if !kl.Allow("k") || !kl.Allow("k") {
+		t.Fatal("前两笔应放行")
+	}
+
+	wait, ok := kl.AllowWithRetryAfter("k")
+	if ok {
+		t.Fatal("窗口满应拒绝")
+	}
+	if wait <= 0 {
+		t.Fatalf("滑窗拒绝的探测应返回真实等待（>0，下一个空位 = 最早一条滑出窗口），got %v", wait)
+	}
+
+	// 探测不消耗：再探仍应拒绝、账面不增（若探测消耗了配额，Count 会涨到 3
+	// 或窗口出现新槽位——两次真实时钟差仅 µs 级，等待时长比对不构成证据）
+	if _, ok := kl.AllowWithRetryAfter("k"); ok {
+		t.Fatal("探测不得消耗配额（第二次仍应拒绝）")
+	}
+	if n := kl.Allow("k"); n {
+		t.Fatal("探测不得消耗配额（第三次 Allow 仍应被拒）")
+	}
+	sw := kl.Get("k").(*SlidingWindow)
+	if n := sw.Count(); n != 2 {
+		t.Fatalf("两次探测后 Count=%d, want 2（探测不落账）", n)
+	}
+}
+
+// TestKeyedLimiter_AllowWithRetryAfter_NonProbingFallback 锁定 #246 的兜底面：
+// 自定义实现未提供 RetryAfter（不可探测）时，AllowWithRetryAfter 回退
+// WithOverCapRetryAfter 的保守建议而非 0——「不支持探测的实现返回 0」的旧口径
+// 会把 429 变成 Retry-After: 0 重试风暴。这里用一个包内自定义 Limiter 模拟。
+type nonProbingLimiter struct{ allow bool }
+
+func (l *nonProbingLimiter) Allow() bool                     { return l.allow }
+func (l *nonProbingLimiter) AllowN(n int) bool               { return l.allow }
+func (l *nonProbingLimiter) Reserve() (time.Duration, error) { return -1, ErrNotReservable }
+func (l *nonProbingLimiter) Wait(ctx context.Context) error  { return nil }
+
+func TestKeyedLimiter_AllowWithRetryAfter_NonProbingFallback(t *testing.T) {
+	kl := NewKeyedLimiterOf[string](func() Limiter {
+		return &nonProbingLimiter{allow: false}
+	}, WithOverCapRetryAfter[string](7*time.Second))
+	defer kl.Close()
+
+	wait, ok := kl.AllowWithRetryAfter("k")
+	if ok {
+		t.Fatal("恒拒实现应拒绝")
+	}
+	if wait != 7*time.Second {
+		t.Fatalf("不可探测实现应回退保守建议（WithOverCapRetryAfter=7s），got %v", wait)
 	}
 }

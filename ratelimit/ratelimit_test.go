@@ -1,6 +1,8 @@
 package ratelimit
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -41,13 +43,19 @@ func TestTokenBucket_Reserve(t *testing.T) {
 	tb := NewTokenBucket(10, 1)
 
 	// 第一个请求应该立即可用
-	d := tb.Reserve()
+	d, err := tb.Reserve()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
 	if d > 0 {
 		t.Errorf("expected 0 duration, got %v", d)
 	}
 
 	// 第二个请求需要等待
-	d = tb.Reserve()
+	d, err = tb.Reserve()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
 	if d <= 0 {
 		t.Error("expected positive duration for second request")
 	}
@@ -152,19 +160,19 @@ func TestKeyedLimiter_Delete(t *testing.T) {
 // 钉住：预留即消费，后续 Allow 看到槽位被占。
 func TestSlidingWindow_ReserveReservesSlot(t *testing.T) {
 	sw := NewSlidingWindow(time.Hour, 2) // 窗口内最多 2 个
-	if wait := sw.Reserve(); wait != 0 {
-		t.Fatalf("first Reserve should be immediate, got %v", wait)
+	if wait, err := sw.Reserve(); err != nil || wait != 0 {
+		t.Fatalf("first Reserve should be immediate, got (%v, %v)", wait, err)
 	}
-	if wait := sw.Reserve(); wait != 0 {
-		t.Fatalf("second Reserve should be immediate, got %v", wait)
+	if wait, err := sw.Reserve(); err != nil || wait != 0 {
+		t.Fatalf("second Reserve should be immediate, got (%v, %v)", wait, err)
 	}
 	// 槽位已占满：Allow 必须拒绝（旧实现 Reserve 不占槽，这里会错误放行）
 	if sw.Allow() {
 		t.Error("Allow after 2 Reserves should be false (slots consumed)")
 	}
 	// 第三次 Reserve 需要等待
-	if wait := sw.Reserve(); wait <= 0 {
-		t.Errorf("third Reserve should wait, got %v", wait)
+	if wait, err := sw.Reserve(); err != nil || wait <= 0 {
+		t.Errorf("third Reserve should wait, got (%v, %v)", wait, err)
 	}
 }
 
@@ -179,5 +187,56 @@ func TestSlidingWindow_AllowN_NonPositive(t *testing.T) {
 	}
 	if !sw.Allow() {
 		t.Error("negative n should not consume slots")
+	}
+}
+
+// TestLimiter_ReserveNotReservableSentinel 锁定 #248/#250：两个实现（TokenBucket /
+// SlidingWindow）对「不可预留」返回**同一规范哨兵** (−1, ErrNotReservable)，
+// errors.Is 可判定——消费方持 Limiter 接口（KeyedLimiter factory 的返回类型）写
+// 通用退避时，换实现不再静默失效。修复前 TokenBucket 回 time.Duration 最大值
+// （≈292 年，按 d<0 判拒绝的通用代码被判成「等 292 年」挂死）、SlidingWindow 回
+// 裸 -1（按最大值判拒绝的通用代码把 -1 当立即可用，紧循环锤击满窗限流器），
+// 接口契约零声明。
+func TestLimiter_ReserveNotReservableSentinel(t *testing.T) {
+	// TokenBucket：burst=0（1 个令牌超出 burst 上限——该请求永远等不到）
+	// SlidingWindow：在册预占订满整窗额度（maxCount=2：2 个立即放行 + 2 个预占
+	// 已达 cap，第 5 笔不可预留）
+	newLimiters := map[string]func() Limiter{
+		"TokenBucket/burst0": func() Limiter { return NewTokenBucket(10, 0) },
+		"SlidingWindow/full": func() Limiter { return NewSlidingWindow(time.Hour, 2) },
+	}
+
+	for name, newLimiter := range newLimiters {
+		t.Run(name, func(t *testing.T) {
+			l := newLimiter()
+			for i := 0; i < 4; i++ {
+				_, _ = l.Reserve() // 打到不可预留态（TokenBucket 第 1 笔即不可预留）
+			}
+
+			// 不可预留：规范哨兵，errors.Is 判定（不要比对魔法数值）
+			d, err := l.Reserve()
+			if !errors.Is(err, ErrNotReservable) {
+				t.Fatalf("%s 不可预留应返回 ErrNotReservable（errors.Is 可判定），got (%v, %v)", name, d, err)
+			}
+			if d != -1 {
+				t.Fatalf("%s 不可预留的占位时长应为 -1（非 0，防误读成「立即可用」），got %v", name, d)
+			}
+
+			// 哨兵可被 %w 包装穿透（消费方包装错误链后仍可判定）
+			wrapped := fmt.Errorf("retry budget exhausted: %w", err)
+			if !errors.Is(wrapped, ErrNotReservable) {
+				t.Fatalf("%s 包装后的错误链应仍可判定 ErrNotReservable", name)
+			}
+		})
+	}
+
+	// 成功路径不受影响：预留成功返回 (d>=0, nil)
+	tb := NewTokenBucket(10, 1)
+	if d, err := tb.Reserve(); err != nil || d != 0 {
+		t.Fatalf("TokenBucket 有桶时应 (0, nil)，got (%v, %v)", d, err)
+	}
+	sw := NewSlidingWindow(time.Hour, 1)
+	if d, err := sw.Reserve(); err != nil || d != 0 {
+		t.Fatalf("SlidingWindow 有空位时应 (0, nil)，got (%v, %v)", d, err)
 	}
 }

@@ -82,14 +82,18 @@ func (tb *TokenBucket) AllowN(n int) bool {
 	return tb.limiter.AllowN(tb.now(), n)
 }
 
-// Reserve 预留一个令牌，返回需要等待的时间。
-func (tb *TokenBucket) Reserve() time.Duration {
+// Reserve 预留一个令牌，返回需要等待的时间与错误。
+// 预留成功返回 (等待时长, nil)——0 表示立即可用；不可预留（1 个令牌超出 burst
+// 上限，含 burst=0——该请求永远等不到，重试也无用）返回 (-1, ErrNotReservable)，
+// 判定一律 errors.Is（#248/#250：此前回最大 duration ≈292 年，与 SlidingWindow
+// 的 -1 互斥、无契约）。同因失败在 WaitN 返回 ErrBurstTooSmall。
+func (tb *TokenBucket) Reserve() (time.Duration, error) {
 	now := tb.now()
 	r := tb.limiter.ReserveN(now, 1)
 	if r.OK() {
-		return r.DelayFrom(now)
+		return r.DelayFrom(now), nil
 	}
-	return time.Duration(1<<63 - 1) // 最大 duration，表示不可用
+	return -1, ErrNotReservable
 }
 
 // RetryAfter 探测下一个可用令牌的等待时长，不消耗令牌（Reserve→Delay→Cancel，
