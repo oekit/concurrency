@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/oekit/concurrency/async"
+	"github.com/oekit/concurrency/internal/ticker"
 )
 
 // idleExitRounds 后台循环连续空闲多少个 interval 后自退出（下次 Add 重新
@@ -26,13 +27,12 @@ type TaskContainer interface {
 }
 
 // Ticker 周期信号源抽象。注入手动实现即可确定性地驱动批量时序测试。
-type Ticker interface {
-	C() <-chan time.Time
-	Stop()
-}
+// 实现单源在 internal/ticker（#264，与 timewheel 共用），此处类型别名转发
+// 保既有导入面零破坏。
+type Ticker = ticker.Ticker
 
 // TickerFactory 按给定间隔构造 Ticker。
-type TickerFactory func(d time.Duration) Ticker
+type TickerFactory = ticker.TickerFactory
 
 // BatchOption 攒批执行器的可选参数。
 type BatchOption func(*batchOptions)
@@ -250,12 +250,7 @@ func runSafe(c TaskContainer, tasks []any) {
 	async.RunSafe(func() { c.Execute(tasks) })
 }
 
-// defaultTickerFactory 标准库 time.Ticker 适配。
+// defaultTickerFactory 标准库 time.Ticker 适配（internal/ticker 单源，#264）。
 func defaultTickerFactory(d time.Duration) Ticker {
-	t := time.NewTicker(d)
-	return tickerAdapter{t}
+	return ticker.New(d)
 }
-
-type tickerAdapter struct{ *time.Ticker }
-
-func (a tickerAdapter) C() <-chan time.Time { return a.Ticker.C }

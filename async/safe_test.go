@@ -296,3 +296,29 @@ func TestTaskFromContext(t *testing.T) {
 		t.Fatalf("空 task 不应注入标签，得到 %q", got)
 	}
 }
+
+// TestGoSafeWithErrChannel_PanicSendsPanicError #268 回归：panic 分支发送
+// 统一收编载体 *PanicError（携带栈、errors.As 可辨），消费方
+// （group.WaitGroupWrapper 的错误通道）能 errors.As 辨「panic 失败」——
+// 此前裸 fmt.Errorf("panic: %v") 把 error 身份拍平成纯文本，与同文件其余
+// 收编点口径分裂。
+func TestGoSafeWithErrChannel_PanicSendsPanicError(t *testing.T) {
+	sentinel := errors.New("boom-identity")
+	ch := make(chan error, 1)
+	GoSafeWithErrChannel(ch, func() error { panic(sentinel) })
+	select {
+	case err := <-ch:
+		var pe *PanicError
+		if !errors.As(err, &pe) {
+			t.Fatalf("panic 分支应发送 *PanicError，得到 %T: %v", err, err)
+		}
+		if !errors.Is(err, sentinel) { // #267 起 error 身份经 Unwrap 全链透传
+			t.Fatalf("error 身份应经 Unwrap 透传: %v", err)
+		}
+		if len(pe.Stack) == 0 {
+			t.Fatal("PanicError 应携带栈")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("panic 结果未送达 channel")
+	}
+}

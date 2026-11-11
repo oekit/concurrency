@@ -37,15 +37,10 @@ import (
 //	    log.ErrorContext(ctx, "事件处理 panic", "panic", pe.Value) // 带 ctx 记日志
 //	}
 func RunSafeCtx(ctx context.Context, fn func(context.Context)) (panicErr error) {
-	defer func() {
-		if r := recover(); r != nil {
-			pe := newPanicError("", r)
-			callPanicHandler(ctx, r, pe.Stack)
-			panicErr = pe
-		}
-	}()
-	fn(ctx)
-	return nil
+	if pe := guarded(globalReport(ctx, ""), func() { fn(ctx) }); pe != nil {
+		panicErr = pe
+	}
+	return panicErr
 }
 
 // RunSafeCtxRet 同 RunSafeCtx，但 fn 带返回值——panic 时返回零值与 *PanicError。
@@ -54,12 +49,8 @@ func RunSafeCtx(ctx context.Context, fn func(context.Context)) (panicErr error) 
 // 合成一个会让「只要收编不要值」的调用点被迫写泛型实参。语义与 RunSafeRet 同款，
 // 只多了 ctx 透传与「panic 也向全局汇报」。
 func RunSafeCtxRet[T any](ctx context.Context, fn func(context.Context) (T, error)) (val T, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			pe := newPanicError("", r)
-			callPanicHandler(ctx, r, pe.Stack)
-			err = pe
-		}
-	}()
-	return fn(ctx)
+	if pe := guarded(globalReport(ctx, ""), func() { val, err = fn(ctx) }); pe != nil {
+		err = pe
+	}
+	return
 }

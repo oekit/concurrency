@@ -86,3 +86,52 @@ func TestDisableBackgroundSignalHandling(t *testing.T) {
 		t.Fatal("opt-out 后不应再注册信号（stop 应为 nil）")
 	}
 }
+
+// TestSignalWatcherExitsOnOptOut #270 回归：opt-out 后信号观察 goroutine 有
+// 退出路径——stopCh 关闭后 watchProcessSignals 返回，不再永久阻塞在 select
+// （此前 ctx 无人取消、ch 永不关闭，注册过一次的进程泄漏一个 goroutine）。
+// ① 单元面：watchProcessSignals 对 stopCh 的直接响应（不依赖进程级 Once
+// 状态）+ 信号路径回归防护（退出路径不得遮蔽信号路径）；
+// ② 集成面：DisableBackgroundSignalHandling 后进程级观察 goroutine 退出
+// （procSignalWatchDone 为 nil 说明注册分支从未建立，跳过）。
+func TestSignalWatcherExitsOnOptOut(t *testing.T) {
+	// ① stopCh 关闭即退出，且不取消 ctx（#218 语义：已启动循环继续存活）
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	stopCh := make(chan struct{})
+	done := watchProcessSignals(ctx, cancel, ch, stopCh)
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("opt-out 后观察 goroutine 未退出（泄漏，#270）")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("opt-out 退出路径不应取消 ctx（已启动循环必须存活，#218）")
+	}
+
+	// 信号路径仍取消 ctx（回归防护）
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	ch2 := make(chan os.Signal, 1)
+	done2 := watchProcessSignals(ctx2, cancel2, ch2, make(chan struct{}))
+	ch2 <- syscall.SIGTERM
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("信号路径未触发退出")
+	}
+	if ctx2.Err() == nil {
+		t.Fatal("信号应取消 ctx")
+	}
+
+	// ② 进程级：注册已发生（前置用例触发过 processContext）则 Disable 后
+	// 观察 goroutine 退出
+	DisableBackgroundSignalHandling()
+	if procSignalWatchDone != nil {
+		select {
+		case <-procSignalWatchDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Disable 后进程级观察 goroutine 未退出（泄漏，#270）")
+		}
+	}
+}

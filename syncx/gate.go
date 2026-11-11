@@ -5,6 +5,22 @@ import (
 	"sync/atomic"
 )
 
+// idempotentRelease 把「取名额成功的归还动作」包成幂等 release（#263：Gate 与
+// KeyedGate 的 Acquire/TryAcquire 四处唯一实现）。幂等标记用 atomic.Bool +
+// CompareAndSwap：裸 bool 在两个 goroutine 并发调用同一个 release 时是 data
+// race，且两者都可能读到「未归还」而各执行一次 <-ch——名额被归还两次，在飞
+// 数突破 cap 上限（cap=1 时可同时有 2 个在飞）。按 key 分档位的闸门正是最
+// 容易被并发释放的场景（超时清理路径与正常返回路径同时释放同一个 key）。
+func idempotentRelease(release func()) func() {
+	var released atomic.Bool
+	return func() {
+		if !released.CompareAndSwap(false, true) {
+			return
+		}
+		release()
+	}
+}
+
 // Gate 是**全局在飞上限闸门**：整个实例最多 cap 个在飞，排队者等 ctx 取消
 // 即返回 ctx.Err()。与 KeyedGate 的区别：Gate 是单一全局配额（不分 key），
 // KeyedGate 按 key 分档位（按模型名/租户名分别限流）。
@@ -42,7 +58,8 @@ func NewGate(cap int) *Gate {
 }
 
 // Acquire 取一个在飞名额；ctx 取消（排队等待中）返回 ctx.Err()。
-// 返回的 release 归还名额，幂等可重复调用。
+// 返回的 release 归还名额，幂等可重复调用（atomic CAS 实现，见
+// idempotentRelease——同包 KeyedGate 同款）。
 //
 // ctx 为 nil 时按 context.Background() 处理（永不取消）。
 func (g *Gate) Acquire(ctx context.Context) (func(), error) {
@@ -54,13 +71,7 @@ func (g *Gate) Acquire(ctx context.Context) (func(), error) {
 	}
 	select {
 	case g.sem <- struct{}{}:
-		var released atomic.Bool
-		return func() {
-			if !released.CompareAndSwap(false, true) {
-				return
-			}
-			<-g.sem
-		}, nil
+		return idempotentRelease(func() { <-g.sem }), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -97,13 +108,7 @@ func (g *Gate) TryAcquire() (release func(), ok bool) {
 	}
 	select {
 	case g.sem <- struct{}{}:
-		var released atomic.Bool
-		return func() {
-			if !released.CompareAndSwap(false, true) {
-				return
-			}
-			<-g.sem
-		}, true
+		return idempotentRelease(func() { <-g.sem }), true
 	default:
 		return nil, false
 	}

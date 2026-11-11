@@ -789,3 +789,52 @@ func TestAttemptsBoundedSemanticsUnchanged(t *testing.T) {
 		t.Fatalf("负值 Attempts 应多次重试，实际 %d", calls)
 	}
 }
+
+// TestSleepCtx_CancelPrompt #272 回归：等待原语 NewTimer+Stop——ctx 提前取消
+// 即时返回 ctx.Err()（不再依赖 select 的「恰好在等」路径），且 timer 立即
+// Stop 释放；正常路径等满 d 返回 nil。
+func TestSleepCtx_CancelPrompt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if err := sleepCtx(ctx, 10*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消路径应返回 context.Canceled，got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("取消应即时返回（耗时 %v）", elapsed)
+	}
+	if err := sleepCtx(context.Background(), time.Millisecond); err != nil {
+		t.Fatalf("正常路径不应有错，got %v", err)
+	}
+}
+
+// TestDoValue_CancelDuringBackoffReleasesTimer #272 行为面回归：退避等待期间
+// 取消立即返回（此前 time.After 写法下 timer 挂到 delay 才释放、每轮新分配）。
+// 连续多轮短退避 + 中途取消，验证语义与及时性；-race 下同时压 timer 生命周期。
+func TestDoValue_CancelDuringBackoffReleasesTimer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	start := time.Now()
+	_, err := DoValue(ctx, Config{
+		Attempts: UnboundedAttempts,
+		Delay:    20 * time.Millisecond,
+	}, func(int) (struct{}, error) {
+		attempts++
+		if attempts == 3 {
+			cancel()
+		}
+		return struct{}{}, errors.New("always fail")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消后应返回 context.Canceled，got %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("取消后不应再启动新一轮（attempts=%d）", attempts)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("取消应即时打断退避等待（耗时 %v）", elapsed)
+	}
+}

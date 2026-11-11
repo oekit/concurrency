@@ -104,15 +104,37 @@ func Run(ctx context.Context, cfg Config, fn func(ctx context.Context)) *Loop {
 // procCtxOnce/procCtx/procCtxStop 为 RunBackground 惰性创建的进程级 ctx：
 // SIGINT/SIGTERM 到达时取消，全部 RunBackground 循环共享。procCtxStop 为
 // 信号注册的撤销函数（未安装时 nil），供 DisableBackgroundSignalHandling
-// 恢复进程默认信号行为。
+// 恢复进程默认信号行为。procSignalWatchDone 为信号观察 goroutine 的退出
+// 信号（#270）：opt-out 关停注册后关闭，观察 goroutine 经此分支退出——
+// 此前它永久阻塞在 select 上（ctx 无人取消、ch 永不关闭），每次进程泄漏
+// 一个 goroutine；测试借它断言泄漏已修。
 var (
-	procCtxOnce sync.Once
-	procCtx     context.Context
-	procCtxStop func()
+	procCtxOnce         sync.Once
+	procCtx             context.Context
+	procCtxStop         func()
+	procSignalWatchDone <-chan struct{}
 )
 
 // signalHandlingDisabled 为 DisableBackgroundSignalHandling 的进程级开关（#218）。
 var signalHandlingDisabled atomic.Bool
+
+// watchProcessSignals 观察进程信号并取消 ctx（#270 拆出的独立单元，可测）：
+// 信号到达取消 ctx；stopCh 关闭（opt-out）则经该分支退出——不 cancel（
+// 已启动的循环必须继续存活，#218 的语义钉点）。返回退出信号供测试断言
+// goroutine 真正退出。
+func watchProcessSignals(ctx context.Context, cancel context.CancelFunc, ch <-chan os.Signal, stopCh <-chan struct{}) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ch:
+			cancel()
+		case <-ctx.Done():
+		case <-stopCh:
+		}
+	}()
+	return done
+}
 
 // processSignalContext 按当前 opt-out 状态构造 RunBackground 的进程级 ctx：
 // opt-out 时为永不取消的 Background（不注册任何信号）；否则注册
@@ -124,19 +146,22 @@ func processSignalContext() (context.Context, func()) {
 	// 不用 signal.NotifyContext：其 stop 在撤销注册之外还会**连带 cancel ctx**
 	// （stdlib 语义——「这个 ctx 用完了」）。opt-out 的「恢复默认终止行为」
 	// 恰恰相反：已启动的循环必须继续存活（只是从此不再有任何信号可等），
-	// 故手动组装注册与取消，stop 只做 signal.Stop（#218）。
+	// 故手动组装注册与取消，stop 只做 signal.Stop（#218）——观察 goroutine
+	// 的退出走 stopCh（#270），不 cancel。
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		select {
-		case <-ch:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	stopCh := make(chan struct{})
+	procSignalWatchDone = watchProcessSignals(ctx, cancel, ch, stopCh)
+	var stopOnce sync.Once
 	return ctx, func() {
-		signal.Stop(ch) // 撤销注册：进程默认终止行为恢复（幂等；不取消 ctx）
+		// 撤销注册：进程默认终止行为恢复（signal.Stop 幂等）+ 观察 goroutine
+		// 退出（stopCh 关闭一次；DisableBackgroundSignalHandling 可重复调用，
+		// stopOnce 保 close 幂等——#270）
+		stopOnce.Do(func() {
+			signal.Stop(ch)
+			close(stopCh)
+		})
 	}
 }
 

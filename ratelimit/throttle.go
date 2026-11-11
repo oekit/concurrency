@@ -47,6 +47,9 @@ type Throttle[K comparable] struct {
 	mu         sync.Mutex
 	seen       map[K]time.Time
 	suppressed atomic.Uint64
+	// lastSweep 上次写路径顺手清扫的时刻（锁内维护）：每窗口至多一次的
+	// 摊还预算，防止高频 Do 反复全表扫描（#271）。
+	lastSweep time.Time
 }
 
 // ThrottleOption 配置 Throttle。
@@ -113,6 +116,18 @@ func (t *Throttle[K]) Do(ctx context.Context, key K, fn func(context.Context) er
 		t.mu.Unlock()
 		t.suppressed.Add(1)
 		return false, nil
+	}
+	// #271：写路径顺手清扫（每窗口至多一次，摊还 O(1)）——历史 key（实体
+	// 删除/换名后不再回来）的最后一枚戳不再永久滞留，缺省 max=0 档的记账
+	// 面从「随历史 key 基数无界增长」收敛到「一个窗口内的活跃 key 量级」。
+	// 只删已过期条目：它们对抑制判定本就无效（窗口判定恒放行），语义零变化。
+	if stamp.Sub(t.lastSweep) >= t.window {
+		for k, v := range t.seen {
+			if stamp.Sub(v) >= t.window {
+				delete(t.seen, k)
+			}
+		}
+		t.lastSweep = stamp
 	}
 	t.seen[key] = stamp
 	t.evictLocked(stamp)
@@ -188,8 +203,10 @@ func (t *Throttle[K]) Forget(key K) {
 // Sweep 回收已过期条目并返回回收条数。归零口径与 Do 的窗口判定一致
 // （stamp.Sub(last) >= window 即过期）。
 //
-// 不内置后台清扫 goroutine：写节流的 key 基数通常是「活跃实体数」量级，
-// 且 WithThrottleMaxEntries 已在写入路径上兜住容量。需要主动归零时调本方法。
+// 不内置后台清扫 goroutine：写路径已带每窗口至多一次的顺手清扫（#271，
+// 只要有任意 key 的 Do 持续到达，历史 key 的僵尸戳就会被回收），记账面
+// 收敛到一个窗口内的活跃 key 量级。需要立刻归零（如长间隔批量任务前）
+// 时调本方法。
 func (t *Throttle[K]) Sweep() int {
 	stamp := t.now()
 	t.mu.Lock()
