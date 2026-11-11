@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/oekit/concurrency/async"
+	"github.com/oekit/concurrency/internal/ticker"
 )
 
 // opKind 事件类型。
@@ -37,15 +38,13 @@ type opEvent struct {
 	resp  chan bool // opHas 应答（cap 1）
 }
 
-// Ticker 周期信号源抽象（与 batch.Ticker 同形；各自独立定义避免子包耦合），
-// 注入手动实现即可确定性地驱动时序测试。
-type Ticker interface {
-	C() <-chan time.Time
-	Stop()
-}
+// Ticker 周期信号源抽象，注入手动实现即可确定性地驱动时序测试。
+// 实现单源在 internal/ticker（#264，与 batch 共用），此处类型别名转发，
+// 既有导入面零破坏。
+type Ticker = ticker.Ticker
 
 // TickerFactory 按给定间隔构造 Ticker。
-type TickerFactory func(d time.Duration) Ticker
+type TickerFactory = ticker.TickerFactory
 
 // WheelOption 时间轮的可选参数。
 type WheelOption func(*wheelOptions)
@@ -308,12 +307,7 @@ func (tw *TimingWheel) removeLocked(key any) {
 	}
 }
 
-// defaultTickerFactory 标准库 time.Ticker 适配。
+// defaultTickerFactory 标准库 time.Ticker 适配（internal/ticker 单源，#264）。
 func defaultTickerFactory(d time.Duration) Ticker {
-	t := time.NewTicker(d)
-	return tickerAdapter{t}
+	return ticker.New(d)
 }
-
-type tickerAdapter struct{ *time.Ticker }
-
-func (a tickerAdapter) C() <-chan time.Time { return a.Ticker.C }

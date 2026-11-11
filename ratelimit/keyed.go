@@ -266,6 +266,49 @@ func (kl *KeyedLimiterOf[K]) reportEvicts(evicted []evictedEntry[K]) {
 	}
 }
 
+// —— 登记入口护栏+安装单源（#260）——
+//
+// Get / Replace / ReplaceIfChanged / AllowWithRate / Create 五个登记入口的
+// 「容量护栏 + 条目安装」块收敛为 installLocked（Get 的「护栏过后再调
+// factory」序列拆用 guardLocked + installEntryLocked 两段）——allowNew/
+// overCapHits/lastSeen/map 写入从 5 处人肉同步收敛到 1 处，#252「四个登记
+// 入口的护栏必须一视同仁」的不变量由构造保证。
+
+// guardLocked 容量护栏（调用方已持写锁）：表满先回收空闲条目（同 Allow 建
+// 桶路径的 sweep-on-pressure），仍满拒绝并计一次 OverCapHits。返回 false =
+// 拒绝登记；evicted 交调用方锁外回调（回收路径统一收集、回调不允许在锁内
+// 触发——消费方回调里重入本管理器是合理需求，#142）。
+func (kl *KeyedLimiterOf[K]) guardLocked(now time.Time, evicted *[]evictedEntry[K]) bool {
+	if !kl.allowNew(now, evicted) {
+		kl.overCapHits.Add(1)
+		return false
+	}
+	return true
+}
+
+// installEntryLocked 构造条目并安装（调用方已持写锁）：lastSeen 置现在。
+func (kl *KeyedLimiterOf[K]) installEntryLocked(key K, l Limiter, rate int64, hasRate bool) *limiterEntry {
+	entry := &limiterEntry{limiter: l, rate: rate, hasRate: hasRate}
+	entry.lastSeen.Store(time.Now().UnixNano())
+	kl.limiters[key] = entry
+	return entry
+}
+
+// installLocked 容量护栏 + 条目安装（调用方已持写锁；#260 唯一实现块）。
+// key 未登记时先过护栏（表满回收空闲、仍满拒绝计 OverCapHits），已登记直接
+// 安装——覆盖语义（Replace 热更）与「已存在拒绝/元数据比对」（Create/
+// ReplaceIfChanged/AllowWithRate）由调用方先行判定后才走到这里。
+// ok=false = 护栏拒绝（不安装）；evicted 交调用方锁外 reportEvicts。
+func (kl *KeyedLimiterOf[K]) installLocked(key K, l Limiter, rate int64, hasRate bool) (ok bool, evicted []evictedEntry[K]) {
+	if _, exists := kl.limiters[key]; !exists {
+		if !kl.guardLocked(time.Now(), &evicted) {
+			return false, evicted
+		}
+	}
+	kl.installEntryLocked(key, l, rate, hasRate)
+	return true, evicted
+}
+
 // Get 获取指定 key 的限流器。以下两种情形返回 nil：
 //   - 表满且 key 未登记（容量护栏拒绝，OverCapHits 计数）；
 //   - factory 对该 key 返回 nil（#134）——此时**不登记**条目，对齐 Create/Replace
@@ -289,8 +332,7 @@ func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
 		return cur.limiter
 	}
 	var evicted []evictedEntry[K]
-	if !kl.allowNew(time.Now(), &evicted) {
-		kl.overCapHits.Add(1)
+	if !kl.guardLocked(time.Now(), &evicted) {
 		kl.mu.Unlock()
 		kl.reportEvicts(evicted) // 拒绝路径的回收也要可观测
 		return nil
@@ -302,9 +344,7 @@ func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
 		kl.reportEvicts(evicted)
 		return nil
 	}
-	entry = &limiterEntry{limiter: limiter}
-	entry.lastSeen.Store(time.Now().UnixNano())
-	kl.limiters[key] = entry
+	entry = kl.installEntryLocked(key, limiter, 0, false)
 	kl.mu.Unlock()
 	kl.reportEvicts(evicted)
 	return entry.limiter
@@ -371,22 +411,10 @@ func (kl *KeyedLimiterOf[K]) Replace(key K, l Limiter) bool {
 		return false
 	}
 	kl.mu.Lock()
-	_, exists := kl.limiters[key]
-	var evicted []evictedEntry[K]
-	if !exists {
-		if !kl.allowNew(time.Now(), &evicted) {
-			kl.overCapHits.Add(1)
-			kl.mu.Unlock()
-			kl.reportEvicts(evicted) // 拒绝路径的回收也要可观测，且回调在锁外
-			return false
-		}
-	}
-	entry := &limiterEntry{limiter: l}
-	entry.lastSeen.Store(time.Now().UnixNano())
-	kl.limiters[key] = entry
+	ok, evicted := kl.installLocked(key, l, 0, false)
 	kl.mu.Unlock()
-	kl.reportEvicts(evicted) // 回调在锁外（消费方可重入本管理器，#142）
-	return true
+	kl.reportEvicts(evicted) // 回调在锁外（消费方可重入本管理器，#142）；拒绝路径的回收也要可观测
+	return ok
 }
 
 // ReplaceIfChanged 带速率元数据的热更登记（#141）：以库内登记的元数据为事实
@@ -418,21 +446,10 @@ func (kl *KeyedLimiterOf[K]) ReplaceIfChanged(key K, rate int64, l Limiter) bool
 		kl.mu.Unlock()
 		return false
 	}
-	var evicted []evictedEntry[K]
-	if _, exists := kl.limiters[key]; !exists {
-		if !kl.allowNew(time.Now(), &evicted) {
-			kl.overCapHits.Add(1)
-			kl.mu.Unlock()
-			kl.reportEvicts(evicted)
-			return false
-		}
-	}
-	entry := &limiterEntry{limiter: l, rate: rate, hasRate: true}
-	entry.lastSeen.Store(time.Now().UnixNano())
-	kl.limiters[key] = entry
+	ok, evicted := kl.installLocked(key, l, rate, true)
 	kl.mu.Unlock()
 	kl.reportEvicts(evicted)
-	return true
+	return ok
 }
 
 // AllowWithRate 带速率热更的 Allow（#141，热更消费方的正解入口）：每次调用传入
@@ -478,25 +495,17 @@ func (kl *KeyedLimiterOf[K]) AllowWithRate(key K, rate int64, newBucket func() L
 		return false
 	}
 	kl.mu.Lock()
-	if cur, ok := kl.limiters[key]; ok && cur.hasRate && cur.rate == rate {
+	if cur, hit := kl.limiters[key]; hit && cur.hasRate && cur.rate == rate {
 		cur.lastSeen.Store(time.Now().UnixNano())
 		kl.mu.Unlock()
 		return cur.limiter.Allow() // 竞态方已装好同速率桶，白建的那只丢弃
 	}
-	var evicted []evictedEntry[K]
-	if _, exists := kl.limiters[key]; !exists {
-		if !kl.allowNew(time.Now(), &evicted) {
-			kl.overCapHits.Add(1)
-			kl.mu.Unlock()
-			kl.reportEvicts(evicted)
-			return false
-		}
-	}
-	entry = &limiterEntry{limiter: l, rate: rate, hasRate: true}
-	entry.lastSeen.Store(time.Now().UnixNano())
-	kl.limiters[key] = entry
+	ok, evicted := kl.installLocked(key, l, rate, true)
 	kl.mu.Unlock()
 	kl.reportEvicts(evicted)
+	if !ok {
+		return false
+	}
 	return l.Allow()
 }
 
@@ -531,19 +540,10 @@ func (kl *KeyedLimiterOf[K]) Create(key K, l Limiter) bool {
 		kl.mu.Unlock()
 		return false
 	}
-	var evicted []evictedEntry[K]
-	if !kl.allowNew(time.Now(), &evicted) {
-		kl.overCapHits.Add(1)
-		kl.mu.Unlock()
-		kl.reportEvicts(evicted)
-		return false
-	}
-	entry := &limiterEntry{limiter: l}
-	entry.lastSeen.Store(time.Now().UnixNano())
-	kl.limiters[key] = entry
+	ok, evicted := kl.installLocked(key, l, 0, false)
 	kl.mu.Unlock()
 	kl.reportEvicts(evicted)
-	return true
+	return ok
 }
 
 // Delete 删除指定 key 的限流器。

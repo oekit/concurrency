@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -294,4 +295,73 @@ func TestThrottle_SlowFnDoesNotBlockOtherKeys(t *testing.T) {
 
 	close(release)
 	<-slowDone
+}
+
+// TestThrottle_ZombieEntriesReapedOnWrite #271 回归：历史 key（实体删除/换名
+// 后不再回来）的最后一枚戳不再永久滞留——写路径每窗口至多一次的顺手清扫把
+// 已过期条目回收，缺省 max=0 档的记账面收敛到「一个窗口内的活跃 key 量级」。
+func TestThrottle_ZombieEntriesReapedOnWrite(t *testing.T) {
+	clock := &fakeLockClock{t: throttleStart}
+	th := newTestThrottle[string](time.Minute, clock)
+
+	nop := func(context.Context) error { return nil }
+	// 一批只来一次的 key（churn 形态：实体删除/换名后不再回来）
+	for i := 0; i < 50; i++ {
+		if _, err := th.Do(context.Background(), fmt.Sprintf("gone-%d", i), nop); err != nil {
+			t.Fatalf("Do 返回错误: %v", err)
+		}
+	}
+	if got := th.Len(); got != 50 {
+		t.Fatalf("窗口内条目应为 50，got %d", got)
+	}
+
+	// 跨过一个窗口后任一 key 再来：顺手清扫应回收全部僵尸戳
+	clock.Advance(2 * time.Minute)
+	if _, err := th.Do(context.Background(), "alive", nop); err != nil {
+		t.Fatalf("Do 返回错误: %v", err)
+	}
+	if got := th.Len(); got != 1 {
+		t.Fatalf("顺手清扫后应只剩活跃 key（got %d，want 1）", got)
+	}
+
+	// 同窗口内继续写入不再触发清扫（摊还预算）：新 key 正常记账
+	for i := 0; i < 10; i++ {
+		if _, err := th.Do(context.Background(), fmt.Sprintf("fresh-%d", i), nop); err != nil {
+			t.Fatalf("Do 返回错误: %v", err)
+		}
+	}
+	if got := th.Len(); got != 11 {
+		t.Fatalf("同窗口写入应全部记账（got %d，want 11）", got)
+	}
+}
+
+// TestThrottle_ZombieSweepNotAffectSuppression 顺手清扫只删已过期条目——
+// 窗口内仍有效的戳不得被误删（抑制判定与 Suppressed 计数不受影响）。
+func TestThrottle_ZombieSweepNotAffectSuppression(t *testing.T) {
+	clock := &fakeLockClock{t: throttleStart}
+	th := newTestThrottle[string](time.Minute, clock)
+
+	nop := func(context.Context) error { return nil }
+	if _, err := th.Do(context.Background(), "old", nop); err != nil {
+		t.Fatalf("Do 返回错误: %v", err)
+	}
+	clock.Advance(30 * time.Second)
+	if _, err := th.Do(context.Background(), "live", nop); err != nil {
+		t.Fatalf("Do 返回错误: %v", err)
+	}
+
+	// old 已过期（30s 前的戳，窗口 1m——恰好未过期？不：old 在 0s，live 在 30s，
+	// old 的戳距现在 30s < 1m，仍有效）；推进到 old 过期、live 仍有效的时点
+	clock.Advance(40 * time.Second) // now=70s：old(0s) 已过期，live(30s) 距今 40s 仍有效
+	if _, err := th.Do(context.Background(), "trigger", nop); err != nil {
+		t.Fatalf("Do 返回错误: %v", err)
+	}
+	if got := th.Len(); got != 2 {
+		t.Fatalf("live 的有效戳不得被清扫（got %d，want 2=live+trigger）", got)
+	}
+	// live 仍在窗口内：抑制
+	ran, err := th.Do(context.Background(), "live", nop)
+	if err != nil || ran {
+		t.Fatalf("live 应被抑制（ran=%v err=%v）", ran, err)
+	}
 }

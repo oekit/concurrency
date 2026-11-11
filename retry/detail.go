@@ -8,10 +8,10 @@ import (
 // DetailError 是「错误 + 失败伴生数据」的容器（#138）。
 //
 // DoValue 的契约是「失败恒返零值」——防止调用方误用未成功的产物。但诊断/分类/
-// 审计场景确实需要与失败伴生的中间结果（HTTP 状态码、响应体摘要、耗时），硬迁
-// DoValueLast 会打破零值契约。正解是让 fn 把伴生数据**打包进 error**：error 本来
-// 就是失败信息的唯一合法出口，DoValue 返回 lastErr 时伴生数据随之送达，零值契约
-// 一字不动。
+// 审计场景确实需要与失败伴生的中间结果（HTTP 状态码、响应体摘要、耗时），硬把
+// 伴生数据做成 DoValue 的失败伴生返回值会打破零值契约。正解是让 fn 把伴生数据
+// **打包进 error**：error 本来就是失败信息的唯一合法出口，DoValue 返回 lastErr
+// 时伴生数据随之送达，零值契约一字不动。
 //
 //	typical（octopus sendWithRetry 形态）：
 //	res, err := retry.DoValue(ctx, cfg, func(attempt int) (*SendResult, error) {

@@ -224,16 +224,13 @@ func (s *Supervision) run(ctx context.Context, cfg superviseConfig, loop func(ct
 }
 
 // round 执行一轮：loop 的 panic 收编为 *PanicError（同 RunSafeErr，但汇报的
-// ctx 携带 task 标签），业务错误原样透传。
-func (s *Supervision) round(ctx context.Context, task string, loop func(ctx context.Context) error) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			pe := newPanicError(task, r)
-			callPanicHandler(withTask(ctx, task), r, pe.Stack)
-			err = pe
-		}
-	}()
-	return loop(ctx)
+// ctx 携带 task 标签），业务错误原样透传。收编骨架走 guarded 单源（#261）。
+func (s *Supervision) round(ctx context.Context, task string, loop func(ctx context.Context) error) error {
+	var loopErr error
+	if pe := guarded(globalReport(ctx, task), func() { loopErr = loop(ctx) }); pe != nil {
+		return pe
+	}
+	return loopErr
 }
 
 func (s *Supervision) setErr(err error) {

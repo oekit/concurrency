@@ -139,11 +139,9 @@ func DoValue[T any](ctx context.Context, cfg Config, fn func(attempt int) (T, er
 		if delay <= 0 {
 			continue
 		}
-		select {
-		case <-ctx.Done():
+		if err := sleepCtx(ctx, delay); err != nil {
 			var zero T
-			return zero, ctx.Err()
-		case <-time.After(delay):
+			return zero, err
 		}
 	}
 	var zero T
@@ -369,10 +367,23 @@ func Poll(ctx context.Context, interval, timeout time.Duration, cond func() (boo
 		if !time.Now().Before(deadline) {
 			return ErrTimeout
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
+		if err := sleepCtx(ctx, interval); err != nil {
+			return err
 		}
+	}
+}
+
+// sleepCtx 可取消的定时等待（#272 包内唯一等待原语）：NewTimer+Stop——
+// ctx 提前退出时即时停表释放 timer（time.After 的 timer 会挂到 delay 到期
+// 才释放，无界重试档长跑下每轮遗留一个、且每轮新分配）。DoValue 的退避等待
+// 与 Poll 的轮询间隔共用本实现，等待原语不再有两份写法。
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }

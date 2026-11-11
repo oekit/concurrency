@@ -1,8 +1,8 @@
 module github.com/oekit/concurrency
 
-go 1.24.0
+go 1.26.0
 
 require (
-	github.com/oekit/pkg v0.44.0
+	github.com/oekit/pkg v0.45.0
 	golang.org/x/time v0.14.0
 )

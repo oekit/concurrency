@@ -48,20 +48,16 @@ func Spawn[T any](ctx context.Context, task string, fn func(ctx context.Context)
 	bg := DetachedContext(ctx)
 	h := &Handle[T]{done: make(chan struct{})}
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// 收编口径对齐 RunSafeRetLabeled（panic → *PanicError 进结果），
-				// 但汇报 ctx 透传富化后的后台 ctx（GoDetached 同款，#184）。
-				pe := newPanicError(task, r)
-				callPanicHandler(withTask(bg, task), r, pe.Stack)
-				h.err = pe
-			}
-			// done 的 close 是结果字段的发布点：val/err 的全部写入都发生在
-			// 本 defer 前，等待方经 <-done 获得可见性（channel close 的
-			// happens-before），无需额外锁。
-			close(h.done)
-		}()
-		h.val, h.err = fn(bg)
+		// done 的 close 是结果字段的发布点：val/err 的全部写入都发生在
+		// 本 defer 前，等待方经 <-done 获得可见性（channel close 的
+		// happens-before），无需额外锁。
+		defer close(h.done)
+		// 收编口径对齐 RunSafeRetLabeled（panic → *PanicError 进结果），
+		// 但汇报 ctx 透传富化后的后台 ctx（GoDetached 同款，#184）。
+		// 收编骨架走 guarded 单源（#261）。
+		if pe := guarded(globalReport(bg, task), func() { h.val, h.err = fn(bg) }); pe != nil {
+			h.err = pe
+		}
 	}()
 	return h
 }

@@ -124,25 +124,32 @@ func (t *Tracker) UpdatePhase(name string, status PhaseStatus, progress float64)
 		}
 	}
 
-	// 自动完成之前的阶段（#247：失败阶段保留失败痕迹——与 Complete() 同口径。
-	// 流程「Fail 后继续跑收尾阶段」时，自动完成循环不得把失败抹成 Completed/100，
-	// 否则进度条与 GetOverallProgress 系统性谎报 100% 成功）
+	// 自动完成之前的阶段（#247/#193 的「失败终态不可抹」语义由
+	// completePhaseLocked 单点维持——#265 起与 Complete 共用同一回写实现）
 	for i := 0; i < idx; i++ {
-		if t.phases[i].Status == PhaseFailed {
-			continue
-		}
-		if t.phases[i].Status != PhaseCompleted && t.phases[i].Status != PhaseSkipped {
-			t.phases[i].Status = PhaseCompleted
-			t.phases[i].Progress = 100
-			if t.phases[i].StartTime.IsZero() {
-				t.phases[i].StartTime = now
-			}
-			t.phases[i].EndTime = now
-			if !t.phases[i].StartTime.IsZero() {
-				t.phases[i].Duration = now.Sub(t.phases[i].StartTime).Milliseconds()
-			}
-		}
+		t.completePhaseLocked(i, now)
 	}
+}
+
+// completePhaseLocked 把 phases[i] 完结为 Completed/100 并补齐时间账
+// （调用方已持锁；#265：UpdatePhase 自动完成循环与 Complete 的唯一状态回写
+// 实现——「跳过失败/已终态 → 置 Completed/100 → 补 StartTime → EndTime →
+// Duration」此前两处重复，终态保护判定随之单点）。now 为完结时刻。
+func (t *Tracker) completePhaseLocked(i int, now time.Time) {
+	p := &t.phases[i]
+	// 失败终态不可抹（#247/#193）：「Fail 后继续跑收尾阶段」时，不得把失败
+	// 抹成 Completed/100，否则进度条与 GetOverallProgress 系统性谎报 100% 成功；
+	// Completed/Skipped 已是终态，不重复回写（避免覆盖真实时间账）。
+	if p.Status == PhaseFailed || p.Status == PhaseCompleted || p.Status == PhaseSkipped {
+		return
+	}
+	p.Status = PhaseCompleted
+	p.Progress = 100
+	if p.StartTime.IsZero() {
+		p.StartTime = now
+	}
+	p.EndTime = now
+	p.Duration = now.Sub(p.StartTime).Milliseconds()
 }
 
 // GetPhase 返回指定阶段的信息（副本）。
@@ -198,18 +205,9 @@ func (t *Tracker) Complete() {
 	now := time.Now()
 	t.status = TaskCompleted
 	for i := range t.phases {
-		if t.phases[i].Status == PhaseFailed {
-			continue // 失败阶段保留失败痕迹（防御：正常路径走不到这里）
-		}
-		if t.phases[i].Status != PhaseCompleted && t.phases[i].Status != PhaseSkipped {
-			t.phases[i].Status = PhaseCompleted
-			t.phases[i].Progress = 100
-			if t.phases[i].StartTime.IsZero() {
-				t.phases[i].StartTime = now
-			}
-			t.phases[i].EndTime = now
-			t.phases[i].Duration = t.phases[i].EndTime.Sub(t.phases[i].StartTime).Milliseconds()
-		}
+		// 失败终态不可抹（#193/#247，防御：正常路径走不到这里）——判定在
+		// completePhaseLocked 单点（#265）
+		t.completePhaseLocked(i, now)
 	}
 }
 

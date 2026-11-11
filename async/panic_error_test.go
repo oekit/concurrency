@@ -72,3 +72,37 @@ func TestPanicError_WrapsPreservesAs(t *testing.T) {
 		t.Fatalf("As after wrap broken: %v", wrapped)
 	}
 }
+
+// TestPanicError_Unwrap #267 回归：error 型 panic 的错误身份全链不丢——
+// errors.Is / errors.As 穿透 PanicError 直达业务侧 panic 出去的原始错误
+// （require 类/断言失败的常见形态：panic 携带 error）。
+func TestPanicError_Unwrap(t *testing.T) {
+	sentinel := errors.New("assert failed")
+
+	err := async.RunSafeErr(func() error {
+		panic(sentinel)
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("errors.Is 应穿透 PanicError，得到 %v", err)
+	}
+	var pe *async.PanicError
+	if !errors.As(err, &pe) || pe.Value != sentinel {
+		t.Fatalf("errors.As(*PanicError) 失败: %v", err)
+	}
+
+	// 直接构造的载体同样穿透（导出面自洽，不依赖收编路径）
+	if !errors.Is(&async.PanicError{Value: sentinel}, sentinel) {
+		t.Fatal("字面量构造的 PanicError 应透传 Unwrap")
+	}
+
+	// 非 error 的 panic 值：Unwrap 返回 nil，不伪造错误身份
+	_, err2 := async.RunSafeRet(func() (int, error) {
+		panic("plain string panic")
+	})
+	if unwrapped := errors.Unwrap(err2); unwrapped != nil {
+		t.Fatalf("非 error panic 值不应有 Unwrap，得到 %v", unwrapped)
+	}
+	if !errors.As(err2, &pe) || pe.Value != "plain string panic" {
+		t.Fatalf("errors.As(*PanicError) 失败: %v", err2)
+	}
+}

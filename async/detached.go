@@ -2,7 +2,6 @@ package async
 
 import (
 	"context"
-	"runtime/debug"
 	"sync/atomic"
 )
 
@@ -104,12 +103,5 @@ func DetachedContext(parent context.Context) context.Context {
 // 跟请求串起来」的调用点，替代各服务手抄的 WithoutCancel+traceid+GoSafe 三件套。
 func GoDetached(parent context.Context, task string, fn func(ctx context.Context)) {
 	bg := DetachedContext(parent)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				callPanicHandler(withTask(bg, task), r, debug.Stack())
-			}
-		}()
-		fn(bg)
-	}()
+	spawnGuarded(globalReport(bg, task), func() { fn(bg) })
 }

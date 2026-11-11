@@ -40,13 +40,8 @@ func (g *KeyedGate) slot(key string) chan struct{} {
 }
 
 // Acquire 取一个键下在飞名额；ctx 取消（排队等待中）返回 ctx.Err()。
-// 返回的 release 归还名额，幂等可重复调用。
-//
-// 幂等标记用 atomic.Bool + CompareAndSwap（同包 Gate 的做法）：裸 bool 在
-// 两个 goroutine 并发调用同一个 release 时是 data race，且两者都可能读到
-// "未归还" 而各执行一次 <-ch —— 名额被归还两次，该 key 的在飞数突破 cap
-// 上限（cap=1 时可同时有 2 个在飞）。按 key 分档位的闸门正是最容易被并发
-// 释放的场景（超时清理路径与正常返回路径同时释放同一个 key）。
+// 返回的 release 归还名额，幂等可重复调用（atomic CAS 实现，见
+// idempotentRelease——与同包 Gate 共用同一实现，#263）。
 //
 // ctx 为 nil 时按 context.Background() 处理（永不取消），与 Gate 一致。
 func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
@@ -59,13 +54,7 @@ func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
 	ch := g.slot(key)
 	select {
 	case ch <- struct{}{}:
-		var released atomic.Bool
-		return func() {
-			if !released.CompareAndSwap(false, true) {
-				return
-			}
-			<-ch
-		}, nil
+		return idempotentRelease(func() { <-ch }), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -105,16 +94,27 @@ func (g *KeyedGate) TryAcquire(key string) (func(), bool) {
 	ch := g.slot(key)
 	select {
 	case ch <- struct{}{}:
-		var released atomic.Bool
-		return func() {
-			if !released.CompareAndSwap(false, true) {
-				return
-			}
-			<-ch
-		}, true
+		return idempotentRelease(func() { <-ch }), true
 	default:
 		return nil, false
 	}
+}
+
+// runSlot 执行单个槽位并把结果/错误写进 slots[i]（#263 三个 FanIn 变体共用的
+// 逐槽骨架）：fn 正常返回 → Val/Err 如实记录；fn panic → 该槽 Err 收编为
+// *async.PanicError（构造经 org 单源 pkg errors.Recovered）、Panicked 同写
+// 原始 payload（Deprecated 兼容字段），并经 async.ReportPanic 上报——该槽
+// Val 保持零值，其余槽位与收口不受影响。
+func runSlot[T any](slots []Slot[T], i int, fn func() (T, error)) {
+	defer func() {
+		if r := recover(); r != nil {
+			slots[i].Panicked = r
+			slots[i].Err = async.NewPanicError(r)
+			async.ReportPanic(r)
+		}
+	}()
+	v, err := fn()
+	slots[i].Val, slots[i].Err = v, err
 }
 
 // FanIn 并行执行 fn(0..n-1)，各 goroutine 只写自己的 results[i] 槽位（免锁），
@@ -128,11 +128,12 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 	}
 	results := make([]T, n)
 	var wg sync.WaitGroup
-	wg.Add(n)
 	for i := 0; i < n; i++ {
-		async.GoSafe(func() {
-			defer wg.Done()
-			results[i] = fn(i)
+		// sync.WaitGroup.Go（go 1.25+，本仓地板 1.26）：Add/Done 配对由
+		// stdlib 接管；panic 收编边界保持 async.RunSafe（AGENTS.md 禁裸
+		// go func——wg.Go 自身不 recover）
+		wg.Go(func() {
+			async.RunSafe(func() { results[i] = fn(i) })
 		})
 	}
 	wg.Wait()
@@ -164,21 +165,11 @@ func FanInErr[T any](n int, fn func(i int) (T, error)) []Slot[T] {
 	}
 	slots := make([]Slot[T], n)
 	var wg sync.WaitGroup
-	wg.Add(n)
 	for i := 0; i < n; i++ {
-		async.GoSafe(func() {
-			defer wg.Done()
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slots[i].Panicked = r
-						slots[i].Err = async.NewPanicError(r)
-						async.ReportPanic(r)
-					}
-				}()
-				v, err := fn(i)
-				slots[i].Val, slots[i].Err = v, err
-			}()
+		// sync.WaitGroup.Go（go 1.25+）：Add/Done 配对由 stdlib 接管；
+		// runSlot 是 recover 边界（fn panic 收编进槽并上报）
+		wg.Go(func() {
+			runSlot(slots, i, func() (T, error) { return fn(i) })
 		})
 	}
 	wg.Wait()
@@ -203,26 +194,16 @@ func FanInLimit[T any](n, limit int, fn func(i int) (T, error)) []Slot[T] {
 		wg   sync.WaitGroup
 		next atomic.Int64
 	)
-	wg.Add(limit)
 	for w := 0; w < limit; w++ {
-		async.GoSafe(func() {
-			defer wg.Done()
+		// sync.WaitGroup.Go（go 1.25+）：Add/Done 配对由 stdlib 接管；
+		// runSlot 是 recover 边界（fn panic 收编进槽并上报）
+		wg.Go(func() {
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= n {
 					return
 				}
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							slots[i].Panicked = r
-							slots[i].Err = async.NewPanicError(r)
-							async.ReportPanic(r)
-						}
-					}()
-					v, err := fn(i)
-					slots[i].Val, slots[i].Err = v, err
-				}()
+				runSlot(slots, i, func() (T, error) { return fn(i) })
 			}
 		})
 	}
@@ -251,10 +232,10 @@ func FanInLimitCtx[T any](ctx context.Context, n, limit int, fn func(ctx context
 		wg   sync.WaitGroup
 		next atomic.Int64
 	)
-	wg.Add(limit)
 	for w := 0; w < limit; w++ {
-		async.GoSafe(func() {
-			defer wg.Done()
+		// sync.WaitGroup.Go（go 1.25+）：Add/Done 配对由 stdlib 接管；
+		// runSlot 是 recover 边界（fn panic 收编进槽并上报）
+		wg.Go(func() {
 			var cancelErr error // worker 内缓存：取消后一次锁调用，排空零额外开销
 			for {
 				i := int(next.Add(1)) - 1
@@ -269,17 +250,7 @@ func FanInLimitCtx[T any](ctx context.Context, n, limit int, fn func(ctx context
 					slots[i].Err = cancelErr
 					continue
 				}
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							slots[i].Panicked = r
-							slots[i].Err = async.NewPanicError(r)
-							async.ReportPanic(r)
-						}
-					}()
-					v, err := fn(ctx, i)
-					slots[i].Val, slots[i].Err = v, err
-				}()
+				runSlot(slots, i, func() (T, error) { return fn(ctx, i) })
 			}
 		})
 	}
