@@ -1,3 +1,22 @@
+## [v0.34.0] — 2026-11-12
+
+- 全仓 issue 清零 sweep（#259 索引 13 单）：pkg errors.Recovered 单源收编 + 重复块收敛 + 行为缺陷修复
+
+- refactor(async): panic 收编家族 16 函数 + Runner 六法收敛 guarded/spawnGuarded 单源，panic→error 转换走 org 单源 pkg/errors.Recovered（#261）；GoSafeWithErrChannel panic 分支改发 *PanicError（原裸 %v 丢身份，#268）；PanicError 补 Unwrap，error 型 panic 的错误身份全链不丢（#267）
+- refactor(singleflight): Do/DoShared/DoChan 三份 leader/waiter/清理逻辑收敛 doCore/waitCall/runLeader/release，DoShared 退化为 Do+shared 标志（#262）
+- refactor(syncx): FanIn 三变体逐槽 recover 收敛 runSlot，Gate/KeyedGate 幂等 release 四连抄收敛 idempotentRelease，FanIn 家族改 sync.WaitGroup.Go（#263）
+- refactor(ratelimit): KeyedLimiterOf 五登记入口「容量护栏+安装」收敛 installLocked（#260）；Throttle 僵尸条目写路径每窗口至多一次顺手清扫，不再随历史 key 基数单调增长（#271）
+- refactor(batch/timewheel): 逐字重复的 Ticker 五件套收敛 internal/ticker 单源，类型别名转发导入面零破坏（#264）
+- refactor(progress): UpdatePhase/Complete 完结回写块收敛 completePhaseLocked，失败终态保护判定单点（#265）
+- fix(group): WaitGroupWrapper 的 Wrap 与 Wait 并发触发 runtime WaitGroup misuse panic，submitMu 串行化对齐 gopool 方案（#269）
+- fix(loop): 进程信号观察 goroutine opt-out 后泄漏，watchProcessSignals + stopCh 退出路径（不 cancel，已启动循环继续存活的 #218 语义保持）（#270）
+- fix(retry): 重试等待 time.After 改 sleepCtx（NewTimer+Stop，提前退出即时释放 timer、不再每轮新分配）（#272）；detail.go 修正不存在的 DoValueLast 文档引用（#266）
+- build: Go 地板 1.24.0 → 1.26.0（ci.yml 同步 1.26），依赖 pkg 抬至 v0.45.0（panic 收编单源）
+
+导出面零删除、零签名变化（Unwrap 为新增方法），无 BREAKING。
+
+关联问题单：concurrency#260、concurrency#261、concurrency#262、concurrency#263、concurrency#264、concurrency#265、concurrency#266、concurrency#267、concurrency#268、concurrency#269、concurrency#270、concurrency#271、concurrency#272。
+
 ## [v0.33.0] — 2026-11-11
 
 - fix(ratelimit): Limiter.Reserve 收敛为 (time.Duration, error) 双返回，「不可预留」统一规范哨兵 ErrNotReservable（#248 #250）——此前 TokenBucket 回最大 duration（≈292 年）、SlidingWindow 回 -1，两套互斥魔数、接口契约零声明：消费方持 Limiter 接口（KeyedLimiter factory 返回类型）写通用退避，按 d<0 判拒绝的换 TokenBucket 被判成「等 292 年」挂死、按最大值判拒绝的遇 SlidingWindow 把 -1 当立即可用紧循环锤击满窗限流器；判定一律 errors.Is（可穿透 %w 包装），占位值 -1 防误读成 0=立即可用。哨兵契约属 API 面收敛：自行实现 Limiter 的调用方需随签名更新（0.x minor 允许 breaking，同 v0.21.0 启用 Wait 的先例）
