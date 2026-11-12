@@ -96,7 +96,7 @@ func TestGate_TryAcquire_ReleaseIdempotent(t *testing.T) {
 func TestGate_TryAcquire_Unlimited(t *testing.T) {
 	for _, c := range []int{0, -1} {
 		g := NewGate(c)
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			rel, ok := g.TryAcquire()
 			if !ok {
 				t.Fatalf("cap=%d 时 TryAcquire 应恒成功（第 %d 次）", c, i)
@@ -118,10 +118,8 @@ func TestGate_TryAcquire_CapsConcurrency(t *testing.T) {
 		granted  atomic.Int64
 		wg       sync.WaitGroup
 	)
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			rel, ok := g.TryAcquire()
 			if !ok {
 				return // 满额即拒
@@ -137,7 +135,7 @@ func TestGate_TryAcquire_CapsConcurrency(t *testing.T) {
 			time.Sleep(time.Millisecond)
 			inFlight.Add(-1)
 			rel()
-		}()
+		})
 	}
 	wg.Wait()
 

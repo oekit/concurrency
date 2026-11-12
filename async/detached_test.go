@@ -167,7 +167,7 @@ func TestDetachedContext_EnricherPanicContained(t *testing.T) {
 	}
 
 	// 每次 DetachedContext 派生恰好上报一次（直调 + GoDetached + Spawn 共 3 次）
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		select {
 		case msg := <-reports:
 			if !strings.Contains(msg, "enricher-boom") {

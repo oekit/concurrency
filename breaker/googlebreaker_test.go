@@ -58,7 +58,7 @@ func TestGoogleBreaker_LowFailureAllPass(t *testing.T) {
 	b := newTestGoogleBreaker(clock)
 	boom := errors.New("boom")
 
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		clock.Advance(testInterval) // 每次跨桶，覆盖窗口滚动路径
 		err, rejected := b.doReq(func() error {
 			if i%20 == 0 { // 5% 失败率
@@ -89,7 +89,7 @@ func TestGoogleBreaker_HighFailureDrops(t *testing.T) {
 	const n = 300
 	const tail = 100
 	tailDrops, drops := 0, 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ran := false
 		err, _ := b.doReq(func() error {
 			ran = true
@@ -139,7 +139,7 @@ func TestGoogleBreaker_ForcePass(t *testing.T) {
 	boom := errors.New("boom")
 
 	// 打满失败触发熔断（open 态冻结时钟下除强制探活外一律拒绝）
-	for i := 0; i < 50000; i++ {
+	for range 50000 {
 		_, _ = b.doReq(func() error { return boom }, defaultAcceptable)
 	}
 
@@ -167,7 +167,7 @@ func TestGoogleBreaker_ForcePass(t *testing.T) {
 	}
 
 	// 同一刻后续请求全部拒绝：每 forcePass 间隔恰一次放行
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		if _, rejected := b.doReq(func() error { return boom }, defaultAcceptable); !rejected {
 			t.Fatalf("request %d after force pass must be rejected (probe-level traffic only)", i+1)
 		}
@@ -233,7 +233,7 @@ func TestGoogleBreaker_WindowExpiryNoTrafficResume(t *testing.T) {
 	b := newTestGoogleBreaker(clock)
 	boom := errors.New("boom")
 
-	for i := 0; i < 100000; i++ {
+	for range 100000 {
 		_, _ = b.doReq(func() error { return boom }, defaultAcceptable)
 	}
 	clock.Advance(DefaultBuckets*testInterval + testInterval) // 整窗滚出，dropRatio ≤ 0
@@ -248,7 +248,7 @@ func TestGoogleBreaker_WindowExpiryNoTrafficResume(t *testing.T) {
 	}
 
 	// 其余请求一律拒绝：公式愈合不恢复流量（旧版在此全量放行）
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		err, rejected := b.doReq(func() error { return nil }, defaultAcceptable)
 		if !errors.Is(err, ErrCircuitOpen) || !rejected {
 			t.Fatalf("call %d after window expiry: err=%v rejected=%v, want reject (open must not resume)", i, err, rejected)
@@ -297,13 +297,11 @@ func TestGoogleBreaker_ForcePassConcurrentExactlyOne(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := range callers {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			err, _ := b.doReq(func() error { return nil }, defaultAcceptable)
 			results[i] = err
-		}(i)
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -350,7 +348,7 @@ func TestGoogleBreaker_ForcePassGrantRacesExactlyOne(t *testing.T) {
 	callers := runtime.GOMAXPROCS(0)
 	const trials = 300
 	granted := make([]bool, callers)
-	for tr := 0; tr < trials; tr++ {
+	for tr := range trials {
 		b.lastPass.Store(now - int64(2*time.Second)) // 距今 2s > forcePass(1s)：名额已到期
 
 		var arrived atomic.Int32
@@ -358,9 +356,7 @@ func TestGoogleBreaker_ForcePassGrantRacesExactlyOne(t *testing.T) {
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 		for i := range callers {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
+			wg.Go(func() {
 				<-start
 				// 计数屏障：最后一个到达者翻转闸门——所有并发方都已停在
 				// 自旋点上，翻转经缓存一致性传播后大家同一瞬间冲向领取点
@@ -372,7 +368,7 @@ func TestGoogleBreaker_ForcePassGrantRacesExactlyOne(t *testing.T) {
 				for !goFlag.Load() {
 				}
 				granted[i] = b.tryForcePass(now)
-			}(i)
+			})
 		}
 		close(start)
 		wg.Wait()

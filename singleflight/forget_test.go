@@ -106,16 +106,14 @@ func TestFlight_ConcurrentDedup(t *testing.T) {
 	f := New[int]()
 	var calls atomic.Int32
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 16 {
+		wg.Go(func() {
 			_, _ = f.Do(context.Background(), "k", func(ctx context.Context) (int, error) {
 				calls.Add(1)
 				time.Sleep(20 * time.Millisecond)
 				return 1, nil
 			})
-		}()
+		})
 	}
 	wg.Wait()
 	if got := calls.Load(); got != 1 {

@@ -57,8 +57,8 @@ func (c *collector) drainAll() int {
 // collectExec 批量收集 n 个批次并平铺。
 func collectExec(t *testing.T, c *collector, batches int) []any {
 	t.Helper()
-	var out []any
-	for i := 0; i < batches; i++ {
+	out := make([]any, 0, batches)
+	for range batches {
 		out = append(out, c.next(t)...)
 	}
 	return out
@@ -138,10 +138,10 @@ func TestPeriodicalExecutor_BackgroundIdleExitAndRestart(t *testing.T) {
 	// 逐 tick 驱动：首 tick 交付 "a" 并计入一轮空闲（roundTick 执行批次后
 	// 会复查一轮），其后累计到 idleExitRounds 即自退出——恰好 idleExitRounds
 	// 个 tick；fire 阻塞直至被接收，多发一个就会因无人接收而死锁。
-	for i := 0; i < idleExitRounds; i++ {
+	for range idleExitRounds {
 		tk.fire()
 	}
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		e.mu.Lock()
 		stopped := !e.background
 		e.mu.Unlock()
@@ -234,17 +234,15 @@ func TestPeriodicalExecutor_ConcurrentAddFlushNoLoss(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
-	for p := 0; p < producers; p++ {
-		wg.Add(1)
-		go func(p int) {
-			defer wg.Done()
-			for i := 0; i < perProducer; i++ {
+	for p := range producers {
+		wg.Go(func() {
+			for i := range perProducer {
 				e.Add(fmt.Sprintf("p%d-%d", p, i))
 				if i%50 == 0 {
 					e.Flush()
 				}
 			}
-		}(p)
+		})
 	}
 	wg.Wait()
 	e.Wait()
@@ -302,7 +300,7 @@ func TestPeriodicalExecutor_OldLoopOnlyClosesOwnExit(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("第一代循环未启动")
 	}
-	for i := 0; i < idleExitRounds; i++ {
+	for range idleExitRounds {
 		gen1.fire() // 首 tick 交付 "a"，其后累计空闲恰在第 idleExitRounds 轮自退出
 	}
 	<-gen1.stopped // 同步点：摘牌（background=false）已完成且已解锁，defer close 尚未执行
@@ -349,7 +347,7 @@ func TestPeriodicalExecutor_OldLoopOnlyClosesOwnExit(t *testing.T) {
 	if got := collectExec(t, col, 1); len(got) != 1 || got[0] != "b" {
 		t.Fatalf("expected [b], got %v", got)
 	}
-	for i := 0; i < idleExitRounds-1; i++ {
+	for range idleExitRounds - 1 {
 		gen2.fire()
 	}
 	<-gen2.stopped

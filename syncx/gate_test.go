@@ -16,7 +16,7 @@ func TestGate_Unlimited(t *testing.T) {
 	}
 	release()
 	// 不限配额时反复取用不会阻塞。
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		rel, err := g.Acquire(context.Background())
 		if err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)
@@ -45,10 +45,8 @@ func TestGate_CapsConcurrency(t *testing.T) {
 		peak     atomic.Int64
 		wg       sync.WaitGroup
 	)
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 20 {
+		wg.Go(func() {
 			release, err := g.Acquire(context.Background())
 			if err != nil {
 				t.Errorf("Acquire: %v", err)
@@ -64,7 +62,7 @@ func TestGate_CapsConcurrency(t *testing.T) {
 			}
 			time.Sleep(5 * time.Millisecond)
 			inFlight.Add(-1)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -114,8 +112,8 @@ func TestGate_ReleaseIsIdempotent(t *testing.T) {
 	release()
 
 	// 名额只被归还一次 → 还能取 cap 个，第 cap+1 个才阻塞。
-	var releases []func()
-	for i := 0; i < cap; i++ {
+	releases := make([]func(), 0, cap)
+	for i := range cap {
 		rel, err := g.Acquire(context.Background())
 		if err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)
@@ -142,18 +140,16 @@ func TestGate_ConcurrentRelease(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			release()
-		}()
+		})
 	}
 	wg.Wait()
 
 	// 只归还了一次 → 还能取 cap 个，第 cap+1 个才阻塞。
-	var releases []func()
-	for i := 0; i < cap; i++ {
+	releases := make([]func(), 0, cap)
+	for i := range cap {
 		rel, err := g.Acquire(context.Background())
 		if err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)

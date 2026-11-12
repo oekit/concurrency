@@ -83,12 +83,10 @@ func TestKeyedGate_ConcurrentRelease(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			release()
-		}()
+		})
 	}
 	// 归还名额时若存在竞态，多出的 <-ch 会永久阻塞——这里给出界等待，
 	// 让失败表现为「超时」而不是整包测试挂死。
@@ -104,8 +102,8 @@ func TestKeyedGate_ConcurrentRelease(t *testing.T) {
 	}
 
 	// 只归还了一次 → 还能取 cap 个，第 cap+1 个才阻塞。
-	var releases []func()
-	for i := 0; i < cap; i++ {
+	releases := make([]func(), 0, cap)
+	for i := range cap {
 		rel, err := g.Acquire(context.Background(), "k")
 		if err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)
@@ -136,8 +134,8 @@ func TestKeyedGate_ReleaseIsIdempotent(t *testing.T) {
 	release()
 
 	// 名额只被归还一次 → 还能取 cap 个，第 cap+1 个才阻塞。
-	var releases []func()
-	for i := 0; i < cap; i++ {
+	releases := make([]func(), 0, cap)
+	for i := range cap {
 		rel, err := g.Acquire(context.Background(), "k")
 		if err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)

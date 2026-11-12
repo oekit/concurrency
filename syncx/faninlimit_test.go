@@ -133,14 +133,14 @@ func TestFanInLimitCtx_MidwayCancel(t *testing.T) {
 		close(done)
 	}()
 
-	for i := 0; i < limit; i++ {
+	for range limit {
 		<-started // 两个在飞 item 已启动
 	}
 	cancel()       // 引擎取消
 	close(release) // 放行在飞 item（跑完、照常落槽）
 	<-done
 
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if slots[i].Err != nil || slots[i].Val != i {
 			t.Fatalf("in-flight slot %d = (%v, %v), want normal result", i, slots[i].Val, slots[i].Err)
 		}

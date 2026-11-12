@@ -184,7 +184,7 @@ func TestRollingWindow_Reduce(t *testing.T) {
 			clk := &fakeClock{}
 			opts := append([]WindowOption[float64, *Bucket[float64]]{WithWindowClock[float64, *Bucket[float64]](clk.Now)}, test.opts...)
 			r := NewRollingWindow[float64, *Bucket[float64]](newTestBucket, size, bucketInterval, opts...)
-			for x := 0; x < size; x++ {
+			for x := range size {
 				for i := 0; i <= x; i++ {
 					r.Add(float64(i))
 				}
@@ -313,7 +313,7 @@ func TestRollingWindow_DataRace(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iterations; i++ {
+		for i := range iterations {
 			r.Add(float64(i))
 			clk.Advance(bucketInterval / 2)
 			time.Sleep(time.Millisecond)

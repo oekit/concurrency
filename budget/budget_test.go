@@ -87,7 +87,7 @@ func TestConsume_ArchiveContentCopied(t *testing.T) {
 
 func TestConsume_UnknownDimensionUnlimited(t *testing.T) {
 	l, _ := newTestLedger()
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if _, err := l.Consume("untracked", 1000, nil); err != nil {
 			t.Fatalf("untracked dimension should be unlimited: %v", err)
 		}

@@ -61,7 +61,7 @@ func TestDelay_JitterStaysWithinCeiling(t *testing.T) {
 	cfg := Config{Delay: base, Jitter: jitter}
 
 	sawBelowCeiling := false
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		got := Delay(cfg, 1, nil)
 		if got < base || got >= base+jitter {
 			t.Fatalf("Delay = %s，越出 [%s, %s)", got, base, base+jitter)

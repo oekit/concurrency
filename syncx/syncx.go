@@ -128,7 +128,7 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 	}
 	results := make([]T, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		// sync.WaitGroup.Go（go 1.25+，本仓地板 1.26）：Add/Done 配对由
 		// stdlib 接管；panic 收编边界保持 async.RunSafe（AGENTS.md 禁裸
 		// go func——wg.Go 自身不 recover）
@@ -165,7 +165,7 @@ func FanInErr[T any](n int, fn func(i int) (T, error)) []Slot[T] {
 	}
 	slots := make([]Slot[T], n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		// sync.WaitGroup.Go（go 1.25+）：Add/Done 配对由 stdlib 接管；
 		// runSlot 是 recover 边界（fn panic 收编进槽并上报）
 		wg.Go(func() {
@@ -194,7 +194,7 @@ func FanInLimit[T any](n, limit int, fn func(i int) (T, error)) []Slot[T] {
 		wg   sync.WaitGroup
 		next atomic.Int64
 	)
-	for w := 0; w < limit; w++ {
+	for range limit {
 		// sync.WaitGroup.Go（go 1.25+）：Add/Done 配对由 stdlib 接管；
 		// runSlot 是 recover 边界（fn panic 收编进槽并上报）
 		wg.Go(func() {
@@ -232,7 +232,7 @@ func FanInLimitCtx[T any](ctx context.Context, n, limit int, fn func(ctx context
 		wg   sync.WaitGroup
 		next atomic.Int64
 	)
-	for w := 0; w < limit; w++ {
+	for range limit {
 		// sync.WaitGroup.Go（go 1.25+）：Add/Done 配对由 stdlib 接管；
 		// runSlot 是 recover 边界（fn panic 收编进槽并上报）
 		wg.Go(func() {

@@ -136,7 +136,7 @@ func TestTimingWheel_RemoveTimer(t *testing.T) {
 	if tw.HasTimer("r") {
 		t.Fatal("timer should be gone after RemoveTimer")
 	}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		tk.fire()
 	}
 	barrier(tw)
@@ -163,7 +163,7 @@ func TestTimingWheel_DuplicateKeyReplaces(t *testing.T) {
 		t.Fatal("expected replacement to fire on first tick")
 	}
 	// 旧任务不应再触发
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		tk.fire()
 	}
 	barrier(tw)
@@ -270,7 +270,7 @@ func TestTimingWheel_HugeDelayDoesNotKillLoop(t *testing.T) {
 	// SetTimer 表面成功、任务永不触发）
 	tw.SetTimer("real", func() { task("real") }, 3*time.Nanosecond)
 	barrier(tw)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		tk.fire()
 		barrier(tw)
 	}

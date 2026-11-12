@@ -88,12 +88,10 @@ func TestKeyedMutexReleaseIdempotent(t *testing.T) {
 	// 并发 Double-release 也必须安全（两个 goroutine 同时释放同一句柄）
 	release3, _ := m.Acquire("k")
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			release3()
-		}()
+		})
 	}
 	wg.Wait()
 	if got := m.Len(); got != 0 {
@@ -162,11 +160,9 @@ func TestKeyedMutexMutualExclusionConcurrent(t *testing.T) {
 		reject atomic.Int64 // 即拒次数
 	)
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < attempts; j++ {
+	for range workers {
+		wg.Go(func() {
+			for range attempts {
 				ok := m.WithLock("shared", func() {
 					now := inside.Add(1)
 					for {
@@ -187,7 +183,7 @@ func TestKeyedMutexMutualExclusionConcurrent(t *testing.T) {
 					reject.Add(1)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -209,11 +205,9 @@ func TestKeyedMutexPerKeyIsolationConcurrent(t *testing.T) {
 	m := syncx.NewKeyedMutex[int]()
 	var inside [keys]atomic.Int64
 	var wg sync.WaitGroup
-	for w := 0; w < 16; w++ {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
-			for j := 0; j < 100; j++ {
+	for w := range 16 {
+		wg.Go(func() {
+			for j := range 100 {
 				k := (w + j) % keys
 				_ = m.WithLock(k, func() {
 					if inside[k].Add(1) > 1 {
@@ -222,7 +216,7 @@ func TestKeyedMutexPerKeyIsolationConcurrent(t *testing.T) {
 					inside[k].Add(-1)
 				})
 			}
-		}(w)
+		})
 	}
 	wg.Wait()
 }
@@ -269,7 +263,7 @@ func TestKeyedMutexNoCrossInstanceLeak(t *testing.T) {
 func BenchmarkKeyedMutexAcquireRelease(b *testing.B) {
 	m := syncx.NewKeyedMutex[string]()
 	b.Run("serial", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			release, ok := m.Acquire("k")
 			if !ok {
 				b.Fatal("unexpected busy")

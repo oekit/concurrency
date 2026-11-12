@@ -20,16 +20,14 @@ import (
 // 于是「Add 发生在 Wait 之前」恒成立（WaitGroup 的硬要求）；Wait 本身在锁外，
 // 避免「任务里再提交任务」与 Close 互等。
 func TestPool_ConcurrentSubmitAndClose_NoWaitGroupMisuse(t *testing.T) {
-	for round := 0; round < 20; round++ {
+	for range 20 {
 		p := NewPool("t")
 		var wg sync.WaitGroup
 		stop := make(chan struct{})
 
 		// 持续提交，制造「读到 closed==false 之后 Close 就进入 Wait」的窗口。
-		for i := 0; i < 4; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range 4 {
+			wg.Go(func() {
 				for {
 					select {
 					case <-stop:
@@ -38,7 +36,7 @@ func TestPool_ConcurrentSubmitAndClose_NoWaitGroupMisuse(t *testing.T) {
 					}
 					p.Go(func() {})
 				}
-			}()
+			})
 		}
 
 		time.Sleep(time.Millisecond)

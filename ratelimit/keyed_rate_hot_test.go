@@ -43,7 +43,7 @@ func TestKeyedLimiter_ReplaceIfChanged(t *testing.T) {
 	if !kl.ReplaceIfChanged("k", 200, NewSlidingWindow(time.Second, 200)) {
 		t.Fatal("changed rate should replace")
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if !kl.Allow("k") {
 			t.Fatalf("new bucket should allow, i=%d", i)
 		}
@@ -89,7 +89,7 @@ func TestKeyedLimiter_AllowWithRate(t *testing.T) {
 	}
 
 	// 同速率连打：只建一次桶
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if !kl.AllowWithRate("hot", 100, func() Limiter { return bucketOf(100) }) {
 			// 桶配额 1，第二次起被限流是正常语义——关键是不重建
 			break
@@ -167,14 +167,12 @@ func TestKeyedLimiter_AllowWithRate_Concurrent(t *testing.T) {
 	defer kl.Close()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 20; j++ {
+	for range 50 {
+		wg.Go(func() {
+			for range 20 {
 				kl.AllowWithRate("k", 100, func() Limiter { return NewTokenBucket(100, 100) })
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

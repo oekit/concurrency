@@ -11,7 +11,7 @@ func TestTokenBucket_Allow(t *testing.T) {
 	tb := NewTokenBucket(10, 10) // 10 QPS, burst 10
 
 	// 前 10 个请求应该允许
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if !tb.Allow() {
 			t.Errorf("request %d should be allowed", i)
 		}
@@ -65,7 +65,7 @@ func TestSlidingWindow_Allow(t *testing.T) {
 	sw := NewSlidingWindow(time.Second, 5)
 
 	// 前 5 个请求应该允许
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if !sw.Allow() {
 			t.Errorf("request %d should be allowed", i)
 		}
@@ -209,7 +209,7 @@ func TestLimiter_ReserveNotReservableSentinel(t *testing.T) {
 	for name, newLimiter := range newLimiters {
 		t.Run(name, func(t *testing.T) {
 			l := newLimiter()
-			for i := 0; i < 4; i++ {
+			for range 4 {
 				_, _ = l.Reserve() // 打到不可预留态（TokenBucket 第 1 笔即不可预留）
 			}
 

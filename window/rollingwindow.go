@@ -125,7 +125,7 @@ func (rw *RollingWindow[T, B]) updateOffset() {
 
 	offset := rw.offset
 	// reset expired buckets
-	for i := 0; i < span; i++ {
+	for i := range span {
 		rw.win.resetBucket((offset + i + 1) % rw.size)
 	}
 
@@ -165,7 +165,7 @@ type window[T Numerical, B BucketInterface[T]] struct {
 
 func newWindow[T Numerical, B BucketInterface[T]](newBucket func() B, size int) *window[T, B] {
 	buckets := make([]B, size)
-	for i := 0; i < size; i++ {
+	for i := range size {
 		buckets[i] = newBucket()
 	}
 	return &window[T, B]{
@@ -179,7 +179,7 @@ func (w *window[T, B]) add(offset int, v T) {
 }
 
 func (w *window[T, B]) reduce(start, count int, fn func(b B)) {
-	for i := 0; i < count; i++ {
+	for i := range count {
 		fn(w.buckets[(start+i)%w.size])
 	}
 }

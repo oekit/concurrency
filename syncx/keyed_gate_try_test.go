@@ -114,7 +114,7 @@ func TestKeyedGate_TryAcquire_ReleaseIdempotent(t *testing.T) {
 func TestKeyedGate_TryAcquire_Unlimited(t *testing.T) {
 	for _, c := range []int{0, -1} {
 		g := NewKeyedGate(c)
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			rel, ok := g.TryAcquire("k")
 			if !ok {
 				t.Fatalf("cap=%d 时 TryAcquire 应恒成功（第 %d 次）", c, i)
@@ -129,8 +129,8 @@ func TestKeyedGate_TryAcquire_CapIsPerKey(t *testing.T) {
 	const cap = 2
 	g := NewKeyedGate(cap)
 
-	var releases []func()
-	for i := 0; i < cap; i++ {
+	releases := make([]func(), 0, cap)
+	for i := range cap {
 		rel, ok := g.TryAcquire("k")
 		if !ok {
 			t.Fatalf("第 %d 次 TryAcquire 应成功（cap=%d）", i+1, cap)
@@ -192,11 +192,9 @@ func TestKeyedGate_TryAcquire_CapsConcurrency(t *testing.T) {
 		granted  atomic.Int64
 		wg       sync.WaitGroup
 	)
-	for k := 0; k < keys; k++ {
-		for i := 0; i < rounders; i++ {
-			wg.Add(1)
-			go func(k int) {
-				defer wg.Done()
+	for k := range keys {
+		for range rounders {
+			wg.Go(func() {
 				key := string(rune('a' + k))
 				rel, ok := g.TryAcquire(key)
 				if !ok {
@@ -213,12 +211,12 @@ func TestKeyedGate_TryAcquire_CapsConcurrency(t *testing.T) {
 				time.Sleep(time.Millisecond)
 				inFlight[k].Add(-1)
 				rel()
-			}(k)
+			})
 		}
 	}
 	wg.Wait()
 
-	for k := 0; k < keys; k++ {
+	for k := range keys {
 		if peak[k].Load() > cap {
 			t.Errorf("key %c 在飞峰值 %d 超过 cap %d", 'a'+k, peak[k].Load(), cap)
 		}

@@ -44,7 +44,7 @@ func TestSlidingWindow_ZeroMaxCountUnlimited(t *testing.T) {
 	sw := NewSlidingWindow(time.Minute, 0)
 
 	// 大量请求全部放行——修复前这里是静默恒拒
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		if !sw.Allow() {
 			t.Fatalf("maxCount=0 是不限流档：第 %d 次 Allow 不应被拒", i+1)
 		}
@@ -73,7 +73,7 @@ func TestSlidingWindow_ReserveBoundedByMaxCount(t *testing.T) {
 	sw := NewSlidingWindow(time.Hour, 2)
 
 	negative := 0
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		_, err := sw.Reserve()
 		if errors.Is(err, ErrNotReservable) {
 			negative++
@@ -133,7 +133,7 @@ func TestSlidingWindow_ReserveDistinctSlots(t *testing.T) {
 func TestSlidingWindow_ConcurrentReserveNoStampede(t *testing.T) {
 	const maxCount = 4
 	sw := NewSlidingWindow(time.Minute, maxCount)
-	for i := 0; i < maxCount; i++ {
+	for i := range maxCount {
 		if !sw.Allow() {
 			t.Fatalf("第 %d 个 Allow 应放行", i+1)
 		}
@@ -144,13 +144,11 @@ func TestSlidingWindow_ConcurrentReserveNoStampede(t *testing.T) {
 	waits := make([]time.Duration, callers)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < callers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range callers {
+		wg.Go(func() {
 			<-start
 			waits[i], _ = sw.Reserve()
-		}(i)
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -184,7 +182,7 @@ func TestSlidingWindow_ReserveLinearNotQuadratic(t *testing.T) {
 
 	start := time.Now()
 	const calls = 40000
-	for i := 0; i < calls; i++ {
+	for range calls {
 		sw.Reserve()
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {

@@ -83,7 +83,7 @@ func TestWithConsecutiveFailures_ZeroDisables(t *testing.T) {
 		t.Fatalf("consecutive = %d, want 0", b.gb.consecutive)
 	}
 	// 关闭态下连发失败不应触发 open（缺省只有速率型，低样本受 protection 保护）
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_ = b.Do(context.Background(), func() error { return context.Canceled })
 	}
 	if s := b.State(); s != StateClosed {
@@ -189,7 +189,7 @@ func TestGetBreaker_ConflictHandler_WarnsOnce(t *testing.T) {
 	name := uniqBreakerName("conflict-once")
 	GetBreaker(name, WithBreakerConflictHandler(rec.handler))
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		GetBreaker(name, WithConsecutiveFailures(i+1))
 	}
 	if got := rec.snapshot(); len(got) != 1 {
@@ -235,17 +235,15 @@ func TestGetBreaker_Conflict_Concurrent(t *testing.T) {
 	const n = 64
 	var wg sync.WaitGroup
 	results := make([]Breaker, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range n {
+		wg.Go(func() {
 			// 一半纯复用（快路径），一半带不同 opts（冲突路径）
 			if i%2 == 0 {
 				results[i] = GetBreaker(name)
 			} else {
 				results[i] = GetBreaker(name, WithConsecutiveFailures(i))
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 
