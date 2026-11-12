@@ -26,7 +26,7 @@ func openBreaker(t *testing.T, cb *circuitBreaker) {
 	t.Helper()
 	boom := errors.New("boom")
 	ctx := context.Background()
-	for i := 0; i < 50000; i++ {
+	for range 50000 {
 		_ = cb.Do(ctx, func() error { return boom })
 	}
 }
@@ -92,7 +92,7 @@ func TestBreaker_WithBreakerWindow(t *testing.T) {
 
 	// 推进超过整窗（10 桶 × 10ms）：历史滚空也不恢复流量——熔断期收敛到探测级
 	clock.Advance(11 * 10 * time.Millisecond)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := b.Do(ctx, func() error { return nil }); !errors.Is(err, ErrCircuitOpen) {
 			t.Fatalf("call %d after window expiry err = %v, want ErrCircuitOpen", i, err)
 		}
@@ -109,7 +109,7 @@ func TestBreaker_WithBreakerWindow(t *testing.T) {
 	if b.State() != StateClosed {
 		t.Fatalf("State() after probe success = %v, want StateClosed", b.State())
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := b.Do(ctx, func() error { return nil }); err != nil {
 			t.Fatalf("call %d after close err = %v, want nil", i, err)
 		}
@@ -151,7 +151,7 @@ func TestBreaker_DoWithAcceptable(t *testing.T) {
 	acceptable := func(err error) bool { return errors.Is(err, bizErr) }
 
 	ctx := context.Background()
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		if err := b.DoWithAcceptable(ctx, func() error { return bizErr }, acceptable); !errors.Is(err, bizErr) {
 			t.Fatalf("call %d err = %v, want %v", i, err, bizErr)
 		}
@@ -298,12 +298,10 @@ func TestGetBreaker_Concurrent(t *testing.T) {
 	const n = 64
 	results := make([]Breaker, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range n {
+		wg.Go(func() {
 			results[i] = GetBreaker("concurrent-svc")
-		}(i)
+		})
 	}
 	wg.Wait()
 	for i := 1; i < n; i++ {
@@ -318,7 +316,7 @@ func TestErrorReasons_Ring(t *testing.T) {
 	if got := ew.String(); got != "" {
 		t.Fatalf("empty reasons String() = %q, want empty", got)
 	}
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		ew.add("reason-" + string(rune('0'+i)))
 	}
 	got := ew.String()

@@ -126,7 +126,7 @@ func (t *Tracker) UpdatePhase(name string, status PhaseStatus, progress float64)
 
 	// 自动完成之前的阶段（#247/#193 的「失败终态不可抹」语义由
 	// completePhaseLocked 单点维持——#265 起与 Complete 共用同一回写实现）
-	for i := 0; i < idx; i++ {
+	for i := range idx {
 		t.completePhaseLocked(i, now)
 	}
 }

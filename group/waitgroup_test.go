@@ -18,7 +18,7 @@ import (
 // 唤醒窗口内又来 Add」的 misuse 判定。单次 Wait 测不到（Wait 可能在任何
 // Add 之前就跑完）。
 func TestWaitGroupWrapper_ConcurrentWrapWait(t *testing.T) {
-	for round := 0; round < 50; round++ {
+	for range 50 {
 		w := NewWaitGroup(context.Background())
 		firstDone := make(chan struct{})
 		stop := make(chan struct{})
@@ -31,9 +31,7 @@ func TestWaitGroupWrapper_ConcurrentWrapWait(t *testing.T) {
 		<-firstDone // 首个 Add 已落位，竞态窗口从这里有原料
 
 		// 生产者：持续 Wrap（与 Wait 并发）
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -43,7 +41,7 @@ func TestWaitGroupWrapper_ConcurrentWrapWait(t *testing.T) {
 				w.Wrap(func(ctx context.Context) error { return nil })
 				runtime.Gosched()
 			}
-		}()
+		})
 
 		// 消费者：循环 Wait，反复进出注册/唤醒路径
 		waitDone := make(chan struct{})

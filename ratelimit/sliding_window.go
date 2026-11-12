@@ -76,7 +76,7 @@ func (sw *SlidingWindow) AllowN(n int) bool {
 	}
 
 	// 记录请求时间戳（有序插入：窗口里可能已有 Reserve 预占的未来槽位）
-	for i := 0; i < n; i++ {
+	for range n {
 		sw.insertLocked(now)
 	}
 

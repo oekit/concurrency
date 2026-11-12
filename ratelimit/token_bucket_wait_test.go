@@ -239,7 +239,7 @@ func TestTokenBucket_Tokens_IsReadOnly(t *testing.T) {
 	tb := NewTokenBucketFloat(10, 2, WithTokenClock(clock.Now))
 
 	first := tb.Tokens()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if got := tb.Tokens(); math.Abs(got-first) > 1e-9 {
 			t.Fatalf("读出口不应消耗配额: 第 %d 次读到 %v, 首次 %v", i, got, first)
 		}

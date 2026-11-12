@@ -28,7 +28,7 @@ func TestThrottle_FirstThenSuppress(t *testing.T) {
 	var runs atomic.Int32
 	fn := func(context.Context) error { runs.Add(1); return nil }
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		ran, err := th.Do(context.Background(), "k1", fn)
 		if err != nil {
 			t.Fatalf("第 %d 次调用返回错误: %v", i, err)
@@ -149,7 +149,7 @@ func TestThrottle_NonPositiveWindowDisables(t *testing.T) {
 
 	var runs atomic.Int32
 	fn := func(context.Context) error { runs.Add(1); return nil }
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if ran, _ := th.Do(context.Background(), "k", fn); !ran {
 			t.Fatalf("window<=0 时第 %d 次也应放行", i)
 		}
@@ -225,16 +225,14 @@ func TestThrottle_ConcurrentSingleRun(t *testing.T) {
 	var runs atomic.Int32
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 100 {
+		wg.Go(func() {
 			<-start
 			th.Do(context.Background(), "hot", func(context.Context) error {
 				runs.Add(1)
 				return nil
 			})
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -306,7 +304,7 @@ func TestThrottle_ZombieEntriesReapedOnWrite(t *testing.T) {
 
 	nop := func(context.Context) error { return nil }
 	// 一批只来一次的 key（churn 形态：实体删除/换名后不再回来）
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if _, err := th.Do(context.Background(), fmt.Sprintf("gone-%d", i), nop); err != nil {
 			t.Fatalf("Do 返回错误: %v", err)
 		}
@@ -325,7 +323,7 @@ func TestThrottle_ZombieEntriesReapedOnWrite(t *testing.T) {
 	}
 
 	// 同窗口内继续写入不再触发清扫（摊还预算）：新 key 正常记账
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if _, err := th.Do(context.Background(), fmt.Sprintf("fresh-%d", i), nop); err != nil {
 			t.Fatalf("Do 返回错误: %v", err)
 		}

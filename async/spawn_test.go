@@ -187,7 +187,7 @@ func TestSpawnWaitUpToPrefersResultOnTie(t *testing.T) {
 		return 3, nil
 	})
 	<-h.Done()
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		v, err, timedOut := h.WaitUpTo(context.Background(), 0)
 		if timedOut || err != nil || v != 3 {
 			t.Fatalf("completed handle probe = (%d, %v, %v), want (3, nil, false)", v, err, timedOut)
@@ -246,10 +246,8 @@ func TestSpawnConcurrentWaiters(t *testing.T) {
 		return 9, nil
 	})
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			v, err := h.Wait(context.Background())
 			if err != nil || v != 9 {
 				t.Errorf("Wait = (%d, %v), want (9, nil)", v, err)
@@ -257,7 +255,7 @@ func TestSpawnConcurrentWaiters(t *testing.T) {
 			if _, _, timedOut := h.WaitUpTo(context.Background(), time.Second); timedOut {
 				t.Errorf("WaitUpTo after completion must not report timedOut")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

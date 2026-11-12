@@ -203,7 +203,7 @@ func TestBackoffUnit(t *testing.T) {
 		t.Fatalf("线性 attempt=2 期望 20ms，得到 %v", d)
 	}
 	cfg = Config{Delay: 10 * time.Millisecond, Jitter: 5 * time.Millisecond}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		d := backoff(cfg, 1, nil)
 		if d < 10*time.Millisecond || d >= 15*time.Millisecond {
 			t.Fatalf("抖动越界：%v", d)
@@ -505,7 +505,7 @@ func TestDo_ZeroAmplitudeJitterDoesNotPanic(t *testing.T) {
 func TestBackoff_JitterStillAddsNoise(t *testing.T) {
 	cfg := Config{Delay: 100 * time.Millisecond, JitterRatio: 0.5}
 	seen := false
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		d := backoff(cfg, 1, errors.New("busy"))
 		if d < cfg.Delay || d > cfg.Delay*3/2 {
 			t.Fatalf("退避越界：%v 不在 [%v, %v]", d, cfg.Delay, cfg.Delay*3/2)
@@ -522,7 +522,7 @@ func TestBackoff_JitterStillAddsNoise(t *testing.T) {
 // TestBackoff_FixedJitterStaysInRange 固定抖动的幅度口径不变：仍在 [d, d+Jitter)。
 func TestBackoff_FixedJitterStaysInRange(t *testing.T) {
 	cfg := Config{Delay: 100 * time.Millisecond, Jitter: 20 * time.Millisecond}
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		d := backoff(cfg, 1, errors.New("busy"))
 		if d < cfg.Delay || d > cfg.Delay+cfg.Jitter {
 			t.Fatalf("退避越界：%v 不在 [%v, %v]", d, cfg.Delay, cfg.Delay+cfg.Jitter)

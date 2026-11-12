@@ -119,14 +119,12 @@ func TestLessExecutor_ConcurrentExactlyOne(t *testing.T) {
 	const n = 16
 	var executed atomic.Int32
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			if e.DoOrDiscard() {
 				executed.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if executed.Load() != 1 {
@@ -145,21 +143,19 @@ func TestLessExecutor_ConcurrentFirstWindowSingleExecution(t *testing.T) {
 		iterations = 20000
 		callers    = 6
 	)
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		var execs, trues atomic.Int32
 		e := NewLessExecutor(time.Hour, func() { execs.Add(1) })
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
-		for g := 0; g < callers; g++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range callers {
+			wg.Go(func() {
 				<-start
 				if e.DoOrDiscard() {
 					trues.Add(1)
 				}
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()

@@ -25,16 +25,14 @@ func TestFlight_Dedup(t *testing.T) {
 
 	var wg sync.WaitGroup
 	results := make(chan string, 10)
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 10 {
+		wg.Go(func() {
 			val, err := sf.Do(context.Background(), "key1", fn)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
 			results <- val
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -60,7 +58,7 @@ func TestFlight_DifferentKeys(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		wg.Add(1)
 		go func(key string) {
 			defer wg.Done()
@@ -86,13 +84,11 @@ func TestFlight_Error(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 5)
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 5 {
+		wg.Go(func() {
 			_, err := sf.Do(context.Background(), "err_key", fn)
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -264,13 +260,11 @@ func TestFlight_GenericInt(t *testing.T) {
 
 	var wg sync.WaitGroup
 	results := make(chan int, 5)
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 5 {
+		wg.Go(func() {
 			val, _ := sf.Do(context.Background(), "int_key", fn)
 			results <- val
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -302,13 +296,11 @@ func TestFlight_GenericStruct(t *testing.T) {
 
 	var wg sync.WaitGroup
 	results := make(chan token, 5)
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 5 {
+		wg.Go(func() {
 			val, _ := sf.Do(context.Background(), "struct_key", fn)
 			results <- val
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)

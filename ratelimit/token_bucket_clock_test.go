@@ -60,7 +60,7 @@ func TestTokenBucket_WithTokenClock_ProbeNotConsume(t *testing.T) {
 	}
 
 	const want = 200 * time.Millisecond
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if d, ok := tb.RetryAfter(); !ok || d != want {
 			t.Fatalf("probe %d = (%v, %v), want (%v, true) — probing must not consume", i+1, d, ok, want)
 		}

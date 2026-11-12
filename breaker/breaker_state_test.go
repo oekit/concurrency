@@ -31,7 +31,7 @@ func fillFailures(t *testing.T, cb *circuitBreaker) {
 	t.Helper()
 	boom := errors.New("boom")
 	ctx := context.Background()
-	for i := 0; i < 50000; i++ {
+	for range 50000 {
 		_ = cb.Do(ctx, func() error { return boom })
 	}
 	if cb.gb.state != stateOpen {
@@ -132,7 +132,7 @@ func TestState_ProbeSuccessClosesAndClearsWindow(t *testing.T) {
 	}
 
 	// closed 后健康放行不重开（清窗后 dropRatio ≤ 0，阈值不触发）
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		pp, gen, err := b.AllowGen(ctx)
 		if err != nil {
 			t.Fatalf("call %d after close err = %v, want pass", i, err)
@@ -394,7 +394,7 @@ func TestState_FormulaHealDoesNotAutoClose(t *testing.T) {
 	}
 	// 整窗滚出（10 桶 × 10ms = 100ms < 500ms，窗口已空）：公式愈合 → 拒绝（确定性，
 	// forcePass 未到期），不再全量放行
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if _, _, err := b.AllowGen(ctx); !errors.Is(err, ErrCircuitOpen) {
 			t.Fatalf("call %d after window expiry err = %v, want reject (probe-level traffic)", i, err)
 		}
@@ -745,7 +745,7 @@ func TestState_ConsecutiveFailuresDisabledByDefault(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("boom")
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := b.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
 			t.Fatalf("call %d err = %v, want boom", i+1, err)
 		}
@@ -765,7 +765,7 @@ func TestState_ConsecutiveTripProbeCycle(t *testing.T) {
 	boom := errors.New("boom")
 	fail := func() error { return boom }
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_ = b.Do(ctx, fail)
 	}
 	if b.gb.state != stateOpen {
@@ -810,9 +810,7 @@ func TestState_ConcurrentAllowReport(t *testing.T) {
 	stop := make(chan struct{})
 
 	// 时钟推进线程：驱动探测调度/超时回收/窗口滚动
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -822,13 +820,11 @@ func TestState_ConcurrentAllowReport(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// 放行/回报线程：覆盖普通放行、探测放行、探测迁移、显式放弃全路径
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range 8 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -845,7 +841,7 @@ func TestState_ConcurrentAllowReport(t *testing.T) {
 				}
 				b.AbandonGen(gen) // 拒绝时 gen=0：非探测代，安全 no-op
 			}
-		}(i)
+		})
 	}
 
 	time.Sleep(100 * time.Millisecond)

@@ -179,7 +179,7 @@ func TestLockout_RepeatOffenderReLocks(t *testing.T) {
 	lo := newTestLockout(clock, func(c *LockoutConfig) { c.LockDuration = 2 * time.Minute })
 	defer lo.Close()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		locked, _ := lo.RecordFailure("k")
 		if locked != (i == 2) {
 			t.Fatalf("failure %d locked=%v, want %v", i+1, locked, i == 2)
@@ -199,7 +199,7 @@ func TestLockout_NoExtendWhileLocked(t *testing.T) {
 	lo := newTestLockout(clock, nil)
 	defer lo.Close()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = lo.RecordFailure("k")
 	}
 	clock.Advance(time.Minute)
@@ -368,9 +368,7 @@ func TestLockout_ConcurrentHammer(t *testing.T) {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -380,12 +378,10 @@ func TestLockout_ConcurrentHammer(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range 8 {
+		wg.Go(func() {
 			key := i % 16
 			for {
 				select {
@@ -405,7 +401,7 @@ func TestLockout_ConcurrentHammer(t *testing.T) {
 					_, _ = lo.CheckLocked(key)
 				}
 			}
-		}(i)
+		})
 	}
 
 	time.Sleep(100 * time.Millisecond)

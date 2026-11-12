@@ -123,7 +123,7 @@ func TestKeyedLimiter_ReplaceHotReload(t *testing.T) {
 
 	// 热更换成高配额桶
 	kl.Replace("chan", NewTokenBucket(100, 100))
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if !kl.Allow("chan") {
 			t.Fatalf("replaced bucket should allow, i=%d", i)
 		}
@@ -225,14 +225,12 @@ func TestKeyedLimiter_Create_Concurrent(t *testing.T) {
 
 	var success atomic.Int64
 	var wg sync.WaitGroup
-	for i := 0; i < 64; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for range 64 {
+		wg.Go(func() {
 			if kl.Create(0, NewTokenBucket(1, 1)) {
 				success.Add(1)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	if success.Load() != 1 {

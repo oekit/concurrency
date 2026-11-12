@@ -35,7 +35,7 @@ func TestPool_GoCtxGo(t *testing.T) {
 	p := NewPool("basic", PoolOption{TaskChanBuffer: 64})
 	var n atomic.Int32
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(1)
 		p.Go(func() {
 			defer wg.Done()
@@ -112,7 +112,7 @@ func TestPool_QueueFullFallback(t *testing.T) {
 	var n atomic.Int32
 	var wg sync.WaitGroup
 	release := make(chan struct{})
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		wg.Add(1)
 		p.Go(func() {
 			defer wg.Done()
@@ -133,7 +133,7 @@ func TestPool_TempWorkerBypass(t *testing.T) {
 	var n atomic.Int32
 	var wg sync.WaitGroup
 	release := make(chan struct{})
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(1)
 		p.Go(func() {
 			defer wg.Done()
@@ -152,7 +152,7 @@ func TestPool_TempWorkerBypass(t *testing.T) {
 func TestPool_WorkerMaxAge(t *testing.T) {
 	p := NewPool("age", PoolOption{WorkerMaxAge: 40 * time.Millisecond, TaskChanBuffer: 32})
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		wg.Add(1)
 		p.Go(func() { defer wg.Done() })
 	}
@@ -171,7 +171,7 @@ func TestPool_WorkerMaxAge(t *testing.T) {
 func TestPool_CloseDrains(t *testing.T) {
 	p := NewPool("close", PoolOption{TaskChanBuffer: 64})
 	var n atomic.Int32
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		p.Go(func() {
 			time.Sleep(2 * time.Millisecond)
 			n.Add(1)
@@ -242,9 +242,9 @@ func TestDefaultPool(t *testing.T) {
 // 竞态窗口以 closed 标记兜底：旁路执行，不丢不炸）。
 func TestPool_ConcurrentSubmitAndClose(t *testing.T) {
 	p := NewPool("concurrent", PoolOption{TaskChanBuffer: 16})
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		go func() {
-			for j := 0; j < 50; j++ {
+			for range 50 {
 				p.Go(func() { runtime.Gosched() })
 			}
 		}()
@@ -259,7 +259,7 @@ func BenchmarkGopool_Go(b *testing.B) {
 	p := NewPool("bench", PoolOption{TaskChanBuffer: 1024})
 	var n atomic.Int64
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		p.Go(func() { n.Add(1) })
 	}
 }
@@ -292,13 +292,13 @@ func TestPool_AgedWorkerExitDrainsBacklog(t *testing.T) {
 	// 直塞两个积压任务（drainTasks 经 runTask 归减 wg，需配套 Add）
 	p.wg.Add(2)
 	done := make(chan struct{}, 2)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		p.tasks <- task{ctx: context.Background(), f: func() { done <- struct{}{} }}
 	}
 
 	// W1 跑完长任务 → 查龄退出：退出前必须 drain 两个积压任务
 	close(release)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):

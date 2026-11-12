@@ -367,7 +367,7 @@ func TestGroup_IDOfMayReadGroupState(t *testing.T) {
 	}
 
 	// 两次 idOf 读回都要真的发生（不是没跑就通过）
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case <-readBack:
 		case <-time.After(3 * time.Second):

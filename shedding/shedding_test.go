@@ -90,7 +90,7 @@ func primeThroughput(t *testing.T, as *adaptiveShedder, clock *fakeClock, perBuc
 	ctx := context.Background()
 	for round, n := range perBucket {
 		clock.Advance(testBucketInterval) // 跨入新桶：已完成的桶才计入 maxPass/minRt
-		for i := 0; i < n; i++ {
+		for i := range n {
 			p, err := as.Allow(ctx)
 			if err != nil {
 				t.Fatalf("prime round %d request %d err = %v", round, i, err)
@@ -114,7 +114,7 @@ func overloadShedder(t *testing.T, clock *fakeClock, stub *cpuStub, opts ...Shed
 
 	ctx := context.Background()
 	// CPU 正常期悬挂 150 个在途请求（不回填）
-	for i := 0; i < 150; i++ {
+	for i := range 150 {
 		if _, err := as.Allow(ctx); err != nil {
 			t.Fatalf("inflight build allow %d err = %v", i, err)
 		}
@@ -159,7 +159,7 @@ func TestShedder_LowCPUAlwaysAllows(t *testing.T) {
 	primeThroughput(t, as, clock, []int{1000, 1000, 1000}, time.Microsecond)
 
 	ctx := context.Background()
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		p, err := as.Allow(ctx)
 		if err != nil {
 			t.Fatalf("allow %d err = %v, want nil (low cpu never sheds)", i, err)
@@ -198,7 +198,7 @@ func TestShedder_OverloadDropsExcess(t *testing.T) {
 	}
 	// 后续请求持续丢弃（仍过载且超限）
 	ctx := context.Background()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if p, err := as.Allow(ctx); err != ErrServiceOverloaded || p != nil {
 			t.Fatalf("drop %d = (%v, %v), want bare ErrServiceOverloaded + nil promise", i, p, err)
 		}
@@ -267,7 +267,7 @@ func TestShedder_EMAFlyingLags(t *testing.T) {
 	ctx := context.Background()
 	const n = 10
 	promises := make([]Promise, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		p, err := as.Allow(ctx)
 		if err != nil {
 			t.Fatalf("allow %d err = %v", i, err)
@@ -359,7 +359,7 @@ func TestShedder_CtxCancelled(t *testing.T) {
 func TestNopShedder_AlwaysAllows(t *testing.T) {
 	nop := NewNopShedder()
 	ctx := context.Background()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		p, err := nop.Allow(ctx)
 		if err != nil || p == nil {
 			t.Fatalf("nop allow %d = (%v, %v), want (promise, nil)", i, p, err)
@@ -454,7 +454,7 @@ func TestShedder_CPUErrorFailOpen(t *testing.T) {
 	primeThroughput(t, as, clock, []int{1000, 1000, 1000}, time.Microsecond)
 
 	ctx := context.Background()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if _, err := as.Allow(ctx); err != nil {
 			t.Fatalf("allow %d err = %v, want pass (error source must fail open)", i, err)
 		}

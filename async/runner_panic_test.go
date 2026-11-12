@@ -44,7 +44,7 @@ func TestRunner_HandlerPanicContained(t *testing.T) {
 	// 不能按固定顺序比对
 	want := []string{"fn-a", "fn-b", "fn-c", "fn-d", "task=task-e: fn-e", "fn-f"}
 	got := make(map[string]bool, len(want))
-	for i := 0; i < len(want); i++ {
+	for i := range len(want) {
 		select {
 		case msg := <-called:
 			got[msg] = true
