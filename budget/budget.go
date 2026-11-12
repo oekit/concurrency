@@ -43,8 +43,10 @@ type Ledger struct {
 	now      func() time.Time
 }
 
-// Option 配置 Ledger。
-type Option func(*Ledger)
+// BudgetOption 配置 Ledger（#282：按仓规命名 XxxOption，禁裸 Option——
+// 多包 co-import / dot-import 场景下裸名必然撞车，本包曾因裸 Option 成为
+// 仓内 10 个 Option 类型里的唯一漏项）。
+type BudgetOption func(*Ledger)
 
 // WithClock 注入时钟（按龄清理与入档时间的确定性测试入口；
 // 与 batch.WithBatchClock / shedding.WithShedderClock 同形）。
@@ -52,7 +54,7 @@ type Option func(*Ledger)
 // now 为 nil 时保留缺省时钟（time.Now）：与三个兄弟时钟选项同口径——可选注入
 // 变量未赋值的自然形态不该被放大成 panic，而 panic 点离构造点最远（首次超限
 // 记账或任意一次 Sweep）、时机最敏感（生产过载时），必须消灭在构造期。
-func WithClock(now func() time.Time) Option {
+func WithClock(now func() time.Time) BudgetOption {
 	return func(l *Ledger) {
 		if now != nil {
 			l.now = now
@@ -62,7 +64,7 @@ func WithClock(now func() time.Time) Option {
 
 // NewLedger 创建记账器。caps 是各维度预算上限（拷贝存储，调用方后续修改
 // 无影响）；未声明的维度不限量（仅记账语义不存在，不会误拦）。
-func NewLedger(caps map[Dimension]int64, opts ...Option) *Ledger {
+func NewLedger(caps map[Dimension]int64, opts ...BudgetOption) *Ledger {
 	l := &Ledger{
 		caps:     make(map[Dimension]int64, len(caps)),
 		used:     make(map[Dimension]int64),

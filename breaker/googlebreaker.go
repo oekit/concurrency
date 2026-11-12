@@ -199,31 +199,38 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	b.mu.Unlock()
 
 	// 窗口聚合一次：速率型触发判定（closed→open）的唯一输入
-	// （#25 起公式退役为触发器——open 态放行只走 forcePass 与半开探测）
-	history := b.history()
-	w := k - (k-minK)*float64(history.failingBuckets)/float64(b.windowSize)
-	if w < minK {
-		w = minK
-	}
-	weightedAccepts := w * float64(history.accepts)
-	// https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101
-	// for better performance, no need to care about the negative ratio
-	dropRatio := (float64(history.total-protection) - weightedAccepts) / float64(history.total+1)
-
-	// closed 态接受预算耗尽（错误率超阈值）→ 切入 open，本请求即按 open 策略判定；
-	// 锁内复核——状态可能已被并发的探测回报/回收迁移
+	// （#25 起公式退役为触发器——open 态放行只走 forcePass 与半开探测）。
+	//
+	// 聚合只在 closed 态执行（#273）：dropRatio 的唯一消费方是 closed→open
+	// 触发判定，open/half-open 的放行策略根本不消费它——而 open 正是过载、
+	// 拒绝 QPS 最高的工况，此前每笔拒绝都为这个不消费的值白做一次全窗聚合
+	// （40 桶 Reduce，RLock 全窗扫描）。非 closed 态直接进放行策略分支。
 	open := st != stateClosed
-	if st == stateClosed && dropRatio > 0 {
-		b.mu.Lock()
-		if b.state == stateClosed {
-			b.state = stateOpen
-			b.openSince = now
-			b.probeGen = 0
-			b.consecFails = 0     // 进入 open：连续失败计数归零
-			b.lastPass.Store(now) // open 期 forcePass 自进入起算
+	if st == stateClosed {
+		history := b.history()
+		w := k - (k-minK)*float64(history.failingBuckets)/float64(b.windowSize)
+		if w < minK {
+			w = minK
 		}
-		open = b.state != stateClosed
-		b.mu.Unlock()
+		weightedAccepts := w * float64(history.accepts)
+		// https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101
+		// for better performance, no need to care about the negative ratio
+		dropRatio := (float64(history.total-protection) - weightedAccepts) / float64(history.total+1)
+
+		// closed 态接受预算耗尽（错误率超阈值）→ 切入 open，本请求即按 open
+		// 策略判定；锁内复核——状态可能已被并发的探测回报/回收迁移
+		if dropRatio > 0 {
+			b.mu.Lock()
+			if b.state == stateClosed {
+				b.state = stateOpen
+				b.openSince = now
+				b.probeGen = 0
+				b.consecFails = 0     // 进入 open：连续失败计数归零
+				b.lastPass.Store(now) // open 期 forcePass 自进入起算
+			}
+			open = b.state != stateClosed
+			b.mu.Unlock()
+		}
 	}
 
 	// closed 态：预算内全量放行（速率型触发已由上面的判定接管）

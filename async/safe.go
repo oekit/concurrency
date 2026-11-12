@@ -73,8 +73,11 @@ func init() {
 // 用法:
 //
 //	async.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
-//	    logx.CtxError(ctx, "goroutine panic", "err", r, "stack", string(stack))
+//	    logx.CtxError(ctx, "goroutine panic", logx.ErrKey, r, "stack", string(stack))
 //	})
+//
+// （logx.ErrKey 为 oekit/logx 的错误字段常量——错误字段名统一走该常量，
+// 禁止手写 "err" 字面量，消费方仓 AGENTS 同款红线，#288。）
 func SetPanicHandler(handler PanicHandler) {
 	if handler == nil {
 		defaultHandler := defaultPanicHandler()

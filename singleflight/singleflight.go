@@ -24,8 +24,9 @@ type call[T any] struct {
 	ready chan struct{}
 	val   T
 	err   error
-	// waiters 折叠掉的并发调用方数。原子递增：close(ready) 与 Delete 之间
-	// 仍可能有迟到 waiter 注册——计数为近似值（观测口径，非精确账目）。
+	// waiters 折叠掉的并发调用方数。原子递增：摘键（CompareAndDelete）与
+	// 唤醒（close ready）之间仍可能有迟到 waiter 注册——计数为近似值
+	// （观测口径，非精确账目）。
 	waiters atomic.Int32
 }
 
@@ -63,15 +64,21 @@ func waitCall[T any](ctx context.Context, c *call[T]) (T, error, bool) {
 	}
 }
 
-// release 关闭 ready 唤醒全部 waiter，并按 CompareAndDelete 清理在飞记录。
-// 清理用 CompareAndDelete 而非 Delete（#105 契约唯一注释点）：Delete 是
-// **无条件**删除 key，而 Forget(key) 之后可能已经注册了同 key 的**新** call
-// ⇒ 本次清理会把那条新记录一起删掉 ⇒ 第三个调用方会另起一次 fn ⇒「同 key
-// 只执行一次 fn」的承诺被打破（x/sync/singleflight 用 `if g.m[key] == c`
-// 判同一）。三条入口的清理语义必须一致，否则该承诺只在部分路径上成立。
+// release 先摘除在飞记录、后关闭 ready 唤醒全部 waiter（#285：顺序即契约，
+// 对齐 pkg/internal/singleflight 与 golang.org/x/sync/singleflight）。
+// 反过来（先 close 后摘键）会留一个窗口：ready 已关、key 还在 ⇒ 新到调用
+// LoadOrStore 命中的是**已结束**的那次 flight ⇒ 不执行 fn 直接拿到上一次的
+// 结果——陈旧结果被当成新鲜结果返回；且唤醒风暴会把 leader 的摘键推迟到
+// 毫秒级（同款探针实测：close-first 侧 join 率 24.9% / maxAge 6ms，摘键侧
+// 0.5% / 92µs，差 50×——见 TestNarrowWindow_NoStaleJoin）。摘键用
+// CompareAndDelete 而非 Delete（#105 契约唯一注释点）：Delete 是**无条件**
+// 删除 key，而 Forget(key) 之后可能已经注册了同 key 的**新** call ⇒ 本次清理
+// 会把那条新记录一起删掉 ⇒ 第三个调用方会另起一次 fn ⇒「同 key 只执行一次
+// fn」的承诺被打破（x/sync/singleflight 用 `if g.m[key] == c` 判同一）。
+// 三条入口的清理语义必须一致，否则该承诺只在部分路径上成立。
 func (f *Flight[T]) release(key string, c *call[T]) {
-	close(c.ready)
 	f.calls.CompareAndDelete(key, c)
+	close(c.ready)
 }
 
 // runLeader 执行 leader 的 fn 并统一收尾（#262 唯一的 panic 清理实现）：

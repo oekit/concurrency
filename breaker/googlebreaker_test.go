@@ -389,3 +389,93 @@ func TestGoogleBreaker_ForcePassGrantRacesExactlyOne(t *testing.T) {
 		}
 	}
 }
+
+// TestGoogleBreaker_OpenStateRejectionFastPath open 态拒绝热路径不做窗口聚合
+// （#273）：dropRatio 的唯一消费方是 closed→open 触发判定，open/half-open 的
+// 放行策略不消费它——修复前 open 态（过载、拒绝 QPS 最高的工况）每笔拒绝都
+// 白做一次全窗 Reduce。本用例钉住重构后的行为等价面：open 态在冻结时钟下
+// forcePass/半开探测均不可达，判定恒拒绝、样本照常落桶、状态不迁移。
+func TestGoogleBreaker_OpenStateRejectionFastPath(t *testing.T) {
+	clock := &fakeClock{}
+	b := newTestGoogleBreaker(clock)
+	boom := errors.New("boom")
+
+	// 全失败灌满窗口直至触发 closed→open（dropRatio 随 total 单调升向 1）
+	for i := range 300 {
+		_, rejected := b.doReq(func() error { return boom }, defaultAcceptable)
+		if rejected {
+			if b.state != stateOpen {
+				t.Fatalf("call %d rejected but state = %v", i, b.state)
+			}
+			break
+		}
+		if i == 299 {
+			t.Fatal("expected breaker to trip open under total failure")
+		}
+	}
+
+	// 冻结时钟下的 open 态：冷却（1m）未满 ⇒ 无半开探测；forcePass（1s）未到期
+	// ⇒ 无强制探活——每笔判定都必须拒绝（快速路径），且丢弃样本照常落桶
+	total0, _ := sumBucket(b)
+	const rejects = 1000
+	for range rejects {
+		p, _, err := b.allowGen()
+		if !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("open state must reject, got %v", err)
+		}
+		if p.b != nil {
+			t.Fatal("rejected call must not carry a promise")
+		}
+	}
+	total1, _ := sumBucket(b)
+	if got := total1 - total0; got != rejects {
+		t.Fatalf("drop samples recorded = %d, want %d（拒绝样本口径不变）", got, rejects)
+	}
+	if b.state != stateOpen {
+		t.Fatalf("state = %v, want open（拒绝路径不得迁移状态）", b.state)
+	}
+}
+
+// BenchmarkAllowGen_Closed closed 态放行路径：每笔做一次全窗聚合（速率型触发
+// 判定的输入，#273 起仅 closed 态承担）。
+func BenchmarkAllowGen_Closed(b *testing.B) {
+	clock := &fakeClock{}
+	gb := newGoogleBreaker(breakerConfig{
+		windowSize:     DefaultBuckets,
+		windowInterval: testInterval,
+		forcePass:      DefaultForcePass,
+		probeTimeout:   DefaultProbeTimeout,
+		clock:          clock.Now,
+	})
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		clock.Advance(testInterval) // 每笔跨桶，覆盖整窗滚动
+		if _, _, err := gb.allowGen(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkAllowGen_OpenRejected open 态拒绝热路径（#273 的收益面）：修复前
+// 每笔拒绝与 closed 放行同价（全窗聚合白做），修复后为纯状态机判定。
+func BenchmarkAllowGen_OpenRejected(b *testing.B) {
+	clock := &fakeClock{}
+	gb := newGoogleBreaker(breakerConfig{
+		windowSize:     DefaultBuckets,
+		windowInterval: testInterval,
+		forcePass:      DefaultForcePass,
+		probeTimeout:   DefaultProbeTimeout,
+		clock:          clock.Now,
+	})
+	for {
+		if _, _, err := gb.allowGen(); err != nil {
+			break // 全失败灌满窗口直至 open（拒绝路径无代可回报，首次拒绝即退出）
+		}
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := gb.allowGen(); !errors.Is(err, ErrCircuitOpen) {
+			b.Fatalf("want ErrCircuitOpen, got %v", err)
+		}
+	}
+}
