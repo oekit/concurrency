@@ -55,7 +55,7 @@ func (g *Group) Run() error {
 	// Run 也保证等齐所有 Actor 再返回（不泄漏未通知、未等待的 goroutine）。
 	defer func() {
 		for i := 1; i < cap(errors); i++ {
-			<-errors
+			_ = <-errors // 排空丢弃：等待信号本身即目的，值在上面 err := 已取
 		}
 	}()
 
