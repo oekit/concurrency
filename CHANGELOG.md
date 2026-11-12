@@ -1,3 +1,7 @@
+## [v0.34.1] — 2026-11-12
+
+- Go 1.26 现代化清扫：计数循环→range N（1.22）129 处、干净 WaitGroup fan-out→wg.Go（1.25）31 处、生产代码 range-int 9 处（progress/ratelimit/window/syncx）；纯等价重构，行为零变更，gofmt/vet/test 与基线一致 + race 抽查全绿。
+
 ## [v0.34.0] — 2026-11-12
 
 - 全仓 issue 清零 sweep（#259 索引 13 单）：pkg errors.Recovered 单源收编 + 重复块收敛 + 行为缺陷修复
