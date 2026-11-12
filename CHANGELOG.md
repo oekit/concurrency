@@ -1,3 +1,9 @@
+## [v0.35.0] — 2026-11-13
+
+- 热路径与调度语义修复批：breaker open 态快速拒绝（#273）；timewheel 任务执行器可注入、缺省同步语义不变（#274）；ErrCircuitOpen 别名声明对齐现状（#275）；budget 裸 Option 改名 BudgetOption（#282，**BREAKING** 0.x minor）；retry 指数退避溢出边界修复 1<<62（#283）；singleflight 先摘键后唤醒对齐 pkg 参照（#285，窄窗口 join 率 24.9%→0.5%）；godoc 示例 err 字面量收口 logx.ErrKey（#288）；NewTokenBucket 构造期校验 + rps=0 显式不限速档（#291）；retry.Poll interval<=0 构造期 panic（#292）
+
+关联问题单：concurrency#273、concurrency#274、concurrency#275、concurrency#282、concurrency#283、concurrency#285、concurrency#288、concurrency#291、concurrency#292。
+
 ## [v0.34.1] — 2026-11-12
 
 - Go 1.26 现代化清扫：计数循环→range N（1.22）129 处、干净 WaitGroup fan-out→wg.Go（1.25）31 处、生产代码 range-int 9 处（progress/ratelimit/window/syncx）；纯等价重构，行为零变更，gofmt/vet/test 与基线一致 + race 抽查全绿。
