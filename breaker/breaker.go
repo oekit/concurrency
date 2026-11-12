@@ -11,8 +11,9 @@ import (
 )
 
 // ErrCircuitOpen 是熔断打开（请求被拒绝）时的全库规范哨兵，错误消息逐字为
-// "circuit breaker is open"（与 httpx.ErrCircuitOpen 一致，后者将改为别名本哨兵，
-// nns-endpoint 经 httpx 别名链共用同一 sentinel）。判定一律用 errors.Is。
+// "circuit breaker is open"（httpx.ErrCircuitOpen 即本哨兵的别名，nns-endpoint
+// 经 httpx 别名链共用同一 sentinel——别名链已落地，errors.Is 跨包判定可依赖，
+// #275）。判定一律用 errors.Is。
 var ErrCircuitOpen = errors.New("circuit breaker is open")
 
 // State 为熔断器状态（可观测出口，#25 附带建议——此前消费方只能靠 Allow 报错反推）。

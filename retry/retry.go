@@ -226,7 +226,11 @@ func computedDelay(cfg Config, attempt int) time.Duration {
 	}
 	switch {
 	case cfg.Exponential:
-		// Delay * 2^(attempt-1)；溢出饱和而非回绕为负
+		// Delay * 2^(attempt-1)；溢出饱和而非回绕为负。
+		// 护栏判据必须含边界（#283）：delay 恰为 1<<62 时翻倍即 1<<63，int64
+		// 回绕成负——旧实现用严格 `>` 把这个值放行成负 delay（#166 认定的
+		// 「指数路径有防御」实测差一位）。`>=` 与「先护栏后翻倍」配套：进入
+		// 翻倍前的 delay 上界是 1<<62，翻倍后 ≤ MaxInt64 恒可表示。
 		delay := cfg.Delay
 		for i := 1; i < attempt; i++ {
 			if delay <= 0 {
@@ -235,7 +239,7 @@ func computedDelay(cfg Config, attempt int) time.Duration {
 			if cfg.MaxDelay > 0 && delay >= cfg.MaxDelay {
 				break
 			}
-			if delay > time.Duration(1<<62) {
+			if delay >= time.Duration(1<<62) {
 				delay = time.Duration(1<<63 - 1)
 				break
 			}

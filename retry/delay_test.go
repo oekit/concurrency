@@ -123,3 +123,42 @@ func TestDelay_LinearOverflowSaturates(t *testing.T) {
 		t.Fatalf("Delay(线性 attempt=3) = %s，期望 3s", got)
 	}
 }
+
+// TestDelay_ExponentialOverflowAtExactBoundary 指数护栏的差一位洞（#283）：
+// delay 恰为 1<<62 时旧护栏（严格 `>`）放行翻倍 ⇒ 1<<63 在 int64 回绕成负
+// ——负 delay 穿过封顶/抖动原样直达，到 DoValue 变成 delay<=0 直通，退避
+// 静默消失（#166 认定「指数路径有防御」的那道防线实测差一位）。修复后
+// `>=` 含边界：恰好 1<<62 的 delay 第一次翻倍前即饱和到 MaxInt64；
+// attempt=1（不翻倍）的 1<<62 本身可表示，保持原值。
+func TestDelay_ExponentialOverflowAtExactBoundary(t *testing.T) {
+	const maxDur = time.Duration(math.MaxInt64)
+	cfg := Config{Delay: time.Duration(1) << 62, Exponential: true}
+
+	// attempt=1：循环体不执行，delay 保持 1<<62（可表示、为正，不触发护栏）
+	if got := Delay(cfg, 1, nil); got != time.Duration(1)<<62 {
+		t.Fatalf("Delay(指数 attempt=1) = %s，期望原值 1<<62", got)
+	}
+	// attempt>=2：任一次翻倍都越过护栏，饱和到 MaxInt64，恒为正
+	for _, attempt := range []int{2, 3, 10, math.MaxInt} {
+		if got := Delay(cfg, attempt, nil); got != maxDur || got <= 0 {
+			t.Fatalf("Delay(指数 attempt=%d) = %d，期望饱和 MaxInt64（旧实现此处回绕成负）", attempt, got)
+		}
+		if got := Backoff(cfg, attempt); got != maxDur || got <= 0 {
+			t.Fatalf("Backoff(指数 attempt=%d) = %d，期望饱和 MaxInt64", attempt, got)
+		}
+		if got := TotalBackoff(cfg, attempt+1); got <= 0 {
+			t.Fatalf("TotalBackoff(指数 attempt=%d) = %d，期望为正", attempt, got)
+		}
+	}
+	// 实跑面：DoValue 的退避等待同样为正（负 delay 会变直通紧循环）
+	cfgNoHint := cfg
+	if got := backoff(cfgNoHint, 2, nil); got != maxDur || got <= 0 {
+		t.Fatalf("backoff(实跑 attempt=2) = %d，期望饱和 MaxInt64", got)
+	}
+
+	// 对照：MaxDelay 封顶优先于饱和护栏——配置了封顶时在封顶处停下
+	capped := Config{Delay: time.Duration(1) << 62, Exponential: true, MaxDelay: time.Minute}
+	if got := Delay(capped, 2, nil); got != time.Minute {
+		t.Fatalf("Delay(指数+封顶 attempt=2) = %s，期望封顶 1m", got)
+	}
+}

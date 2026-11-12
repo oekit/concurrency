@@ -2,7 +2,13 @@ package budget
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -260,3 +266,49 @@ func newFakeClock(start time.Time) *fakeClock { return &fakeClock{t: start} }
 func (c *fakeClock) Now() time.Time { return c.t }
 
 func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// bareOptionRe 匹配裸 `Option` 类型声明（`type Option func(...)` / `type Option = ...`），
+// 不误伤 XxxOption（词边界）与注释/字符串中的单词。
+var bareOptionRe = regexp.MustCompile(`^type Option\s*(func|=|\[)`)
+
+// TestNoBareOptionType 仓级命名门禁（#282）：AGENTS.md 硬规则「函数选项模式
+// XxxOption（禁止裸 Option，多包 co-import 冲突）」——budget 曾是仓内 10 个
+// Option 类型里唯一的裸名漏项（其余 9 包全用 XxxOption）。改名收口后本用例
+// 扫全仓非测试 .go 源码钉住口径：再出现裸 `Option` 类型声明即失败。
+// 与 pkg 仓 cache/pack/urlguard 三个裸 Option 的收尾门禁（pkg#355）同一手法。
+func TestNoBareOptionType(t *testing.T) {
+	root := "../.." // go test 的工作目录是包目录，仓库根在上两级
+	var offenders []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".github", "testdata":
+				return filepath.SkipAll
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if bareOptionRe.MatchString(line) {
+				offenders = append(offenders, fmt.Sprintf("%s:%d: %s", path, i+1, line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("扫描仓库失败: %v", err)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("发现裸 `Option` 类型声明（违反 AGENTS.md「禁止裸 Option」，#282）：\n%s",
+			strings.Join(offenders, "\n"))
+	}
+}

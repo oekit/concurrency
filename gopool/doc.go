@@ -7,10 +7,12 @@
 // 用有界 worker 集合摊薄 goroutine 创建与调度开销，给并发数一个软上限
 // （MaxIdleWorkers 之上仍会临时超编，只是即用即走）。
 //
-// 典型接线（业务侧把 panic 汇入 logx）：
+// 典型接线（业务侧把 panic 汇入 logx；logx.ErrKey 为 oekit/logx 的错误字段
+// 常量——错误字段名统一走该常量，禁止手写 "err" 字面量，消费方仓 AGENTS
+// 同款红线，#288）：
 //
 //	gopool.SetPanicHandler(func(ctx context.Context, r any, stack []byte) {
-//	    logx.Error("gopool panic", "err", r, "stack", string(stack))
+//	    logx.Error("gopool panic", logx.ErrKey, r, "stack", string(stack))
 //	})
 //	gopool.Go(func() { ... })                 // 包级默认池
 //	p := gopool.NewPool("ingest", gopool.PoolOption{MaxIdleWorkers: 64})

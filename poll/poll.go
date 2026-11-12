@@ -142,7 +142,9 @@ type Config struct {
 //	    OnAdvance:    store.Save,
 //	}, cursor, fetchBatch, handleOne)
 //	if err != nil && !errors.Is(err, context.Canceled) {
-//	    log.Error("收消息循环退出", "err", err)
+//	    log.Error("收消息循环退出", logx.ErrKey, err)
+//	// （logx.ErrKey 为 oekit/logx 的错误字段常量——错误字段名统一走该常量，
+//	// 禁止手写 "err" 字面量，消费方仓 AGENTS 同款红线，#288。）
 //	}
 func RunCursor[T any](
 	ctx context.Context,

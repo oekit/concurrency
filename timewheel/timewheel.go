@@ -51,6 +51,7 @@ type WheelOption func(*wheelOptions)
 
 type wheelOptions struct {
 	tickerFactory TickerFactory
+	taskExecutor  func(task func())
 }
 
 // WithWheelTicker 注入周期信号源工厂。nil 工厂被忽略。
@@ -62,11 +63,52 @@ func WithWheelTicker(f TickerFactory) WheelOption {
 	}
 }
 
+// WithWheelTaskExecutor 注入到期任务的执行器，把任务触发派发出事件循环
+// （#274）。缺省（不配置）任务在事件循环内同步执行——单线程时间轮的既有
+// 语义：SetTimer/MoveTimer/RemoveTimer/HasTimer 与 tick 全部串行在同一
+// goroutine 上，慢任务会直接变成 tick 漂移与操作阻塞。挂重 IO/RPC 的调用方
+// 应注入执行器转后台，例如复用仓内 worker 池：
+//
+//	pool := gopool.NewPool("timewheel", gopool.PoolOption{MaxIdleWorkers: 32})
+//	tw := timewheel.NewTimingWheel(time.Second, 60,
+//	    timewheel.WithWheelTaskExecutor(pool.Go))
+//
+// 调度语义（与缺省同步态对齐的部分，向后兼容承诺）：
+//   - **不丢**：任务从槽位摘除后即交付执行器，交付恰一次；交付后 wheel 不再
+//     追踪——Close 的「未触发任务丢弃」语义以**交付**为界（已交付的任务由
+//     执行器负责跑完，wheel 关闭不回收它们）；
+//   - **不乱序于交付**：跨 tick 按时间轮推进顺序交付（早 tick 先交付）；
+//     同一 tick 内同槽多条目按 map 遍历序（与缺省态一致，不保证确定序）；
+//   - **并行度与顺序归执行器**：执行器以何种并发度、按什么顺序实际运行任务
+//     由其实现决定（需要严格串行就注入单 worker 执行器，如
+//     `func(t func()) { go serialQueue(t) }`）；
+//   - **panic 收编不变**：交付的闭包内含 async.RunSafe 包裹，任务 panic 不会
+//     打死执行器的 worker goroutine（gopool 自身的 recoverRun 之外的双保险）；
+//   - 执行器自身应快速返回（入队即回）；在执行器里同步执行任务等于回到
+//     缺省同步态的阻塞语义，还多了间接层。
+//
+// exec 为 nil 时忽略（保留缺省同步执行，nil 参数 = 回退默认值的总则口径）。
+func WithWheelTaskExecutor(exec func(task func())) WheelOption {
+	return func(o *wheelOptions) {
+		if exec != nil {
+			o.taskExecutor = exec
+		}
+	}
+}
+
 // TimingWheel 单级时间轮：所有操作经事件 channel 串行到唯一后台循环
 // （无锁），每 tick 推进一格并触发到期任务。
 //
-// 已到期未触发的任务在 Close 后丢弃（不保证触发）；需要持久化/重试语义
-// 请用 github.com/oekit/timertask。
+// # 任务执行语义（#274）
+//
+// 缺省：到期任务在事件循环 goroutine 内**同步**执行（async.RunSafe 收编
+// panic）——task 必须轻量，重 IO/RPC/长计算会直接阻塞 tick 推进与全部操作
+// （含 HasTimer 的应答）。重活请用 WithWheelTaskExecutor 注入执行器把触发
+// 派发出事件循环（可接 gopool），或按旧口径在 task 内自行转后台。
+//
+// 已到期未触发的任务在 Close 后丢弃（不保证触发）；配置执行器时以「交付给
+// 执行器」为已触发界（见 WithWheelTaskExecutor 的调度语义）。需要持久化/
+// 重试语义请用 github.com/oekit/timertask。
 type TimingWheel struct {
 	interval time.Duration
 	numSlots int
@@ -80,11 +122,16 @@ type TimingWheel struct {
 	closed  sync.Once
 
 	tickerFunc TickerFactory
+	// taskExecutor 到期任务执行器（WithWheelTaskExecutor）；nil = 缺省同步执行。
+	taskExecutor func(task func())
 }
 
 // NewTimingWheel 创建并启动时间轮。interval 为每格时长（必须 >0），
 // numSlots 为格数（必须 >0）；二者决定可表达的单轮范围 interval×numSlots，
 // 更长延迟由圈数表达。参数非法属于编程错误，直接 panic。
+//
+// 到期任务缺省在事件循环内同步执行（task 必须轻量，语义详见 TimingWheel
+// 与 WithWheelTaskExecutor 的 godoc，#274）。
 func NewTimingWheel(interval time.Duration, numSlots int, opts ...WheelOption) *TimingWheel {
 	if interval <= 0 {
 		panic("timewheel: interval must be positive")
@@ -100,14 +147,15 @@ func NewTimingWheel(interval time.Duration, numSlots int, opts ...WheelOption) *
 		o.tickerFactory = defaultTickerFactory
 	}
 	tw := &TimingWheel{
-		interval:   interval,
-		numSlots:   numSlots,
-		slots:      make([]map[*timerEntry]struct{}, numSlots),
-		timers:     make(map[any]*timerEntry),
-		eventCh:    make(chan opEvent, 64),
-		stopCh:     make(chan struct{}),
-		done:       make(chan struct{}),
-		tickerFunc: o.tickerFactory,
+		interval:     interval,
+		numSlots:     numSlots,
+		slots:        make([]map[*timerEntry]struct{}, numSlots),
+		timers:       make(map[any]*timerEntry),
+		eventCh:      make(chan opEvent, 64),
+		stopCh:       make(chan struct{}),
+		done:         make(chan struct{}),
+		tickerFunc:   o.tickerFactory,
+		taskExecutor: o.taskExecutor,
 	}
 	for i := range tw.slots {
 		tw.slots[i] = make(map[*timerEntry]struct{})
@@ -120,6 +168,10 @@ func NewTimingWheel(interval time.Duration, numSlots int, opts ...WheelOption) *
 // 延迟按格**向上取整**（#219）：不足一格自动取一格，非整数格不提前——
 // 1.5 格等 2 格，任务不早于 delay 触发（「delay 后触发」的契约）。
 // key 必须为可比较类型（编程错误直接 panic）。
+//
+// ⚠️ 缺省态 task 在事件循环 goroutine 内**同步**执行（#274）：task 必须轻量
+// （微秒级），重 IO/RPC/长计算会阻塞 tick 与全部操作——重活用
+// WithWheelTaskExecutor 注入执行器转后台，或在 task 内自行 go 转后台。
 func (tw *TimingWheel) SetTimer(key any, task func(), delay time.Duration) {
 	if delay <= 0 {
 		panic("timewheel: delay must be positive")
@@ -254,8 +306,25 @@ func (tw *TimingWheel) advance() {
 	for _, entry := range due {
 		delete(slot, entry)
 		delete(tw.timers, entry.key)
-		async.RunSafe(entry.task)
+		tw.runTask(entry.task)
 	}
+}
+
+// runTask 触发一个到期任务（事件循环内调用，#274）：
+//   - 缺省（未配置执行器）：事件循环内同步执行（async.RunSafe 收编 panic）——
+//     修复前的唯一形态，语义不变；
+//   - 配置了执行器（WithWheelTaskExecutor）：交付执行器派发出事件循环，慢任务
+//     不再阻塞 tick 与操作。交付闭包内含 async.RunSafe：无论执行器把任务派去
+//     哪个 goroutine，panic 都被收编（打不死事件循环与执行器 worker）。
+//
+// 交付恰一次、从槽位摘除在前：交付后 wheel 不再追踪该任务（Close 的丢弃
+// 语义以交付为界）。
+func (tw *TimingWheel) runTask(task func()) {
+	if tw.taskExecutor == nil {
+		async.RunSafe(task)
+		return
+	}
+	tw.taskExecutor(func() { async.RunSafe(task) })
 }
 
 // insertLocked 计算槽位与圈数并放入（事件循环内调用，无锁）。

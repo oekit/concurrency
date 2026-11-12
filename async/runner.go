@@ -14,8 +14,11 @@ import (
 // 用法：
 //
 //	var runner = async.Runner{Handler: func(ctx context.Context, r any, stack []byte) {
-//	    logx.CtxError(ctx, "agentkit.worker.task_panic", "err", r, "stack", string(stack))
+//	    logx.CtxError(ctx, "agentkit.worker.task_panic", logx.ErrKey, r, "stack", string(stack))
 //	}}
+//
+// （logx.ErrKey 为 oekit/logx 的错误字段常量——错误字段名统一走该常量，
+// 禁止手写 "err" 字面量，消费方仓 AGENTS 同款红线，#288。）
 //
 //	runner.GoSafeLabeled("claim", func() { ... })
 //	err := runner.RunSafeErr(func() error { ... })

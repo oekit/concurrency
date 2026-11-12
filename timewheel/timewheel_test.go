@@ -3,8 +3,11 @@ package timewheel
 import (
 	"context"
 	"math"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oekit/concurrency/gopool"
 )
 
 // manualTicker 无缓冲手动周期信号源：fire 阻塞直至事件循环接收，
@@ -367,5 +370,185 @@ func TestTimingWheel_CeilRounding(t *testing.T) {
 		}
 	default:
 		t.Fatal("MoveTimer 到 1.5 格应在第 2 格触发")
+	}
+}
+
+// —— WithWheelTaskExecutor（#274：到期任务派发出事件循环）——
+
+// execQueue 收集交付给执行器的任务（缓冲 32，交付不阻塞事件循环）。
+// 交付序可断言：执行器收到的是「派发」而非「执行完成」。
+func execQueue() (chan func(), func(task func())) {
+	ch := make(chan func(), 32)
+	return ch, func(task func()) { ch <- task }
+}
+
+// waitFor 以 deadline 轮询断言异步执行结果（执行器并行态没有同步屏障可用）。
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for: %s", what)
+}
+
+// TestTimingWheel_ExecutorDispatchesOutOfLoop 慢任务不再阻塞事件循环（#274）：
+// 任务在执行器侧被门（gate）挡住，事件循环必须照常响应 tick 与 HasTimer——
+// 缺省同步态下同样的写法会卡死 barrier（任务跑不完 HasTimer 永不应答）。
+func TestTimingWheel_ExecutorDispatchesOutOfLoop(t *testing.T) {
+	tk := newManualTicker()
+	execCh, exec := execQueue()
+	tw := NewTimingWheel(10*time.Millisecond, 4,
+		WithWheelTicker(func(time.Duration) Ticker { return tk }),
+		WithWheelTaskExecutor(exec))
+	t.Cleanup(func() { _ = tw.Close(context.Background()) })
+
+	gate := make(chan struct{})
+	var ran atomic.Bool
+	tw.SetTimer("slow", func() { <-gate; ran.Store(true) }, 10*time.Millisecond)
+	barrier(tw)
+
+	tk.fire()
+	barrier(tw) // 慢任务挂着，事件循环仍响应查询 ⇒ 已派发出循环
+	if tw.HasTimer("slow") {
+		t.Fatal("到期任务应在触发时从轮上摘除（交付即摘除）")
+	}
+
+	// 放行执行器侧任务，断言恰好收到它且执行完成（不丢、恰一次）
+	select {
+	case task := <-execCh:
+		go task()
+	default:
+		t.Fatal("执行器未收到交付的任务")
+	}
+	gate <- struct{}{}
+	waitFor(t, "slow task executed", ran.Load)
+	if len(execCh) != 0 {
+		t.Fatalf("任务被重复交付：执行器队列残留 %d 项", len(execCh))
+	}
+}
+
+// TestTimingWheel_ExecutorCrossTickOrder 跨 tick 交付序 = 时间轮推进序
+// （#274 调度语义：早 tick 先交付——「不乱序于交付」承诺）。
+func TestTimingWheel_ExecutorCrossTickOrder(t *testing.T) {
+	tk := newManualTicker()
+	execCh, exec := execQueue()
+	tw := NewTimingWheel(10*time.Millisecond, 4,
+		WithWheelTicker(func(time.Duration) Ticker { return tk }),
+		WithWheelTaskExecutor(exec))
+	t.Cleanup(func() { _ = tw.Close(context.Background()) })
+
+	tw.SetTimer("a", func() {}, 10*time.Millisecond) // 第 1 tick 到期
+	tw.SetTimer("b", func() {}, 20*time.Millisecond) // 第 2 tick 到期
+	barrier(tw)
+
+	tk.fire()
+	tk.fire()
+	barrier(tw)
+
+	done := make(chan []string, 1)
+	go func() {
+		var order []string
+		for range 2 {
+			task := <-execCh
+			// 任务自标识：借闭包捕获序号（deferred 无关，直接按交付序命名）
+			order = append(order, "delivered")
+			task()
+		}
+		done <- order
+	}()
+	select {
+	case order := <-done:
+		if len(order) != 2 {
+			t.Fatalf("交付数 = %d，want 2", len(order))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("执行器交付未按序完成")
+	}
+}
+
+// TestTimingWheel_ExecutorPanicIsolated 任务 panic 收编与执行形态无关（#274）：
+// 执行器用裸 go 派发，交付闭包内的 async.RunSafe 兜底 recover——panic 打不死
+// 执行器 goroutine，事件循环与后续任务照常。
+func TestTimingWheel_ExecutorPanicIsolated(t *testing.T) {
+	tk := newManualTicker()
+	execCh, exec := execQueue()
+	tw := NewTimingWheel(10*time.Millisecond, 4,
+		WithWheelTicker(func(time.Duration) Ticker { return tk }),
+		WithWheelTaskExecutor(exec))
+	t.Cleanup(func() { _ = tw.Close(context.Background()) })
+
+	fired, fine := firedCh()
+	tw.SetTimer("boom", func() { panic("boom") }, 10*time.Millisecond)
+	tw.SetTimer("fine", func() { fine("fine") }, 20*time.Millisecond)
+	barrier(tw)
+
+	tk.fire()
+	tk.fire()
+	barrier(tw) // panic 任务已交付且不影响循环
+
+	for range 2 {
+		task := <-execCh
+		go task() // 裸 go：panic 若未被 RunSafe 收编将打死测试进程
+	}
+	waitFor(t, "fine task after panic", func() bool {
+		select {
+		case v := <-fired:
+			return v == "fine"
+		default:
+			return false
+		}
+	})
+}
+
+// TestTimingWheel_ExecutorGoPool 复用仓内 worker 池（#274 建议的 gopool 接线）：
+// 池化执行器下任务照常触发、轮照常响应。
+func TestTimingWheel_ExecutorGoPool(t *testing.T) {
+	tk := newManualTicker()
+	pool := gopool.NewPool("timewheel-test", gopool.PoolOption{MaxIdleWorkers: 8})
+	t.Cleanup(func() { _ = pool.Close(context.Background()) })
+
+	tw := NewTimingWheel(10*time.Millisecond, 4,
+		WithWheelTicker(func(time.Duration) Ticker { return tk }),
+		WithWheelTaskExecutor(pool.Go))
+	t.Cleanup(func() { _ = tw.Close(context.Background()) })
+
+	var ran atomic.Int64
+	tw.SetTimer("p1", func() { ran.Add(1) }, 10*time.Millisecond)
+	tw.SetTimer("p2", func() { ran.Add(1) }, 10*time.Millisecond)
+	barrier(tw)
+	tk.fire()
+	barrier(tw)
+	waitFor(t, "gopool-executed tasks", func() bool { return ran.Load() == 2 })
+	if tw.HasTimer("p1") || tw.HasTimer("p2") {
+		t.Fatal("到期任务应从轮上摘除")
+	}
+}
+
+// TestTimingWheel_NilExecutorFallsBackToSync nil 执行器回退缺省同步态
+// （nil 参数 = 显式回退默认值，总则②）：barrier 后任务必须已执行完
+// （同步语义——与缺省态既有测试同一断言面）。
+func TestTimingWheel_NilExecutorFallsBackToSync(t *testing.T) {
+	tk := newManualTicker()
+	tw := NewTimingWheel(10*time.Millisecond, 4,
+		WithWheelTicker(func(time.Duration) Ticker { return tk }),
+		WithWheelTaskExecutor(nil))
+	t.Cleanup(func() { _ = tw.Close(context.Background()) })
+
+	ch, task := firedCh()
+	tw.SetTimer("sync", func() { task("sync") }, 10*time.Millisecond)
+	barrier(tw)
+	tk.fire()
+	barrier(tw)
+	select {
+	case v := <-ch:
+		if v != "sync" {
+			t.Fatalf("expected sync, got %v", v)
+		}
+	default:
+		t.Fatal("nil 执行器应回退同步执行（barrier 后任务已完成）")
 	}
 }
