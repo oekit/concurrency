@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -836,5 +837,50 @@ func TestDoValue_CancelDuringBackoffReleasesTimer(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("取消应即时打断退避等待（耗时 %v）", elapsed)
+	}
+}
+
+// TestPoll_NonPositiveIntervalPanics 非正间隔护栏（#292）：sleepCtx 对非正
+// 时长立即返回，Poll 会退化成对 cond 的忙轮询（实测 interval=0 时 200ms 约
+// 113 万次调用）——与同包 Delay<0 的 #136 同口径，非法间隔当场暴露。
+// 修复前 retry_test.go 的 Poll 用例全部是正值，零覆盖。
+func TestPoll_NonPositiveIntervalPanics(t *testing.T) {
+	for name, interval := range map[string]time.Duration{
+		"zero":     0,
+		"negative": -time.Second,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("interval=%v 应 panic", interval)
+				}
+				msg, ok := r.(string)
+				if !ok || !strings.Contains(msg, "interval") {
+					t.Fatalf("panic 消息应点名 interval，got %v", r)
+				}
+			}()
+			var calls int
+			_ = Poll(context.Background(), interval, 50*time.Millisecond, func() (bool, error) {
+				calls++
+				return false, nil
+			})
+		})
+	}
+}
+
+// TestPoll_PositiveIntervalBoundedCalls 正值间隔行为不变（护栏不误伤）：cond
+// 调用次数与 interval/timeout 匹配的量级有界（本用例 ≤ 20 次）。
+func TestPoll_PositiveIntervalBoundedCalls(t *testing.T) {
+	var calls int
+	err := Poll(context.Background(), 10*time.Millisecond, 100*time.Millisecond, func() (bool, error) {
+		calls++
+		return false, nil
+	})
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v，want ErrTimeout", err)
+	}
+	if calls > 20 {
+		t.Fatalf("cond 被调用 %d 次（100ms/10ms 量级应 ≤ 20）——间隔被吞，忙轮询回归", calls)
 	}
 }

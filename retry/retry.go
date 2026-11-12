@@ -355,7 +355,20 @@ func addJitter(delay time.Duration, n int64) time.Duration {
 // Poll 按 interval 间隔轮询 cond 直到返回 done 或超过 timeout：cond 返回错误
 // 立即中止并透传；超时返回 ErrTimeout（调用方可继续走兜底路径）；ctx 取消
 // 透传 ctx.Err()。cond 立即先执行一次（不改语义地覆盖「条件可能已满足」）。
+//
+// interval <= 0 直接 panic（#292，与同包 Delay<0 的 #136 口径一致——非法
+// 间隔必须当场暴露）：sleepCtx 对非正时长立即返回，循环退化成对 cond 的
+// 热轮询（实测 interval=0 时 200ms 内调用 cond 约 113 万次）——单核打满直到
+// timeout/ctx 取消，cond 带锁/连接池时还放大成资源争用。触发来源是配置计算
+// （cfg.Timeout/cfg.MaxRetries 除出 0）与漏赋值零值，正是 panic 要拦的形态。
+// 「cond 本身阻塞（服务端 hold）」的立即重拉场景请显式传小正间隔（如 1ms），
+// 或改用 poll 包的 IdleDelay（该形态有专门文档）。
 func Poll(ctx context.Context, interval, timeout time.Duration, cond func() (bool, error)) error {
+	if interval <= 0 {
+		panic(fmt.Sprintf("retry: Poll interval 不能 <=0（got %s）——非正间隔让等待立即返回，"+
+			"轮询退化成对 cond 的忙轮询（实测 200ms 约 113 万次调用）；"+
+			"要立即重拉请显式传小正间隔，服务端 hold 形态用 poll 包（#292）", interval))
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
