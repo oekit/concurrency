@@ -129,7 +129,7 @@ func TestKeyedGate_TryAcquire_CapIsPerKey(t *testing.T) {
 	const cap = 2
 	g := NewKeyedGate(cap)
 
-	var releases []func()
+	releases := make([]func(), 0, cap)
 	for i := range cap {
 		rel, ok := g.TryAcquire("k")
 		if !ok {

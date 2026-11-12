@@ -57,7 +57,7 @@ func (c *collector) drainAll() int {
 // collectExec 批量收集 n 个批次并平铺。
 func collectExec(t *testing.T, c *collector, batches int) []any {
 	t.Helper()
-	var out []any
+	out := make([]any, 0, batches)
 	for range batches {
 		out = append(out, c.next(t)...)
 	}

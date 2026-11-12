@@ -102,7 +102,7 @@ func TestKeyedGate_ConcurrentRelease(t *testing.T) {
 	}
 
 	// 只归还了一次 → 还能取 cap 个，第 cap+1 个才阻塞。
-	var releases []func()
+	releases := make([]func(), 0, cap)
 	for i := range cap {
 		rel, err := g.Acquire(context.Background(), "k")
 		if err != nil {
@@ -134,7 +134,7 @@ func TestKeyedGate_ReleaseIsIdempotent(t *testing.T) {
 	release()
 
 	// 名额只被归还一次 → 还能取 cap 个，第 cap+1 个才阻塞。
-	var releases []func()
+	releases := make([]func(), 0, cap)
 	for i := range cap {
 		rel, err := g.Acquire(context.Background(), "k")
 		if err != nil {
