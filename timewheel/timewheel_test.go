@@ -451,7 +451,7 @@ func TestTimingWheel_ExecutorCrossTickOrder(t *testing.T) {
 
 	done := make(chan []string, 1)
 	go func() {
-		var order []string
+		order := make([]string, 0, 2) // prealloc：交付次数已知（lint prealloc）
 		for range 2 {
 			task := <-execCh
 			// 任务自标识：借闭包捕获序号（deferred 无关，直接按交付序命名）
