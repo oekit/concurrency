@@ -198,37 +198,34 @@ func TestSlidingWindow_AllowN_NonPositive(t *testing.T) {
 // 裸 -1（按最大值判拒绝的通用代码把 -1 当立即可用，紧循环锤击满窗限流器），
 // 接口契约零声明。
 func TestLimiter_ReserveNotReservableSentinel(t *testing.T) {
-	// TokenBucket：burst=0（1 个令牌超出 burst 上限——该请求永远等不到）
-	// SlidingWindow：在册预占订满整窗额度（maxCount=2：2 个立即放行 + 2 个预占
-	// 已达 cap，第 5 笔不可预留）
-	newLimiters := map[string]func() Limiter{
-		"TokenBucket/burst0": func() Limiter { return NewTokenBucket(10, 0) },
-		"SlidingWindow/full": func() Limiter { return NewSlidingWindow(time.Hour, 2) },
+	// #291 起 TokenBucket 的 burst<=0 在构造期 panic（不再有 burst=0 的可构造
+	// 形态 ⇒ burst>=1 时 1 个令牌恒可预留，Reserve 的不可预留分支降级为接口
+	// 契约的防御位），本用例的不可预留态由 SlidingWindow 独立承担：
+	// 在册预占订满整窗额度（maxCount=2：2 个立即放行 + 2 个预占已达 cap，
+	// 第 5 笔不可预留）。
+	l := NewSlidingWindow(time.Hour, 2)
+	for range 4 {
+		_, _ = l.Reserve() // 打到不可预留态
 	}
 
-	for name, newLimiter := range newLimiters {
-		t.Run(name, func(t *testing.T) {
-			l := newLimiter()
-			for range 4 {
-				_, _ = l.Reserve() // 打到不可预留态（TokenBucket 第 1 笔即不可预留）
-			}
-
-			// 不可预留：规范哨兵，errors.Is 判定（不要比对魔法数值）
-			d, err := l.Reserve()
-			if !errors.Is(err, ErrNotReservable) {
-				t.Fatalf("%s 不可预留应返回 ErrNotReservable（errors.Is 可判定），got (%v, %v)", name, d, err)
-			}
-			if d != -1 {
-				t.Fatalf("%s 不可预留的占位时长应为 -1（非 0，防误读成「立即可用」），got %v", name, d)
-			}
-
-			// 哨兵可被 %w 包装穿透（消费方包装错误链后仍可判定）
-			wrapped := fmt.Errorf("retry budget exhausted: %w", err)
-			if !errors.Is(wrapped, ErrNotReservable) {
-				t.Fatalf("%s 包装后的错误链应仍可判定 ErrNotReservable", name)
-			}
-		})
+	// 不可预留：规范哨兵，errors.Is 判定（不要比对魔法数值）
+	d, err := l.Reserve()
+	if !errors.Is(err, ErrNotReservable) {
+		t.Fatalf("不可预留应返回 ErrNotReservable（errors.Is 可判定），got (%v, %v)", d, err)
 	}
+	if d != -1 {
+		t.Fatalf("不可预留的占位时长应为 -1（非 0，防误读成「立即可用」），got %v", d)
+	}
+
+	// 哨兵可被 %w 包装穿透（消费方包装错误链后仍可判定）
+	wrapped := fmt.Errorf("retry budget exhausted: %w", err)
+	if !errors.Is(wrapped, ErrNotReservable) {
+		t.Fatalf("包装后的错误链应仍可判定 ErrNotReservable")
+	}
+
+	// #291 配套：TokenBucket 的 burst=0 形态已不可构造（构造期 panic，
+	// 见 TestNewTokenBucket_NonPositiveBurstPanics）——换实现的接口哨兵
+	// 契约仍由本用例钉住。
 
 	// 成功路径不受影响：预留成功返回 (d>=0, nil)
 	tb := NewTokenBucket(10, 1)
