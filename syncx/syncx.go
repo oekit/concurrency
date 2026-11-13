@@ -102,13 +102,11 @@ func (g *KeyedGate) TryAcquire(key string) (func(), bool) {
 
 // runSlot 执行单个槽位并把结果/错误写进 slots[i]（#263 三个 FanIn 变体共用的
 // 逐槽骨架）：fn 正常返回 → Val/Err 如实记录；fn panic → 该槽 Err 收编为
-// *async.PanicError（构造经 org 单源 pkg errors.Recovered）、Panicked 同写
-// 原始 payload（Deprecated 兼容字段），并经 async.ReportPanic 上报——该槽
-// Val 保持零值，其余槽位与收口不受影响。
+// *async.PanicError（构造经 org 单源 pkg errors.Recovered），并经
+// async.ReportPanic 上报——该槽 Val 保持零值，其余槽位与收口不受影响。
 func runSlot[T any](slots []Slot[T], i int, fn func() (T, error)) {
 	defer func() {
 		if r := recover(); r != nil {
-			slots[i].Panicked = r
 			slots[i].Err = async.NewPanicError(r)
 			async.ReportPanic(r)
 		}
@@ -142,16 +140,12 @@ func FanIn[T any](n int, fn func(i int) T) []T {
 
 // Slot 是 FanInErr 的逐槽结果：Val/Err 为 fn 的正常返回；fn panic 时
 // Err 承载 *async.PanicError（errors.As 可辨、携带栈，#12）且 Val 为零值。
-// Panicked 保留原始 payload（兼容字段，Deprecated——改用 errors.As(Slot.Err)）。
+// （历史兼容字段 Panicked 已于 v0.36.0 删除——panic payload 改由
+// errors.As(&async.PanicError) 从 Err 读取。）
 type Slot[T any] struct {
 	Val T
 	// Err 正常错误，或 panic 收编的 *async.PanicError。
 	Err error
-	// Panicked 历史兼容字段：panic 原始 payload。新代码改用
-	// errors.As(&async.PanicError) 读 Err。
-	//
-	// Deprecated: v0.7.0 起由 Slot.Err 承载。
-	Panicked any
 }
 
 // FanInErr 逐槽错误变体：并行执行 fn(0..n-1)（fn 可返回 error），全部完成后
