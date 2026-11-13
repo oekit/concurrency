@@ -56,7 +56,7 @@ func TestFanInLimit_PanicSlotAndEdges(t *testing.T) {
 	if !errors.As(slots[1].Err, &pe) {
 		t.Fatalf("slot 1 err = %v, want *async.PanicError", slots[1].Err)
 	}
-	if slots[1].Panicked == nil || slots[1].Val != 0 {
+	if slots[1].Val != 0 {
 		t.Fatalf("slot 1 panic payload/zero-val mismatch: %+v", slots[1])
 	}
 	if slots[0].Val != 0 || slots[2].Val != 2 || slots[0].Err != nil || slots[2].Err != nil {
@@ -173,7 +173,7 @@ func TestFanInLimitCtx_PanicAndEdges(t *testing.T) {
 	if !errors.As(slots[1].Err, &pe) {
 		t.Fatalf("slot 1 err = %v, want *async.PanicError", slots[1].Err)
 	}
-	if slots[1].Panicked == nil || slots[1].Val != 0 {
+	if slots[1].Val != 0 {
 		t.Fatalf("panic slot mismatch: %+v", slots[1])
 	}
 	if slots[0].Val != 0 || slots[2].Val != 2 {

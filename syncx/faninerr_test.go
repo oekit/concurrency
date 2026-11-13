@@ -25,10 +25,10 @@ func TestFanInErr_NormalAndError(t *testing.T) {
 	if len(slots) != 3 {
 		t.Fatalf("应有 3 个槽，got %d", len(slots))
 	}
-	if slots[0].Val != "ok-0" || slots[0].Err != nil || slots[0].Panicked != nil {
+	if slots[0].Val != "ok-0" || slots[0].Err != nil {
 		t.Errorf("槽 0 应为正常结果，got %+v", slots[0])
 	}
-	if !errors.Is(slots[1].Err, wantErr) || slots[1].Panicked != nil {
+	if !errors.Is(slots[1].Err, wantErr) {
 		t.Errorf("槽 1 应记录 error，got %+v", slots[1])
 	}
 	if slots[2].Val != "ok-2" || slots[2].Err != nil {
@@ -47,11 +47,9 @@ func TestFanInErr_PanicSlotIsMarked(t *testing.T) {
 		return report{Name: fmt.Sprintf("branch-%d", i)}, nil
 	})
 
-	if slots[1].Panicked == nil {
-		t.Fatal("panic 槽应标记 Panicked")
-	}
-	if fmt.Sprintf("%v", slots[1].Panicked) != "branch-1 exploded" {
-		t.Errorf("Panicked 应携带 panic payload，got %v", slots[1].Panicked)
+	var pe0 *async.PanicError
+	if !errors.As(slots[1].Err, &pe0) || fmt.Sprintf("%v", pe0.Value) != "branch-1 exploded" {
+		t.Errorf("panic 槽 Err 应承载携带 payload 的 *PanicError，got %v", slots[1].Err)
 	}
 	if slots[1].Val != (report{}) {
 		t.Errorf("panic 槽 Val 应为零值，got %+v", slots[1])
@@ -76,7 +74,7 @@ func TestFanInErr_Empty(t *testing.T) {
 }
 
 // TestFanInErr_SlotErrTypedPanicError 钉住 #12：panic 槽的 Err 承载
-// *async.PanicError（errors.As 可辨、携带栈），Panicked 保留兼容。
+// *async.PanicError（errors.As 可辨、携带栈）。
 func TestFanInErr_SlotErrTypedPanicError(t *testing.T) {
 	slots := FanInErr(3, func(i int) (string, error) {
 		if i == 1 {
@@ -90,9 +88,6 @@ func TestFanInErr_SlotErrTypedPanicError(t *testing.T) {
 	}
 	if pe.Value != "slot-boom" || len(pe.Stack) == 0 {
 		t.Fatalf("PanicError = %+v", pe)
-	}
-	if slots[1].Panicked != "slot-boom" {
-		t.Fatalf("Panicked compat broken: %v", slots[1].Panicked)
 	}
 	if slots[0].Val != "ok-0" || slots[2].Val != "ok-2" {
 		t.Fatalf("healthy slots broken: %+v", slots)
