@@ -1,3 +1,7 @@
+## [v0.36.0] — 2026-11-13
+
+- **BREAKING**：删除 syncx.Slot.Panicked 历史兼容字段（v0.7.0 起 Slot.Err 已承载 *async.PanicError，Deprecated 到期退役）。下游迁移：errors.As(slot.Err, &pe) 后读 pe.Value 取 panic payload（携带栈）。FanIn 契约不动。
+
 ## [v0.35.1] — 2026-11-13
 
 - fix(group): WaitGroupWrapper 嵌套 Wrap 死锁——submitMu 换 counter+cond 等静止（#296）。Wait 不持锁等计数归零，任务体内 fan-out 派生不再与 Wait 互等（旧方案 AB-BA 挂死无 panic 无日志）；计数增减原子化弃用 WaitGroup，#269 misuse panic 触发面结构性消失。契约变化：Wait 从「等调用时已提交任务」改为「等系统静止」（等待期间新到 Wrap 被计入并等待）。
