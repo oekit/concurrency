@@ -36,6 +36,12 @@ linters:
     govet:
       enable:
         - shadow
+    nolintlint:
+      # CI（共享 go-ci.yml 默认 v2.14.0）与本机/列车（v2.15.0）对 errcheck 的
+      # error 型 channel 接收判定不一致：directive 在 v2.14 下会判 unused。
+      # 版本漂移期 allow-unused 留痕豁免，避免同一行在两版下互相打架
+      # （_ = 形态又被 staticcheck S1005 报「blank 赋值多余」）。
+      allow-unused: true
     revive:
       rules:
         - name: exported

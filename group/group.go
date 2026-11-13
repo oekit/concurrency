@@ -55,7 +55,7 @@ func (g *Group) Run() error {
 	// Run 也保证等齐所有 Actor 再返回（不泄漏未通知、未等待的 goroutine）。
 	defer func() {
 		for i := 1; i < cap(errors); i++ {
-			<-errors
+			<-errors //nolint:errcheck // 排空丢弃是本意（值已在上方 err := 取走）；golangci v2.15 起 errcheck 检查 error 型 channel 接收、v2.14（CI 默认）不报——directive 对两版成立
 		}
 	}()
 
