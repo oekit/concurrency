@@ -65,3 +65,65 @@ func TestWaitGroupWrapper_ConcurrentWrapWait(t *testing.T) {
 		w.Wait()
 	}
 }
+
+// TestWaitGroupWrapper_NestedWrapDuringWait（#296 回归锚点）：任务体内
+// 嵌套 Wrap 派生子任务 + 外层 Wait——旧 submitMu 方案是 AB-BA 硬死锁
+// （Wait 持锁等任务、任务体内 Wrap 等锁，无 panic 无日志进程挂死）。
+// 新 counter+cond 方案 Wait 等静止不持锁：嵌套派生照常入计数并被等。
+func TestWaitGroupWrapper_NestedWrapDuringWait(t *testing.T) {
+	ctx := context.Background()
+	wg := NewWaitGroup(ctx)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- wg.Wait()
+	}()
+
+	wg.Wrap(func(ctx context.Context) error {
+		// 任务体内嵌套派生子任务（fan-out 形态）。
+		wg.Wrap(func(ctx context.Context) error {
+			time.Sleep(10 * time.Millisecond)
+			return nil
+		})
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("★ #296 嵌套 Wrap + 外层 Wait 死锁（旧 submitMu 方案的 AB-BA 挂死）")
+	}
+}
+
+// TestWaitGroupWrapper_WaitQuiescence 等静止契约（#296 语义变化钉）：
+// Wait 期间新到达的 Wrap 被计入并等待——计数归零才返回。
+func TestWaitGroupWrapper_WaitQuiescence(t *testing.T) {
+	ctx := context.Background()
+	wg := NewWaitGroup(ctx)
+
+	var order []string
+	var mu sync.Mutex
+	wg.Wrap(func(ctx context.Context) error {
+		time.Sleep(30 * time.Millisecond) // 保证 Wait 已进入等待
+		wg.Wrap(func(ctx context.Context) error {
+			mu.Lock()
+			order = append(order, "late")
+			mu.Unlock()
+			return nil
+		})
+		return nil
+	})
+
+	if err := wg.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 1 || order[0] != "late" {
+		t.Fatalf("★ 等静止契约：Wait 应等待期间新到的 Wrap, order=%v", order)
+	}
+}
