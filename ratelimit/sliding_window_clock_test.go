@@ -12,8 +12,11 @@ func TestSlidingWindowClockInjection(t *testing.T) {
 	sw := NewSlidingWindow(time.Minute, 2, WithSlidingWindowClock(clock.Now))
 
 	// 配额用尽
-	if !sw.AllowN(1) || !sw.AllowN(1) {
-		t.Fatal("前两次应放行")
+	if !sw.AllowN(1) {
+		t.Fatal("第一次应放行")
+	}
+	if !sw.AllowN(1) {
+		t.Fatal("第二次应放行")
 	}
 	if sw.AllowN(1) {
 		t.Fatal("窗口满应拒绝")
