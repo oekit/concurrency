@@ -494,3 +494,26 @@ func TestFlight_NilCtxDoSharedAndDoChan(t *testing.T) {
 		t.Fatalf("DoChan(nil) = %+v, want {Val:7, Shared:false, Err:nil}", res)
 	}
 }
+
+// concurrency#340：waiter 路径 Waiters 不含自己（与 leader 视角同口径）。
+func TestDoChanWaitersExcludesSelf(t *testing.T) {
+	var f Flight[int]
+	start := make(chan struct{})
+	leader := f.DoChan(context.Background(), "k", func(context.Context) (int, error) {
+		<-start
+		return 42, nil
+	})
+	w := f.DoChan(context.Background(), "k", func(context.Context) (int, error) {
+		t.Fatal("waiter 不应执行 fn")
+		return 0, nil
+	})
+	close(start)
+	lr := <-leader
+	wr := <-w
+	if lr.Shared || lr.Waiters != 1 {
+		t.Fatalf("leader: Shared=%v Waiters=%d, want false/1", lr.Shared, lr.Waiters)
+	}
+	if !wr.Shared || wr.Waiters != 0 {
+		t.Fatalf("waiter: Waiters=%d, want 0(不含自己,#340)", wr.Waiters)
+	}
+}

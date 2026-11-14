@@ -17,6 +17,11 @@ type SlidingWindow struct {
 	window     time.Duration
 	maxCount   int
 	timestamps []time.Time
+	// now 是时间源（concurrency#341，WithSlidingWindowClock 注入，缺省
+	// time.Now）——同族 TokenBucket WithTokenClock / LockoutConfig.Now 口径：
+	// 假时钟下 AllowN/Reserve/RetryAfter/Count/Wait 全路径确定性可测，
+	// 此前是全族唯一靠 sleep 的限流器。
+	now func() time.Time
 }
 
 // NewSlidingWindow 创建滑动窗口限流器。
@@ -34,16 +39,38 @@ type SlidingWindow struct {
 // 用法:
 //
 //	limiter := ratelimit.NewSlidingWindow(time.Minute, 100) // 每分钟最多 100 次
-func NewSlidingWindow(window time.Duration, maxCount int) *SlidingWindow {
+func NewSlidingWindow(window time.Duration, maxCount int, opts ...SlidingWindowOption) *SlidingWindow {
 	if window <= 0 {
 		panic("ratelimit: sliding window duration must be greater than 0")
 	}
 	if maxCount < 0 {
 		panic(fmt.Sprintf("ratelimit: sliding window maxCount must not be negative, got %d (0 = unlimited)", maxCount))
 	}
-	return &SlidingWindow{
+	sw := &SlidingWindow{
 		window:   window,
 		maxCount: maxCount,
+		now:      time.Now,
+	}
+	for _, opt := range opts {
+		opt(sw)
+	}
+	if sw.now == nil {
+		sw.now = time.Now
+	}
+	return sw
+}
+
+// SlidingWindowOption 是 NewSlidingWindow 的可选项。
+type SlidingWindowOption func(*SlidingWindow)
+
+// WithSlidingWindowClock 注入时钟（缺省 time.Now；nil 视为缺省）。
+// 放行判定、预留、Retry-After、计数与等待全路径走此时钟——假时钟下
+// 确定性测试无 sleep（concurrency#341，与 WithTokenClock 同款）。
+func WithSlidingWindowClock(clock func() time.Time) SlidingWindowOption {
+	return func(sw *SlidingWindow) {
+		if clock != nil {
+			sw.now = clock
+		}
 	}
 }
 
@@ -64,7 +91,7 @@ func (sw *SlidingWindow) AllowN(n int) bool {
 		return true
 	}
 
-	now := time.Now()
+	now := sw.now()
 	windowStart := now.Add(-sw.window)
 
 	// 清理过期的时间戳
@@ -105,7 +132,7 @@ func (sw *SlidingWindow) Reserve() (time.Duration, error) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	now := time.Now()
+	now := sw.now()
 	windowStart := now.Add(-sw.window)
 
 	sw.cleanOld(windowStart)
@@ -176,7 +203,7 @@ func (sw *SlidingWindow) RetryAfter() (time.Duration, bool) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	now := time.Now()
+	now := sw.now()
 	sw.cleanOld(now.Add(-sw.window))
 	if len(sw.timestamps) < sw.maxCount {
 		return 0, true // 有空位：立即可用
@@ -192,7 +219,7 @@ func (sw *SlidingWindow) Count() int {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	now := time.Now()
+	now := sw.now()
 	windowStart := now.Add(-sw.window)
 	sw.cleanOld(windowStart)
 
@@ -241,7 +268,7 @@ func (sw *SlidingWindow) Wait(ctx context.Context) error {
 	}
 	for {
 		sw.mu.Lock()
-		now := time.Now()
+		now := sw.now()
 		sw.cleanOld(now.Add(-sw.window))
 		if len(sw.timestamps) < sw.maxCount {
 			sw.insertLocked(now)

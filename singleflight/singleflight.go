@@ -166,8 +166,11 @@ type Result[T any] struct {
 	Val    T
 	Err    error
 	Shared bool // true 表示与其他调用方共享了同一次 fn
-	// Waiters 是本轮折叠掉的并发调用方数（leader 视角：不含自己，>=0）。
-	// 排障时可直接看出「这一轮合并了几个调用方」（#18）。
+	// Waiters 是本轮折叠掉的**其他**调用方数（不含自己，>=0——leader 与
+	// waiter 两条路径同口径：leader 从未自增 waiters，waiter 读 Load()-1
+	// 扣掉自己；concurrency#340 此前 waiter 路径含自己，单 waiter 恒 1、
+	// 埋点多算且两路径不可比）。排障时可直接看出「这一轮合并了几个调用方」
+	// （#18）。
 	Waiters int
 }
 
@@ -210,7 +213,13 @@ func (f *Flight[T]) DoChan(ctx context.Context, key string, fn func(ctx context.
 		go func() {
 			select {
 			case <-c.ready:
-				ch <- Result[T]{Val: c.val, Err: c.err, Shared: true, Waiters: int(c.waiters.Load())}
+				// concurrency#340：doCore 已 Add(1)（含自己），扣掉——
+				// 「不含自己」与 leader 视角同口径。
+				w := int(c.waiters.Load()) - 1
+				if w < 0 {
+					w = 0
+				}
+				ch <- Result[T]{Val: c.val, Err: c.err, Shared: true, Waiters: w}
 			case <-ctx.Done():
 				ch <- Result[T]{Err: ctx.Err()}
 			}
