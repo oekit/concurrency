@@ -80,6 +80,18 @@ func (rw *RollingWindow[T, B]) Add(v T) {
 
 // Reduce 对所有有效桶执行 fn 聚合；
 // 构造时若启用 IgnoreCurrentBucket 则跳过当前桶（数据尚未完整）。
+//
+// ⚠️ fn 的回调约束（#335，此前零声明）：fn 收到的是**活的桶指针**，且回调
+// 执行期间本窗口以**读锁**被持有——
+//   - fn 必须只读：写桶字段（如 b.Sum += x）与并发 Reduce/Add 构成 data race；
+//   - fn **不得回调本窗口的任何方法**：Add/Reset 要写锁，与本 goroutine
+//     持有的读锁互等 ⇒ 永久死锁（Go RWMutex 不可重入，且被阻塞的写锁还会
+//     挡住后续读锁）；Reduce 重入同理。
+//   - fn 必须轻量：回调在锁内执行，长操作会放大 Add 的写锁等待。
+//
+// 包内消费方（shedding 的 maxPass/minRt、breaker 的 history）均为只读聚合。
+// 需要写桶或长操作的下游，先自行快照（如 Reduce 里把桶值拷进局部结构）
+// 再出锁处理。
 func (rw *RollingWindow[T, B]) Reduce(fn func(b B)) {
 	rw.lock.RLock()
 	defer rw.lock.RUnlock()
