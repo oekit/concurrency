@@ -1,6 +1,7 @@
 package gopool
 
 import (
+	"github.com/oekit/concurrency/async"
 	"context"
 	"log"
 	"runtime/debug"
@@ -156,6 +157,11 @@ func (p *Pool) Closed() bool { return p.closed.Load() }
 // 并等待所有已提交任务执行完成；ctx 到期返回其错误。
 // 调用方应先停止提交再 Close；Close 可重复调用。
 func (p *Pool) Close(ctx context.Context) error {
+	if ctx == nil {
+		// #330：nil ctx = Background（#159 口径）——nil 直接进 select 的
+		// ctx.Done() 解引用 panic；语义即「无限等排空」。
+		ctx = context.Background()
+	}
 	// 置位在 submitMu 内：与 CtxGo 的「检查 + Add」互斥 ⇒ 不会有 Add 发生在
 	// 随后的 wg.Wait() 期间（否则运行时 panic：WaitGroup misuse）。
 	// wg.Wait() 必须在锁外：任务里再提交任务时要拿这把锁。
@@ -187,6 +193,13 @@ func (p *Pool) recoverRun(ctx context.Context, f func()) {
 	defer func() {
 		if r := recover(); r != nil {
 			h := p.panicHandler.Load()
+			if h == nil {
+				// #338：池级处理器未显式设置 ⇒ 回退 async 全局（async godoc
+				// 的注入覆盖默认池，不再各说各话）；显式 SetPanicHandler 过
+				// 的池保持自有行为。
+				gh := PanicHandler(async.GlobalPanicHandler())
+				h = &gh
+			}
 			// 处理器自身 panic 就地收编：此处已在 recover 闭包内，
 			// 再 panic 不会被同一个 defer 恢复，会直接打死进程
 			defer func() {

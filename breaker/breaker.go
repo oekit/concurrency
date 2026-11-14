@@ -338,11 +338,14 @@ func newCircuitBreaker(name string, cfg breakerConfig) *circuitBreaker {
 }
 
 // sharedEntry 是共享表的一项：实例本体 + 首建配置指纹 + 冲突回调（#29）。
-// sig/onConflict 创建后不再变更，可无锁读取；warned 为冲突去重的 CAS 闸。
+// sig 创建后不再变更，可无锁读取；onConflict 可由后到的 GetBreaker 调用方
+// 装上（#327：此前取自首次创建者的 opts，后到的 WithBreakerConflictHandler
+// 被静默丢弃，「让静默失效可被发现」装不上），atomic.Pointer 保证无锁读取；
+// warned 为冲突去重的 CAS 闸。
 type sharedEntry struct {
 	Breaker
 	sig        configFingerprint
-	onConflict func(name, detail string)
+	onConflict atomic.Pointer[func(name, detail string)]
 	warned     atomic.Bool
 }
 
@@ -386,11 +389,17 @@ func GetBreaker(name string, opts ...BreakerOption) Breaker {
 	e, existed := sharedBreakers[name]
 	if !existed {
 		e = &sharedEntry{
-			Breaker:    newCircuitBreaker(name, cfg),
-			sig:        fp,
-			onConflict: cfg.onConflict,
+			Breaker: newCircuitBreaker(name, cfg),
+			sig:     fp,
+		}
+		if cfg.onConflict != nil {
+			e.onConflict.Store(&cfg.onConflict)
 		}
 		sharedBreakers[name] = e
+	} else if cfg.onConflict != nil {
+		// #327：后到调用方带 WithBreakerConflictHandler ⇒ 装上（后到者生效），
+		// 「让静默失效可被发现」不再只属于首次创建者。
+		e.onConflict.Store(&cfg.onConflict)
 	}
 	breakerMu.Unlock()
 
@@ -404,13 +413,14 @@ func GetBreaker(name string, opts ...BreakerOption) Breaker {
 // warnConflict 上报同名异参冲突，每个 name 只报一次（热路径去重，避免每次
 // GetBreaker 都刷一遍）；未注册回调时静默跳过。
 func (e *sharedEntry) warnConflict(name string, got configFingerprint) {
-	if e.onConflict == nil {
+	onConflict := e.onConflict.Load()
+	if onConflict == nil {
 		return
 	}
 	if !e.warned.CompareAndSwap(false, true) {
 		return
 	}
-	e.onConflict(name, fmt.Sprintf("同名熔断器 %q 已存在，本次传入的 opts 被静默丢弃（仅首次创建生效）；"+
+	(*onConflict)(name, fmt.Sprintf("同名熔断器 %q 已存在，本次传入的 opts 被静默丢弃（仅首次创建生效）；"+
 		"首次生效配置 = %v，本次传入配置 = %v。请把参数编进名字做命名空间隔离，或改用 NewBreaker 显式自建。",
 		name, e.sig, got))
 }

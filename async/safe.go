@@ -78,6 +78,17 @@ func init() {
 //
 // （logx.ErrKey 为 oekit/logx 的错误字段常量——错误字段名统一走该常量，
 // 禁止手写 "err" 字面量，消费方仓 AGENTS 同款红线，#288。）
+// GlobalPanicHandler 返回当前生效的全局 panic 处理器（#338：async 与 gopool
+// 此前各持一套互不相通的 SetPanicHandler 全局——按 async godoc 在 main 注入
+// logx 后，gopool 默认池的 panic 仍走 stdlib log）。gopool 的池级处理器未显式
+// 设置时经此回退到本全局；init 恒装载非 nil，调用方拿到的恒可用。
+func GlobalPanicHandler() PanicHandler {
+	if fn := panicHandler.Load(); fn != nil && *fn != nil {
+		return *fn
+	}
+	return defaultPanicHandler()
+}
+
 func SetPanicHandler(handler PanicHandler) {
 	if handler == nil {
 		defaultHandler := defaultPanicHandler()

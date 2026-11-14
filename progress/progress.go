@@ -3,6 +3,7 @@
 package progress
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -74,6 +75,12 @@ func NewTracker(phases []PhaseConfig) *Tracker {
 	infos := make([]PhaseInfo, len(phases))
 	phaseMap := make(map[string]int, len(phases))
 	for i, p := range phases {
+		// #333：重名 fail-fast——此前静默覆盖 phaseMap，前一个同名阶段成为
+		// 永远改不到的孤儿（UpdatePhase 只能摸到最后一个）。构造期编程错误
+		// 直接 panic（与 timewheel「key 必须可比较」同口径）。
+		if _, dup := phaseMap[p.Name]; dup {
+			panic(fmt.Sprintf("progress: duplicate phase name %q", p.Name))
+		}
 		infos[i] = PhaseInfo{
 			Name:        p.Name,
 			Title:       p.Title,
@@ -112,7 +119,9 @@ func (t *Tracker) UpdatePhase(name string, status PhaseStatus, progress float64)
 		}
 	case PhaseCompleted:
 		t.phases[idx].EndTime = now
-		t.phases[idx].Progress = 100
+		// #332：尊重调用方入参——此前无条件覆写 100，godoc「更新状态和进度」
+		// 的进度入参被静默吞掉。
+		t.phases[idx].Progress = progress
 		if !t.phases[idx].StartTime.IsZero() {
 			t.phases[idx].Duration = now.Sub(t.phases[idx].StartTime).Milliseconds()
 		}
@@ -217,6 +226,9 @@ func (t *Tracker) Fail() {
 	defer t.mu.Unlock()
 	now := time.Now()
 	t.status = TaskFailed
+	// #331：标记**全部**活跃阶段（此前 break 只标第一个）——并发/乱序启动下
+	// 可能同时存在多个 PhaseActive，只标第一个会让其余阶段永卡 active，
+	// 进度与终态都错。
 	for i := range t.phases {
 		if t.phases[i].Status == PhaseActive {
 			t.phases[i].Status = PhaseFailed
@@ -224,7 +236,6 @@ func (t *Tracker) Fail() {
 			if !t.phases[i].StartTime.IsZero() {
 				t.phases[i].Duration = t.phases[i].EndTime.Sub(t.phases[i].StartTime).Milliseconds()
 			}
-			break
 		}
 	}
 }

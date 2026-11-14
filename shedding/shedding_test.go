@@ -559,3 +559,17 @@ func TestShedder_NilCtxTreatedAsBackground(t *testing.T) {
 	}
 	np.Pass()
 }
+
+func TestPromiseSettleIdempotent(t *testing.T) {
+	// #336：重复 Pass/Fail 把 flying 推负 ⇒ highThru 恒 false,降载漏放。
+	as := NewAdaptiveShedder().(*adaptiveShedder)
+	p, err := as.Allow(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Pass()
+	p.Pass() // 幂等:第二次 no-op
+	if got := as.flying.Load(); got != 0 {
+		t.Errorf("flying = %d, want 0(重复 Pass 不再推负)", got)
+	}
+}

@@ -182,3 +182,18 @@ func TestDelayHintHTTPError(t *testing.T) {
 		t.Fatalf("hint not applied from wrapped chain, elapsed %v", elapsed)
 	}
 }
+
+func TestClassifier_TransportFailureRetryable(t *testing.T) {
+	// #325：HTTPError{Status:0} 是文档定义的传输层失败（未收到响应）——
+	// 此前落 Retryable(0)=false，连接错误被静默放弃重试。
+	c := httpx.Classifier()
+	if !c(&httpx.HTTPError{Status: 0, Err: errors.New("dial timeout")}) {
+		t.Fatal("Status=0(传输层失败) 应可重试")
+	}
+	if c(&httpx.HTTPError{Status: 403}) {
+		t.Fatal("403 仍应不可重试")
+	}
+	if !c(&httpx.HTTPError{Status: 429}) {
+		t.Fatal("429 应可重试")
+	}
+}

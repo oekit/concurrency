@@ -205,7 +205,6 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	// 触发判定，open/half-open 的放行策略根本不消费它——而 open 正是过载、
 	// 拒绝 QPS 最高的工况，此前每笔拒绝都为这个不消费的值白做一次全窗聚合
 	// （40 桶 Reduce，RLock 全窗扫描）。非 closed 态直接进放行策略分支。
-	open := st != stateClosed
 	if st == stateClosed {
 		history := b.history()
 		w := k - (k-minK)*float64(history.failingBuckets)/float64(b.windowSize)
@@ -228,13 +227,21 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 				b.consecFails = 0     // 进入 open：连续失败计数归零
 				b.lastPass.Store(now) // open 期 forcePass 自进入起算
 			}
-			open = b.state != stateClosed
 			b.mu.Unlock()
 		}
 	}
 
-	// closed 态：预算内全量放行（速率型触发已由上面的判定接管）
-	if !open {
+	// #328：放行档位判定前锁内复核——st/gen 快照取自探测调度点，此后并发的
+	// 探测回报（half-open→closed/open）、探测回收（half-open→open）、速率触发
+	// （closed→open）都可能已改写状态：快照 open 而实际 closed ⇒ markDrop 误拒
+	// （恢复瞬间）；快照 closed 而实际 open ⇒ closed-pass 误放（熔断瞬间）。
+	// gen 一并刷新：探测放行会推进 gen，旧代承诺的回报会被代校验丢弃。
+	b.mu.Lock()
+	st = b.state
+	gen = b.gen
+	b.mu.Unlock()
+	if st == stateClosed {
+		// closed 态：预算内全量放行（速率型触发已由上面的判定接管）
 		return googlePromise{b: b, gen: gen}, gen, nil
 	}
 

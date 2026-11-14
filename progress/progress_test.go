@@ -84,18 +84,20 @@ func TestUpdatePhase_UnknownPhase(t *testing.T) {
 	}
 }
 
-func TestUpdatePhase_CompletedSetsProgress100(t *testing.T) {
+func TestUpdatePhase_CompletedRespectsProgress(t *testing.T) {
+	// #332：PhaseCompleted 尊重调用方入参——godoc 契约是「更新状态**和进度**」，
+	// 旧实现无条件覆写 100 把入参吞掉。调用方传 100 自然得到 100。
 	tr := NewTracker([]PhaseConfig{{Name: "a"}})
 
 	tr.UpdatePhase("a", PhaseActive, 50)
-	tr.UpdatePhase("a", PhaseCompleted, 50)
+	tr.UpdatePhase("a", PhaseCompleted, 80)
 
 	a, _ := tr.GetPhase("a")
 	if a.Status != PhaseCompleted {
 		t.Errorf("Status = %q, want %q", a.Status, PhaseCompleted)
 	}
-	if a.Progress != 100 {
-		t.Errorf("Progress = %v, want 100", a.Progress)
+	if a.Progress != 80 {
+		t.Errorf("Progress = %v, want 80(入参被尊重)", a.Progress)
 	}
 	if a.EndTime.IsZero() {
 		t.Error("completed phase should have EndTime set")
@@ -265,4 +267,33 @@ func TestUpdatePhase_DoesNotOverrideFail(t *testing.T) {
 	if got := tr.GetOverallProgress(); got >= 100 {
 		t.Errorf("GetOverallProgress() = %v, 含失败阶段的任务不应被抹成 100%%", got)
 	}
+}
+
+func TestFailMarksAllActivePhases(t *testing.T) {
+	// #331：并发/乱序下可能同时有多个 PhaseActive——Fail 必须全标，
+	// 只标第一个会让其余阶段永卡 active。
+	tr := NewTracker([]PhaseConfig{{Name: "a"}, {Name: "b"}, {Name: "c"}})
+	tr.UpdatePhase("a", PhaseActive, 10)
+	tr.UpdatePhase("b", PhaseActive, 20) // 自动完成 a
+	tr.UpdatePhase("a", PhaseActive, 15) // 重标 a 活跃(并发/乱序复活的实际形态)
+	tr.Fail()
+	for _, name := range []string{"a", "b"} {
+		p, _ := tr.GetPhase(name)
+		if p.Status != PhaseFailed {
+			t.Errorf("phase %q Status = %q, want %q", name, p.Status, PhaseFailed)
+		}
+	}
+	if c, _ := tr.GetPhase("c"); c.Status != PhasePending {
+		t.Errorf("pending 阶段不应被波及: %q", c.Status)
+	}
+}
+
+func TestNewTrackerDuplicatePhaseNamePanics(t *testing.T) {
+	// #333：重名 fail-fast（此前静默覆盖，前一个同名阶段成孤儿）
+	defer func() {
+		if recover() == nil {
+			t.Fatal("重名 PhaseConfig 应 panic")
+		}
+	}()
+	NewTracker([]PhaseConfig{{Name: "dup"}, {Name: "dup"}})
 }

@@ -2,6 +2,7 @@ package batch
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oekit/concurrency/async"
@@ -11,6 +12,11 @@ import (
 // idleExitRounds 后台循环连续空闲多少个 interval 后自退出（下次 Add 重新
 // 拉起），闲时不留常驻 goroutine。
 const idleExitRounds = 10
+
+// idleProbeInterval 是 interval<=0 时后台循环的空闲探活周期（#334）：探活
+// **只做自退出判定、不触发 flush**——攒批语义仍由容器 needsFlush 唤醒驱动。
+// 连续 idleExitRounds 个探活周期无新 Add 即自退出（缺省 5s×10 = 50s）。
+const idleProbeInterval = 5 * time.Second
 
 // TaskContainer 攒批容器扩展点：执行器只负责"何时触发 flush"，
 // "怎么攒、怎么执行"由容器实现决定。Bulk/Chunk 变体均构建其上。
@@ -80,6 +86,9 @@ type PeriodicalExecutor struct {
 	background    bool // 后台循环是否在跑（含正在退出收尾）
 	stopRequested bool
 
+	lastAdd atomic.Int64     // 最近一次 Add 的 UnixNano（#334 空闲探活的锚点）
+	now     func() time.Time // 时钟源（测试注入）
+
 	wake chan struct{} // cap 1：立即 flush 信号（非阻塞投递）
 	exit chan struct{} // 后台循环退出时 close
 }
@@ -97,16 +106,20 @@ func NewPeriodicalExecutor(interval time.Duration, container TaskContainer, opts
 	if o.tickerFactory == nil {
 		o.tickerFactory = defaultTickerFactory
 	}
-	return &PeriodicalExecutor{
+	e := &PeriodicalExecutor{
 		interval:   interval,
 		container:  container,
 		tickerFunc: o.tickerFactory,
 		wake:       make(chan struct{}, 1),
+		now:        o.now,
 	}
+	e.lastAdd.Store(o.now().UnixNano())
+	return e
 }
 
 // Add 收纳一个任务；容器要求立即 flush（AddTask 返回 true）时唤醒后台。
 func (e *PeriodicalExecutor) Add(task any) {
+	e.lastAdd.Store(e.now().UnixNano())
 	e.mu.Lock()
 	needsFlush := e.container.AddTask(task)
 	e.ensureBackgroundLocked()
@@ -179,6 +192,14 @@ func (e *PeriodicalExecutor) backgroundLoop(exit chan struct{}) {
 		ticker = e.tickerFunc(e.interval)
 		tickerC = ticker.C()
 		defer ticker.Stop()
+	} else {
+		// #334：interval<=0 时此前 tickerC=nil ⇒ select 永远只等 wake，
+		// 空闲自退出承诺整体失效——后台循环变成永久常驻 goroutine。补一个
+		// 慢速探活 ticker：**只做自退出判定、不 flush**（攒批语义仍由
+		// needsFlush 唤醒驱动）。
+		ticker = e.tickerFunc(idleProbeInterval)
+		tickerC = ticker.C()
+		defer ticker.Stop()
 	}
 
 	idleRounds := 0
@@ -190,11 +211,30 @@ func (e *PeriodicalExecutor) backgroundLoop(exit chan struct{}) {
 			}
 			idleRounds = 0
 		case <-tickerC:
-			if e.roundTick(&idleRounds) {
+			if e.interval > 0 {
+				if e.roundTick(&idleRounds) {
+					return
+				}
+			} else if e.idleProbe() {
 				return
 			}
 		}
 	}
+}
+
+// idleProbe interval<=0 时的空闲探活（#334）：自最近一次 Add 起，
+// idleExitRounds 个探活周期内无新任务即摘牌自退出（下次 Add 重新拉起，
+// 与 interval>0 的自退出语义对齐）。探活不取走积压、不触发执行——攒批
+// 语义零改动。
+func (e *PeriodicalExecutor) idleProbe() (exit bool) {
+	last := e.lastAdd.Load()
+	if last == 0 || e.now().UnixNano()-last < int64(idleExitRounds)*int64(idleProbeInterval) {
+		return false
+	}
+	e.mu.Lock()
+	e.background = false
+	e.mu.Unlock()
+	return true
 }
 
 // round 取走全部积压逐批执行；取空且收到停机请求时摘除后台标记并返回 true。
