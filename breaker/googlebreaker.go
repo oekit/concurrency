@@ -194,7 +194,7 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 		b.lastPass.Store(now)
 		return googlePromise{b: b, gen: gen, probe: true}, gen, nil
 	}
-	gen := b.gen
+	// gen 在下方 #328 复核点统一读取(此处预读会成 ineffectual 死赋值)
 	st := b.state
 	b.mu.Unlock()
 
@@ -237,8 +237,7 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	// （恢复瞬间）；快照 closed 而实际 open ⇒ closed-pass 误放（熔断瞬间）。
 	// gen 一并刷新：探测放行会推进 gen，旧代承诺的回报会被代校验丢弃。
 	b.mu.Lock()
-	st = b.state
-	gen = b.gen
+	st, gen := b.state, b.gen
 	b.mu.Unlock()
 	if st == stateClosed {
 		// closed 态：预算内全量放行（速率型触发已由上面的判定接管）
