@@ -159,7 +159,9 @@ func IsTransportRetryable(err error) bool {
 
 // Classifier 返回可直接塞进 retry.Config.Retryable 的判定函数：
 //   - ctx 取消/超时（含包装链）→ false；
-//   - *HTTPError → Retryable(status)（429/5xx true，其余 4xx false）；
+//   - *HTTPError → Status==0 视为传输层失败（未收到响应，:86 的字段契约）
+//     重试；其余按 Retryable(status)（429/5xx true，4xx false）（#325：
+//     此前 Status==0 落进 Retryable(0)=false，连接错误被静默放弃重试）；
 //   - 其他错误 → true（视为传输层失败）。
 func Classifier() func(error) bool {
 	return func(err error) bool {
@@ -168,6 +170,9 @@ func Classifier() func(error) bool {
 		}
 		var he *HTTPError
 		if errors.As(err, &he) {
+			if he.Status == 0 {
+				return true // 传输层失败：与其他错误同口径（#325）
+			}
 			return Retryable(he.Status)
 		}
 		return true

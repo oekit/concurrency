@@ -102,6 +102,10 @@ type (
 		// start 记录放行时刻（clock 的 UnixNano），Pass 时计算 RT。
 		start   int64
 		shedder *adaptiveShedder
+		// settled 为幂等标记（#336，syncx idempotentRelease 同款）：重复
+		// Pass/Fail 此前把 flying 推成负数 ⇒ highThru 恒 false，过载期间
+		// 降载漏放。第二次及以后的 Pass/Fail no-op。
+		settled atomic.Bool
 	}
 
 	// nopShedder 恒放行（除 ctx 已取消外），无任何统计。
@@ -315,6 +319,10 @@ func (as *adaptiveShedder) now() int64 {
 
 // Pass 回填成功：递减在途并发，并把 RT（毫秒，向上取整）与通过数写入统计窗口。
 func (p *shedPromise) Pass() {
+	// #336：幂等防护——同一承诺只结算一次
+	if !p.settled.CompareAndSwap(false, true) {
+		return
+	}
 	rt := float64(p.shedder.now()-p.start) / float64(time.Millisecond)
 	p.shedder.addFlying(-1)
 	p.shedder.rtCounter.Add(int64(math.Ceil(rt)))
@@ -323,6 +331,10 @@ func (p *shedPromise) Pass() {
 
 // Fail 回填失败：仅递减在途并发（不产生 RT/通过统计，对齐上游）。
 func (p *shedPromise) Fail() {
+	// #336：幂等防护——同一承诺只结算一次
+	if !p.settled.CompareAndSwap(false, true) {
+		return
+	}
 	p.shedder.addFlying(-1)
 }
 

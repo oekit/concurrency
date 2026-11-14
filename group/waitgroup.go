@@ -105,6 +105,10 @@ func (w *WaitGroupWrapper) Wait() error {
 // NewWaitGroup 创建一个 WaitGroupWrapper。
 // ctx 为父 context，支持通过 WithTimeout 设置全局超时。
 func NewWaitGroup(ctx context.Context, opts ...RunOption) *WaitGroupWrapper {
+	if ctx == nil {
+		// #329：nil ctx = Background（#159 口径）——此前 WithCancel(nil) 直接 panic
+		ctx = context.Background()
+	}
 	rOpts := &runOptions{}
 	for _, opt := range opts {
 		opt(rOpts)
