@@ -1,3 +1,7 @@
+## [v0.36.1] — 2026-11-14
+
+- fix: 审计批报 11 单——httpx Classifier 传输层失败口径(#325)/breaker 冲突回调后装与状态复核(#327/#328)/nil ctx 口径(#329/#330)/progress Fail 全标与入参尊重与重名 fail-fast(#331/#332/#333)/batch 空闲探活(#334)/shedding Promise 幂等(#336)/async-gopool panic handler 统一面(#338)
+
 ## [v0.36.0] — 2026-11-13
 
 - **BREAKING**：删除 syncx.Slot.Panicked 历史兼容字段（v0.7.0 起 Slot.Err 已承载 *async.PanicError，Deprecated 到期退役）。下游迁移：errors.As(slot.Err, &pe) 后读 pe.Value 取 panic payload（携带栈）。FanIn 契约不动。
