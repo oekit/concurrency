@@ -1,8 +1,8 @@
 package gopool
 
 import (
-	"github.com/oekit/concurrency/async"
 	"context"
+	"github.com/oekit/concurrency/async"
 	"log"
 	"runtime/debug"
 	"sync"
