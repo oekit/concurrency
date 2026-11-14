@@ -1,3 +1,9 @@
+## [v0.37.0] — 2026-11-15
+
+- feat(scanrotation): 新增周期扫描的墙钟预算+轮转游标记账件（下沉自 bianque scan_rotation.go）——Begin/Advance 配对记账、attempted<=0 不动游标（静默漏推钉子）、budget/def 两级兜底、时钟可注入、方法级并发安全；window: Reduce godoc 补 fn 回调契约（活桶指针+读锁内执行：只读、不得重入本窗口、必须轻量）(#339,#335)
+
+关联问题单：concurrency#339、concurrency#335。
+
 ## [v0.36.1] — 2026-11-14
 
 - fix: 审计批报 11 单——httpx Classifier 传输层失败口径(#325)/breaker 冲突回调后装与状态复核(#327/#328)/nil ctx 口径(#329/#330)/progress Fail 全标与入参尊重与重名 fail-fast(#331/#332/#333)/batch 空闲探活(#334)/shedding Promise 幂等(#336)/async-gopool panic handler 统一面(#338)
