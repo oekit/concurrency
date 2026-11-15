@@ -37,8 +37,11 @@
 //   - 时间源可注入 WithBreakerClock（缺省 time.Now），窗口推进、强制探活与
 //     探测调度共用，测试注入假时钟即可完全确定地驱动状态机；
 //   - 可观测性零强制注入：拒绝走可选钩子 WithBreakerRejectHandler（缺省 no-op），
-//     由上层显式接 logx/metrics；State()/State 枚举（closed/open/half-open）供
-//     监控与日志打点（v0.13.0 起，放行判定仍以 Allow/Do 返回结果为准）；
+//     状态迁移走可选钩子 WithBreakerStateChangeHandler（closed/open/half-open 三态
+//     往返在迁移处同步回调一次，from==to 不触发；与「每次被拒都触发」的拒绝回调
+//     语义严格分离，#351），由上层显式接 logx/metrics；State()/State 枚举
+//     （closed/open/half-open）供监控与日志打点（v0.13.0 起，放行判定仍以
+//     Allow/Do 返回结果为准）；
 //   - 与上游 go-zero 的关键语义分叉（v0.13.0 起）：上游 open 态按 SRE 公式概率
 //     丢弃、窗口滚空即全量放行；本仓三态化后熔断期收敛到探测级（forcePass +
 //     半开探测），恢复只由探测成功驱动——「状态」与「流量」不再失配；

@@ -114,11 +114,15 @@ func (b *bucket) Reset() {
 // 开放期普通失败只记窗口样本，不触碰冷却计时（openSince）——冷却不被延长。
 // 参见 https://landing.google.com/sre/sre-book/chapters/handling-overload/
 type googleBreaker struct {
+	name         string
 	stat         *window.RollingWindow[int64, *bucket]
 	clock        func() time.Time
 	windowSize   int
 	forcePass    time.Duration
 	probeTimeout time.Duration
+	// onStateChange 为状态迁移钩子（#351，缺省 nil）：仅在业务可见迁移处、
+	// 写完新状态后经 setStateLocked 同步回调；探测失联回收路径刻意不调用。
+	onStateChange func(name string, from, to State)
 	// cooldown 为冷却期：open 态自进入/重开起多久放行半开探测；0 = 沿用 probeTimeout
 	// （WithCooldown 独立覆盖——冷却期与探测失联时限是两个独立决策，见 #19）。
 	cooldown time.Duration
@@ -148,21 +152,50 @@ type windowResult struct {
 	failingBuckets int64
 }
 
-// newGoogleBreaker 按 cfg 构造熔断核心；窗口、强制探活与探测调度共用 cfg.clock。
-func newGoogleBreaker(cfg breakerConfig) *googleBreaker {
+// publicState 把内部状态值映射为公开 State（两者数值恰好同序，显式映射避免
+// 任一方的取值调整悄悄改变对外语义）。
+func (s breakerState) publicState() State {
+	switch s {
+	case stateOpen:
+		return StateOpen
+	case stateHalfOpen:
+		return StateHalfOpen
+	default:
+		return StateClosed
+	}
+}
+
+// setStateLocked 在 mu 内写入新状态，并在真实迁移（from != to）后同步回调一次
+// 状态迁移钩子（#351）。调用方必须持有 b.mu：事件与状态同序、并发下恰好一次
+// 由锁串行化保证；回调在锁内执行，故不得反向调用同一个 breaker（见选项文档）。
+func (b *googleBreaker) setStateLocked(to breakerState) {
+	from := b.state
+	if from == to {
+		return
+	}
+	b.state = to
+	if b.onStateChange != nil {
+		b.onStateChange(b.name, from.publicState(), to.publicState())
+	}
+}
+
+// newGoogleBreaker 按 name 与 cfg 构造熔断核心；窗口、强制探活与探测调度共用 cfg.clock。
+func newGoogleBreaker(name string, cfg breakerConfig) *googleBreaker {
 	st := window.NewRollingWindow[int64, *bucket](
 		func() *bucket { return new(bucket) },
 		cfg.windowSize, cfg.windowInterval,
 		window.WithWindowClock[int64, *bucket](cfg.clock),
 	)
 	return &googleBreaker{
-		stat:         st,
-		clock:        cfg.clock,
-		windowSize:   cfg.windowSize,
-		forcePass:    cfg.forcePass,
-		probeTimeout: cfg.probeTimeout,
-		cooldown:     cfg.cooldown,
-		consecutive:  cfg.consecutive,
+		name:          name,
+		stat:          st,
+		clock:         cfg.clock,
+		windowSize:    cfg.windowSize,
+		forcePass:     cfg.forcePass,
+		probeTimeout:  cfg.probeTimeout,
+		cooldown:      cfg.cooldown,
+		consecutive:   cfg.consecutive,
+		onStateChange: cfg.onStateChange,
 	}
 }
 
@@ -173,7 +206,8 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	now := b.clock().UnixNano()
 
 	b.mu.Lock()
-	// 挂起探测超时未回报：视为失联，回收探测位放行新探测（陈旧代回报随后被代校验丢弃）
+	// 挂起探测超时未回报：视为失联，回收探测位放行新探测（陈旧代回报随后被代校验丢弃）。
+	// #351：失联回收只是内部清理（不重置冷却），state 回 open 为静默迁移，不上报迁移回调。
 	if b.probeGen != 0 && now-b.probeAt >= int64(b.probeTimeout) {
 		b.probeGen = 0
 		if b.state == stateHalfOpen {
@@ -188,8 +222,8 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 		gen := b.gen
 		b.probeGen = gen
 		b.probeAt = now
-		b.state = stateHalfOpen
-		b.consecFails = 0 // 进入 half-open：连续失败计数归零
+		b.consecFails = 0               // 进入 half-open：连续失败计数归零
+		b.setStateLocked(stateHalfOpen) // 上报 open→half-open（开始探测，#351）
 		b.mu.Unlock()
 		b.lastPass.Store(now)
 		return googlePromise{b: b, gen: gen, probe: true}, gen, nil
@@ -221,11 +255,11 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 		if dropRatio > 0 {
 			b.mu.Lock()
 			if b.state == stateClosed {
-				b.state = stateOpen
 				b.openSince = now
 				b.probeGen = 0
-				b.consecFails = 0     // 进入 open：连续失败计数归零
-				b.lastPass.Store(now) // open 期 forcePass 自进入起算
+				b.consecFails = 0           // 进入 open：连续失败计数归零
+				b.lastPass.Store(now)       // open 期 forcePass 自进入起算
+				b.setStateLocked(stateOpen) // 上报 closed→open（速率型触发，#351）
 			}
 			b.mu.Unlock()
 		}
@@ -364,17 +398,17 @@ func (b *googleBreaker) report(gen uint64, probe bool, ok bool) {
 	}
 	b.probeGen = 0
 	if ok {
-		b.state = stateClosed
-		b.consecFails = 0 // 关闸：连续失败计数归零
+		b.consecFails = 0             // 关闸：连续失败计数归零
+		b.setStateLocked(stateClosed) // 上报 half-open→closed（探测成功恢复，#351）
 		b.mu.Unlock()
 		// 关闸清窗：窗口里的旧失败样本不得让 closed 在下一次判定立即复开
 		b.stat.Reset()
 		b.markSuccess()
 	} else {
-		b.state = stateOpen
 		b.openSince = b.clock().UnixNano()
 		b.consecFails = 0             // 重开：连续失败计数归零
 		b.lastPass.Store(b.openSince) // open 期 forcePass 自重开起算（#25）
+		b.setStateLocked(stateOpen)   // 上报 half-open→open（探测失败重开，#351）
 		b.mu.Unlock()
 		b.markFailure()
 	}
@@ -402,6 +436,8 @@ func (b *googleBreaker) isProbeGen(gen uint64) bool {
 
 // abandonGen 显式放弃挂起探测（调用方确认探针失联）：腾出探测位但不重置冷却——
 // 冷却已满时下一放行即刻补放新探测。非探测代为 no-op。
+// #351：放弃是探针失联的确定性回收（同超时回收），state 回 open 为静默迁移，
+// 不产生状态迁移回调。
 func (b *googleBreaker) abandonGen(gen uint64) {
 	b.mu.Lock()
 	if b.probeGen != 0 && gen == b.probeGen {
@@ -427,11 +463,11 @@ func (b *googleBreaker) accountConsec(ok bool) {
 	}
 	b.consecFails++
 	if b.state == stateClosed && b.consecFails >= b.consecutive {
-		b.state = stateOpen
 		b.openSince = b.clock().UnixNano()
 		b.probeGen = 0
 		b.consecFails = 0
 		b.lastPass.Store(b.openSince) // open 期 forcePass 自进入起算（#25）
+		b.setStateLocked(stateOpen)   // 上报 closed→open（计数型触发，#351）
 	}
 }
 

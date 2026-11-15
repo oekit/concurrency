@@ -32,7 +32,7 @@ func (c *fakeClock) Set(t time.Time) {
 
 // newTestGoogleBreaker 按缺省参数（40×250ms、探测时限 1m）构造注入假时钟的熔断核心。
 func newTestGoogleBreaker(clock *fakeClock) *googleBreaker {
-	return newGoogleBreaker(breakerConfig{
+	return newGoogleBreaker("google-breaker-test", breakerConfig{
 		windowSize:     DefaultBuckets,
 		windowInterval: testInterval,
 		forcePass:      DefaultForcePass,
@@ -440,7 +440,7 @@ func TestGoogleBreaker_OpenStateRejectionFastPath(t *testing.T) {
 // 判定的输入，#273 起仅 closed 态承担）。
 func BenchmarkAllowGen_Closed(b *testing.B) {
 	clock := &fakeClock{}
-	gb := newGoogleBreaker(breakerConfig{
+	gb := newGoogleBreaker("google-breaker-bench", breakerConfig{
 		windowSize:     DefaultBuckets,
 		windowInterval: testInterval,
 		forcePass:      DefaultForcePass,
@@ -460,7 +460,7 @@ func BenchmarkAllowGen_Closed(b *testing.B) {
 // 每笔拒绝与 closed 放行同价（全窗聚合白做），修复后为纯状态机判定。
 func BenchmarkAllowGen_OpenRejected(b *testing.B) {
 	clock := &fakeClock{}
-	gb := newGoogleBreaker(breakerConfig{
+	gb := newGoogleBreaker("google-breaker-bench", breakerConfig{
 		windowSize:     DefaultBuckets,
 		windowInterval: testInterval,
 		forcePass:      DefaultForcePass,
