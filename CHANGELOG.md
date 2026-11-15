@@ -1,3 +1,9 @@
+## [v0.38.0] — 2026-11-16
+
+- - breaker 新增状态转移观测钩子 `WithBreakerStateChangeHandler`：closed→open / open→half-open / half-open→closed / half-open→open 各报一次，from==to 不触发；同步回调、内核不起 goroutine，宿主无需轮询 State() 判转移（消除 TOCTOU 与重复加锁）（#351）。
+
+关联问题单：concurrency#351。
+
 ## [v0.37.0] — 2026-11-15
 
 - feat(scanrotation): 新增周期扫描的墙钟预算+轮转游标记账件（下沉自 bianque scan_rotation.go）——Begin/Advance 配对记账、attempted<=0 不动游标（静默漏推钉子）、budget/def 两级兜底、时钟可注入、方法级并发安全；window: Reduce godoc 补 fn 回调契约（活桶指针+读锁内执行：只读、不得重入本窗口、必须轻量）(#339,#335)
