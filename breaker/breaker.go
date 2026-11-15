@@ -128,11 +128,12 @@ type breakerConfig struct {
 	clock          func() time.Time
 	onReject       func(name, reason string)
 	onConflict     func(name, detail string)
+	onStateChange  func(name string, from, to State)
 }
 
 // configFingerprint 是 breakerConfig 中**值语义**字段的指纹：用于同名共享熔断器判定
-// 「本次 opts 是否与首次创建不同」（#29）。刻意排除三个函数字段（clock / onReject /
-// onConflict）——函数值不可比较，且钩子属每调用方的私有接线，差异不构成"参数冲突"
+// 「本次 opts 是否与首次创建不同」（#29）。刻意排除全部函数字段（clock / onReject /
+// onConflict / onStateChange）——函数值不可比较，且钩子属每调用方的私有接线，差异不构成"参数冲突"
 // （否则先注册 reject handler 的调用方会被后续每个调用方无谓地告警一次）。
 type configFingerprint struct {
 	windowSize     int
@@ -285,6 +286,37 @@ func WithBreakerRejectHandler(handler func(name, reason string)) BreakerOption {
 	}
 }
 
+// WithBreakerStateChangeHandler 注册**状态迁移**回调（缺省 no-op，#351）。
+//
+// 每次真实迁移写完新状态后同步回调一次，from == to 不触发。上报全部三态往返：
+//
+//	closed → open        速率型/计数型触发熔断
+//	open → half-open     冷却期满，开始半开探测
+//	half-open → closed   探测成功，恢复放行
+//	half-open → open     探测失败，重开并重置计时
+//
+// 与 WithBreakerRejectHandler 的语义严格分离：拒绝回调在 open 态**每次被拒**都
+// 触发（用于拒绝计数/原因观测），本回调只在**迁移那一次**触发（用于「刚打开」
+// 告警/开闸计数）——拿拒绝回调统计开闸次数会因重复拒绝而失真，反之亦然。
+//
+// 以下路径不产生迁移回调：ctx 取消（放行/失败回报被 ctx 门挡下，未消耗统计）、
+// 探测失联的内部回收（WithProbeTimeout 到期回收）与 AbandonGen 显式放弃——二者
+// 只腾出探测位、不重置冷却，不是业务可见的状态迁移。
+//
+// 回调为**同步**调用（宿主自行异步化，内核不起 goroutine），且在状态机锁内执行，
+// 以保证事件与状态同序、并发下恰好一次。因此回调内**不得反向调用同一个 breaker**
+// （Allow/Do/State/SuccessGen/FailureGen/AbandonGen 等都会再次取同一把锁 → 死锁）；
+// 回调只应做轻量记录/投递到宿主自己的队列，勿在内阻塞或做重活。回调 panic 原样
+// 向上传播（与拒绝回调同口径，本包不做 recover）；因回调持锁执行，panic 还意味着
+// 该实例的锁不会被释放——回调实现必须保证不 panic。
+func WithBreakerStateChangeHandler(handler func(name string, from, to State)) BreakerOption {
+	return func(c *breakerConfig) {
+		if handler != nil {
+			c.onStateChange = handler
+		}
+	}
+}
+
 // WithBreakerConflictHandler 注册**同名共享配置冲突**回调（缺省 no-op，#29）。
 //
 // GetBreaker(name, opts...) 是进程级单例：opts 仅在首次创建该名字时生效。若后续又以
@@ -331,7 +363,7 @@ func NewBreaker(name string, opts ...BreakerOption) Breaker {
 func newCircuitBreaker(name string, cfg breakerConfig) *circuitBreaker {
 	return &circuitBreaker{
 		name:     name,
-		gb:       newGoogleBreaker(cfg),
+		gb:       newGoogleBreaker(name, cfg),
 		reasons:  newErrorReasons(),
 		onReject: cfg.onReject,
 	}
@@ -434,14 +466,7 @@ func (cb *circuitBreaker) Name() string {
 func (cb *circuitBreaker) State() State {
 	cb.gb.mu.Lock()
 	defer cb.gb.mu.Unlock()
-	switch cb.gb.state {
-	case stateOpen:
-		return StateOpen
-	case stateHalfOpen:
-		return StateHalfOpen
-	default:
-		return StateClosed
-	}
+	return cb.gb.state.publicState()
 }
 
 // Allow 判断请求是否放行：放行返回 Promise 供调用方回填 Pass/Fail，

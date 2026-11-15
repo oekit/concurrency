@@ -264,6 +264,7 @@ func TestConfigFingerprint_ExcludesHooks(t *testing.T) {
 	withHooks := newBreakerConfig(
 		WithBreakerRejectHandler(func(string, string) {}),
 		WithBreakerConflictHandler(func(string, string) {}),
+		WithBreakerStateChangeHandler(func(string, State, State) {}),
 		WithBreakerClock(func() time.Time { return time.Unix(0, 0) }),
 	)
 	if base.fingerprint() != withHooks.fingerprint() {
