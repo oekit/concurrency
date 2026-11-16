@@ -1,3 +1,7 @@
+## [v0.38.1] — 2026-11-16
+
+- refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至各依赖最新已发布版本（pkg v0.52.0）
+
 ## [v0.38.0] — 2026-11-16
 
 - - breaker 新增状态转移观测钩子 `WithBreakerStateChangeHandler`：closed→open / open→half-open / half-open→closed / half-open→open 各报一次，from==to 不触发；同步回调、内核不起 goroutine，宿主无需轮询 State() 判转移（消除 TOCTOU 与重复加锁）（#351）。
