@@ -2,11 +2,11 @@ package async_test
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/oekit/concurrency/async"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 func TestPanicError_ErrorText(t *testing.T) {
@@ -66,7 +66,7 @@ func TestRunSafeRetLabeled_TypedPanicError(t *testing.T) {
 func TestPanicError_WrapsPreservesAs(t *testing.T) {
 	// 消费方 fmt.Errorf %w 包装后仍可 errors.As 还原
 	base := &async.PanicError{Value: "root"}
-	wrapped := fmt.Errorf("worker: queue panic: %w", base)
+	wrapped := pkgerrors.Wrapf(base, "worker: queue panic")
 	var pe *async.PanicError
 	if !errors.As(wrapped, &pe) || pe.Value != "root" {
 		t.Fatalf("As after wrap broken: %v", wrapped)
