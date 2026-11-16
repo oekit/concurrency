@@ -2,9 +2,10 @@ package ratelimit
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 	"time"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 func TestTokenBucket_Allow(t *testing.T) {
@@ -218,7 +219,7 @@ func TestLimiter_ReserveNotReservableSentinel(t *testing.T) {
 	}
 
 	// 哨兵可被 %w 包装穿透（消费方包装错误链后仍可判定）
-	wrapped := fmt.Errorf("retry budget exhausted: %w", err)
+	wrapped := pkgerrors.Wrapf(err, "retry budget exhausted")
 	if !errors.Is(wrapped, ErrNotReservable) {
 		t.Fatalf("包装后的错误链应仍可判定 ErrNotReservable")
 	}

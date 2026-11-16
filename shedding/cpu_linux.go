@@ -4,13 +4,14 @@ package shedding
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 const (
@@ -152,7 +153,7 @@ func detectCgroupFrom(data string) (cgroupLayout, error) {
 		}
 		cols := strings.SplitN(line, ":", 3)
 		if len(cols) != 3 {
-			return cgroupLayout{}, fmt.Errorf("shedding: invalid cgroup line: %s", line)
+			return cgroupLayout{}, pkgerrors.Newf("shedding: invalid cgroup line: %s", line)
 		}
 		if cols[0] == "0" && cols[1] == "" {
 			sawV2 = true
@@ -258,7 +259,7 @@ func parseProcStatTotalNS(data []byte) (uint64, error) {
 		for _, f := range fields[1:procStatFields] {
 			v, err := strconv.ParseUint(f, 10, 64)
 			if err != nil {
-				return 0, fmt.Errorf("shedding: bad cpu stat field %q: %w", f, err)
+				return 0, pkgerrors.Wrapf(err, "shedding: bad cpu stat field %q", f)
 			}
 			totalTicks += v
 		}
@@ -272,18 +273,18 @@ func parseProcStatTotalNS(data []byte) (uint64, error) {
 func parseCPUMax(data string) (float64, error) {
 	fields := strings.Fields(data)
 	if len(fields) != 2 {
-		return 0, fmt.Errorf("shedding: bad %s file: %s", cgroupV2CPUMaxFile, data)
+		return 0, pkgerrors.Newf("shedding: bad %s file: %s", cgroupV2CPUMaxFile, data)
 	}
 	if fields[0] == "max" {
 		return -1, nil
 	}
 	quotaUs, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("shedding: bad cpu.max quota %q: %w", fields[0], err)
+		return 0, pkgerrors.Wrapf(err, "shedding: bad cpu.max quota %q", fields[0])
 	}
 	periodUs, err := strconv.ParseUint(fields[1], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("shedding: bad cpu.max period %q: %w", fields[1], err)
+		return 0, pkgerrors.Wrapf(err, "shedding: bad cpu.max period %q", fields[1])
 	}
 	return float64(quotaUs) / float64(periodUs), nil
 }
@@ -313,14 +314,14 @@ func parseCPURangeCount(data string) (int, error) {
 			bounds := strings.SplitN(part, "-", 2)
 			lo, err := parseUint(bounds[0])
 			if err != nil {
-				return 0, fmt.Errorf("shedding: bad cpuset list format: %s", val)
+				return 0, pkgerrors.Newf("shedding: bad cpuset list format: %s", val)
 			}
 			hi, err := parseUint(bounds[1])
 			if err != nil {
-				return 0, fmt.Errorf("shedding: bad cpuset list format: %s", val)
+				return 0, pkgerrors.Newf("shedding: bad cpuset list format: %s", val)
 			}
 			if hi < lo {
-				return 0, fmt.Errorf("shedding: bad cpuset list format: %s", val)
+				return 0, pkgerrors.Newf("shedding: bad cpuset list format: %s", val)
 			}
 			for i := lo; i <= hi; i++ {
 				seen[i] = struct{}{}
@@ -362,7 +363,7 @@ func parseUint(s string) (uint64, error) {
 		if errors.Is(err, strconv.ErrRange) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("shedding: bad int format: %s", s)
+		return 0, pkgerrors.Newf("shedding: bad int format: %s", s)
 	}
 	if v < 0 {
 		return 0, nil

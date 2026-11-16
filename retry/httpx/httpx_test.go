@@ -3,12 +3,12 @@ package httpx_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/oekit/concurrency/retry"
 	"github.com/oekit/concurrency/retry/httpx"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // TestRetryAfterZeroHintPreserved 回归测试（#228）：Retry-After: 0 是服务端合法
@@ -31,7 +31,7 @@ func TestRetryAfterZeroHintPreserved(t *testing.T) {
 		t.Fatalf("RetryAfterHint(hintOnly) = (%v, %v), want (0, true)", d, ok)
 	}
 	// hasHint 优先：显式建议不被 Err 链内层建议覆盖。
-	inner := fmt.Errorf("wrap: %w", httpx.NewRetryAfter(7*time.Second))
+	inner := pkgerrors.Wrapf(httpx.NewRetryAfter(7*time.Second), "wrap")
 	e2 := httpx.NewRetryAfterError(503, 2*time.Second, inner)
 	if d, ok := e2.RetryAfter(); !ok || d != 2*time.Second {
 		t.Fatalf("hint precedence = (%v, %v), want (2s, true)", d, ok)
@@ -45,7 +45,7 @@ func TestHTTPErrorWithoutHintFallsBackToChain(t *testing.T) {
 	if d, ok := e.RetryAfter(); ok || d != 0 {
 		t.Fatalf("hintless HTTPError.RetryAfter() = (%v, %v), want (0, false)", d, ok)
 	}
-	inner := fmt.Errorf("wrap: %w", httpx.NewRetryAfter(3*time.Second))
+	inner := pkgerrors.Wrapf(httpx.NewRetryAfter(3*time.Second), "wrap")
 	e2 := &httpx.HTTPError{Status: 429, Err: inner}
 	if d, ok := e2.RetryAfter(); !ok || d != 3*time.Second {
 		t.Fatalf("chain fallback = (%v, %v), want (3s, true)", d, ok)
@@ -94,9 +94,9 @@ func TestIsTransportRetryable(t *testing.T) {
 	if httpx.IsTransportRetryable(context.DeadlineExceeded) {
 		t.Fatal("ctx deadline should NOT be retryable")
 	}
-	if fmt.Errorf("dial tcp: %w", context.DeadlineExceeded) != nil {
+	if pkgerrors.Wrapf(context.DeadlineExceeded, "dial tcp") != nil {
 		// 包装后的 ctx 错误也要识别（errors.Is 链）
-		if httpx.IsTransportRetryable(fmt.Errorf("do: %w", context.Canceled)) {
+		if httpx.IsTransportRetryable(pkgerrors.Wrapf(context.Canceled, "do")) {
 			t.Fatal("wrapped ctx cancel should NOT be retryable")
 		}
 	}
@@ -171,7 +171,7 @@ func TestDelayHintHTTPError(t *testing.T) {
 	}
 	start := time.Now()
 	_ = retry.Do(context.Background(), cfg, func(int) error {
-		return &httpx.HTTPError{Status: 429, Err: fmt.Errorf("retry-after: %w", httpx.NewRetryAfter(10*time.Second))}
+		return &httpx.HTTPError{Status: 429, Err: pkgerrors.Wrapf(httpx.NewRetryAfter(10*time.Second), "retry-after")}
 	})
 	elapsed := time.Since(start)
 	if elapsed > 200*time.Millisecond {

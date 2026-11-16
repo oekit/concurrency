@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/oekit/concurrency/async"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // GroupOption 配置 Group 的重启策略与观测钩子。
@@ -200,7 +201,7 @@ func (g *Group[T]) Reconcile(targets []T) {
 			return g.idOf(target), nil
 		})
 		if err != nil {
-			panic(fmt.Errorf("supervisor: idOf 回调 panic（targets[%d]）: %w", i, err))
+			panic(pkgerrors.Wrapf(err, "supervisor: idOf 回调 panic（targets[%d]）", i))
 		}
 		if id == "" {
 			panic("supervisor: IDOf 返回空字符串——空身份会让所有这类目标争同一个槽位")

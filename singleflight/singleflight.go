@@ -2,11 +2,11 @@ package singleflight
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/oekit/concurrency/async"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // Flight 对同一个 key 的并发调用只执行一次 fn。
@@ -93,7 +93,7 @@ func (f *Flight[T]) release(key string, c *call[T]) {
 func (f *Flight[T]) runLeader(key string, c *call[T], repanic bool, fn func()) (panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			c.err = fmt.Errorf("singleflight: fn panic: %w", async.NewPanicError(r))
+			c.err = pkgerrors.Wrapf(async.NewPanicError(r), "singleflight: fn panic")
 			f.release(key, c)
 			panicked = true
 			if repanic {
