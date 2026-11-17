@@ -212,7 +212,7 @@ func RunCursor[T any](
 			// 但 advance 失败路径不算成功，不得归零。
 			failures = 0
 			if cfg.IdleDelay > 0 {
-				if err := sleepCtx(ctx, cfg.IdleDelay); err != nil {
+				if err := retry.Wait(ctx, cfg.IdleDelay); err != nil {
 					return cursor, err
 				}
 			}
@@ -395,17 +395,5 @@ func waitBackoff(ctx context.Context, cfg retry.Config, failures int, cause erro
 	if delay <= 0 {
 		return ctx.Err()
 	}
-	return sleepCtx(ctx, delay)
-}
-
-// sleepCtx 可被取消的等待（不用 time.Sleep：取消后要能立刻返回）。
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return retry.Wait(ctx, delay)
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oekit/concurrency/async"
+	"github.com/oekit/concurrency/retry"
 )
 
 // IntervalMode 周期循环的间隔模式（#140）。
@@ -244,14 +245,10 @@ func (l *Loop) Done() <-chan struct{} {
 }
 
 func (l *Loop) loop(ctx context.Context, cfg Config, fn func(ctx context.Context)) {
-	// 首跑延迟：select 保证可被停机打断（不要 time.Sleep）
+	// 首跑延迟：可被停机打断的定时等待（不要 time.Sleep）
 	if cfg.FirstDelay > 0 {
-		timer := time.NewTimer(cfg.FirstDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if err := retry.Wait(ctx, cfg.FirstDelay); err != nil {
 			return
-		case <-timer.C:
 		}
 	}
 
@@ -267,14 +264,11 @@ func (l *Loop) loop(ctx context.Context, cfg Config, fn func(ctx context.Context
 	if cfg.IntervalMode == IntervalAfterCompletion {
 		// 轮次完成后间隔（#140）：本轮结束 → 重置计时器 → 等 Interval → 下一轮。
 		// 本轮跑得久，下一轮相应推迟——「轮次间隔 ≥ Interval」由构造保证。
-		// timer 每轮新建：间隔从本轮结束起算，Ticker 的固定时刻表语义在这里不成立。
+		// timer 每轮新建（retry.Wait 内部）：间隔从本轮结束起算，Ticker 的
+		// 固定时刻表语义在这里不成立。
 		for {
-			timer := time.NewTimer(cfg.Interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if err := retry.Wait(ctx, cfg.Interval); err != nil {
 				return
-			case <-timer.C:
 			}
 			// 取消拦下一轮；在飞已在 runOnce 内同步完成——与固定节奏同契约
 			l.runOnce(cfg.Name, ctx, fn)

@@ -139,7 +139,7 @@ func DoValue[T any](ctx context.Context, cfg Config, fn func(attempt int) (T, er
 		if delay <= 0 {
 			continue
 		}
-		if err := sleepCtx(ctx, delay); err != nil {
+		if err := Wait(ctx, delay); err != nil {
 			var zero T
 			return zero, err
 		}
@@ -209,6 +209,42 @@ func TotalBackoff(cfg Config, attempts int) time.Duration {
 		total += d
 	}
 	return total
+}
+
+// SaturatedBackoff 计算第 attempt 次失败后的**饱和指数退避**（不含抖动）：
+// initial * 2^(attempt-1)，受 maxDelay 封顶；溢出饱和而非回绕为负——翻倍即将
+// 溢出 int64 时（#283 护栏，与 computedDelay 指数分支共用同一实现）直接取
+// 封顶值：真实等待只会更大，封顶即正确答案。负等待 = 零等待，会静默绕过退避。
+//
+// 口径:
+//   - attempt < 1 视为 1（与 Config.Attempts / fn(attempt) 同口径）；
+//   - initial <= 0 返回 0（无退避 = 立即重试，热循环风险调用方自担）；
+//   - maxDelay <= 0 返回 initial（无封顶就不做指数——无界翻倍只会饱和成
+//     MaxInt64 纳秒的天文数字，等待原语拿它没有意义）。注意这与 Config.MaxDelay
+//     「<=0 不限」的实跑口径刻意不同：那是配置面「0=不限」的直觉，本函数是
+//     供自管等待循环的计算原语，无封顶的指数等待没有可辩护语义；
+//   - initial >= maxDelay 返回 maxDelay。
+//
+// 与 Config{Exponential: true} 的关系：initial > 0 且 maxDelay > 0 时与
+// computedDelay 指数分支 + MaxDelay 封顶完全同源。收敛自 async/supervise.go
+// 的 restartBackoff（#362）——指数公式与 #283 溢出护栏只有一份，监督重启/
+// 调度侧的手抄版不会再出现「库内修了护栏、手抄版不跟」的漂移。需要抖动打散
+// 重试风暴的场景请走 Config + Do/DoValue/Delay（Jitter/JitterRatio 有单源实现）。
+//
+// 典型用法（监督/调度侧自算第 k 次连续失败的重启节奏）:
+//
+//	wait := retry.SaturatedBackoff(1*time.Second, 30*time.Second, consec)
+func SaturatedBackoff(initial, maxDelay time.Duration, attempt int) time.Duration {
+	if initial <= 0 {
+		return 0
+	}
+	if maxDelay <= 0 {
+		return initial
+	}
+	if initial >= maxDelay {
+		return maxDelay
+	}
+	return capDelay(computedDelay(Config{Delay: initial, Exponential: true, MaxDelay: maxDelay}, attempt), maxDelay)
 }
 
 // computedDelay 第 attempt 次失败后的公式退避（Exponential > Linear > 固定间隔），
@@ -357,7 +393,7 @@ func addJitter(delay time.Duration, n int64) time.Duration {
 // 透传 ctx.Err()。cond 立即先执行一次（不改语义地覆盖「条件可能已满足」）。
 //
 // interval <= 0 直接 panic（#292，与同包 Delay<0 的 #136 口径一致——非法
-// 间隔必须当场暴露）：sleepCtx 对非正时长立即返回，循环退化成对 cond 的
+// 间隔必须当场暴露）：Wait 对非正时长立即返回，循环退化成对 cond 的
 // 热轮询（实测 interval=0 时 200ms 内调用 cond 约 113 万次）——单核打满直到
 // timeout/ctx 取消，cond 带锁/连接池时还放大成资源争用。触发来源是配置计算
 // （cfg.Timeout/cfg.MaxRetries 除出 0）与漏赋值零值，正是 panic 要拦的形态。
@@ -384,17 +420,29 @@ func Poll(ctx context.Context, interval, timeout time.Duration, cond func() (boo
 		if !time.Now().Before(deadline) {
 			return ErrTimeout
 		}
-		if err := sleepCtx(ctx, interval); err != nil {
+		if err := Wait(ctx, interval); err != nil {
 			return err
 		}
 	}
 }
 
-// sleepCtx 可取消的定时等待（#272 包内唯一等待原语）：NewTimer+Stop——
-// ctx 提前退出时即时停表释放 timer（time.After 的 timer 会挂到 delay 到期
-// 才释放，无界重试档长跑下每轮遗留一个、且每轮新分配）。DoValue 的退避等待
-// 与 Poll 的轮询间隔共用本实现，等待原语不再有两份写法。
-func sleepCtx(ctx context.Context, d time.Duration) error {
+// Wait 可取消的定时等待：等满 d 返回 nil；ctx 先取消/到期则立即返回 ctx.Err()，
+// 并即时停表释放 timer（time.After 的 timer 会挂到 d 到期才释放，无界重试档
+// 长跑下每轮遗留一个、且每轮新分配，#272）。
+//
+// 本包的唯一等待原语：Do/DoValue 的退避等待与 Poll 的轮询间隔共用本实现；
+// 导出（#362）后 poll/loop/async 各处的同款「NewTimer + Stop + select
+// ctx.Done/timer.C」内联 select 也收敛到此，等待原语不再有第二份写法。
+// 典型形态：
+//
+//	if err := retry.Wait(ctx, interval); err != nil {
+//	    return // ctx 已取消：停机/退出路径
+//	}
+//
+// d <= 0 时 timer 即时触发，效果为「探测一次 ctx 后立即返回 nil」——需要
+// 对非正间隔设护栏的循环（防忙轮询）请在调用侧自管（参照 Poll 对 interval<=0
+// 的 panic 口径）。与 time.Sleep 的差异：可被 ctx 取消即时打断，不等满 d。
+func Wait(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {

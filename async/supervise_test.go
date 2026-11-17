@@ -166,31 +166,7 @@ func TestSupervise_NilLoopPanics(t *testing.T) {
 	Supervise(context.Background(), nil)
 }
 
-// TestRestartBackoff 节奏公式：指数翻倍封顶 / 固定档 / 立即档 / 溢出饱和。
-func TestRestartBackoff(t *testing.T) {
-	cases := []struct {
-		name         string
-		k            int64
-		initial, max time.Duration
-		want         time.Duration
-	}{
-		{"第1次失败等初值", 1, time.Second, 30 * time.Second, time.Second},
-		{"第2次翻倍", 2, time.Second, 30 * time.Second, 2 * time.Second},
-		{"封顶", 10, time.Second, 30 * time.Second, 30 * time.Second},
-		{"max<=0 固定档", 5, 500 * time.Millisecond, 0, 500 * time.Millisecond},
-		{"initial<=0 立即档", 3, 0, time.Second, 0},
-		{"initial>=max 直接封顶", 1, time.Minute, time.Second, time.Second},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := restartBackoff(tc.k, tc.initial, tc.max); got != tc.want {
-				t.Fatalf("restartBackoff(%d, %v, %v)=%v，want %v", tc.k, tc.initial, tc.max, got, tc.want)
-			}
-		})
-	}
-	// 溢出防护：再翻倍必溢出时取封顶值（真实等待只会更大），不回绕为负
-	// （负等待 = 零等待，静默绕过退避）
-	if got := restartBackoff(100, time.Hour, time.Duration(1<<62)); got != time.Duration(1<<62) {
-		t.Fatalf("指数溢出应封顶为 max，got %v", got)
-	}
-}
+// 重启节奏公式（指数翻倍封顶 / 固定档 / 立即档 / 溢出饱和）的单元用例随
+// restartBackoff 收敛到 retry.SaturatedBackoff 单源（#362），见 retry 包
+// TestSaturatedBackoff；监督侧行为（退避生效、等待可被取消打断、取消以
+// ctx.Err() 告终）由 TestSupervise_ErrorRestartThenCancel 等端到端用例覆盖。

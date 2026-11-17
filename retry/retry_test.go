@@ -791,24 +791,75 @@ func TestAttemptsBoundedSemanticsUnchanged(t *testing.T) {
 	}
 }
 
-// TestSleepCtx_CancelPrompt #272 回归：等待原语 NewTimer+Stop——ctx 提前取消
+// TestWait_CancelPrompt #272 回归：等待原语 NewTimer+Stop——ctx 提前取消
 // 即时返回 ctx.Err()（不再依赖 select 的「恰好在等」路径），且 timer 立即
 // Stop 释放；正常路径等满 d 返回 nil。
-func TestSleepCtx_CancelPrompt(t *testing.T) {
+func TestWait_CancelPrompt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
 	start := time.Now()
-	if err := sleepCtx(ctx, 10*time.Second); !errors.Is(err, context.Canceled) {
+	if err := Wait(ctx, 10*time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("取消路径应返回 context.Canceled，got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("取消应即时返回（耗时 %v）", elapsed)
 	}
-	if err := sleepCtx(context.Background(), time.Millisecond); err != nil {
+	if err := Wait(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("正常路径不应有错，got %v", err)
+	}
+}
+
+// TestSaturatedBackoff 饱和指数退避（#362 导出，原 async/supervise.go
+// restartBackoff 的公式面用例随单源迁移至此）：指数翻倍封顶 / 固定档 /
+// 立即档 / 直接封顶 / 溢出饱和。
+func TestSaturatedBackoff(t *testing.T) {
+	cases := []struct {
+		name         string
+		attempt      int
+		initial, max time.Duration
+		want         time.Duration
+	}{
+		{"第1次失败等初值", 1, time.Second, 30 * time.Second, time.Second},
+		{"第2次翻倍", 2, time.Second, 30 * time.Second, 2 * time.Second},
+		{"封顶", 10, time.Second, 30 * time.Second, 30 * time.Second},
+		{"max<=0 固定档", 5, 500 * time.Millisecond, 0, 500 * time.Millisecond},
+		{"initial<=0 立即档", 3, 0, time.Second, 0},
+		{"initial<0 视为无退避", 3, -time.Second, time.Second, 0},
+		{"initial>=max 直接封顶", 1, time.Minute, time.Second, time.Second},
+		{"attempt<1 视为 1", 0, time.Second, 30 * time.Second, time.Second},
+		{"attempt<1 负值同口径", -3, time.Second, 30 * time.Second, time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SaturatedBackoff(tc.initial, tc.max, tc.attempt); got != tc.want {
+				t.Fatalf("SaturatedBackoff(%v, %v, %d)=%v，want %v", tc.initial, tc.max, tc.attempt, got, tc.want)
+			}
+		})
+	}
+	// 溢出防护：再翻倍必溢出时取封顶值（真实等待只会更大），不回绕为负
+	// （负等待 = 零等待，静默绕过退避；#283 护栏口径与 computedDelay 单源）
+	if got := SaturatedBackoff(time.Hour, time.Duration(1<<62), 100); got != time.Duration(1<<62) {
+		t.Fatalf("指数溢出应封顶为 max，got %v", got)
+	}
+	// 与 Config{Exponential: true} 实跑公式同源：maxDelay>0 时逐点等价于
+	// Backoff（无抖动配置）的指数分支
+	for _, tc := range []struct {
+		initial, max time.Duration
+		attempt      int
+	}{
+		{time.Second, 30 * time.Second, 1},
+		{time.Second, 30 * time.Second, 2},
+		{time.Second, 30 * time.Second, 10},
+		{3 * time.Millisecond, 7 * time.Millisecond, 5},
+	} {
+		cfg := Config{Delay: tc.initial, Exponential: true, MaxDelay: tc.max}
+		if got, want := SaturatedBackoff(tc.initial, tc.max, tc.attempt), Backoff(cfg, tc.attempt); got != want {
+			t.Fatalf("SaturatedBackoff(%v, %v, %d)=%v 与 Backoff 同配置=%v 不等价",
+				tc.initial, tc.max, tc.attempt, got, want)
+		}
 	}
 }
 
@@ -840,7 +891,7 @@ func TestDoValue_CancelDuringBackoffReleasesTimer(t *testing.T) {
 	}
 }
 
-// TestPoll_NonPositiveIntervalPanics 非正间隔护栏（#292）：sleepCtx 对非正
+// TestPoll_NonPositiveIntervalPanics 非正间隔护栏（#292）：Wait 对非正
 // 时长立即返回，Poll 会退化成对 cond 的忙轮询（实测 interval=0 时 200ms 约
 // 113 万次调用）——与同包 Delay<0 的 #136 同口径，非法间隔当场暴露。
 // 修复前 retry_test.go 的 Poll 用例全部是正值，零覆盖。
