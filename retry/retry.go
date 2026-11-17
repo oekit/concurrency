@@ -10,6 +10,8 @@ import (
 	"math"
 	"math/rand"
 	"time"
+
+	"github.com/oekit/pkg/contextx"
 )
 
 // ErrTimeout Poll 超时（调用方按需区分「条件未达成」与真错误）。
@@ -107,9 +109,7 @@ func Do(ctx context.Context, cfg Config, fn func(attempt int) error) error {
 //   - cfg.Attempts < 0（UnboundedAttempts）= 无界：直到 fn 成功或 ctx 取消。
 //   - cfg 零值 = 只执行一次（同 Do）。
 func DoValue[T any](ctx context.Context, cfg Config, fn func(attempt int) (T, error)) (T, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	unbounded := cfg.Attempts < 0
 	attempts := cfg.Attempts
 	if attempts < 1 {
@@ -405,9 +405,7 @@ func Poll(ctx context.Context, interval, timeout time.Duration, cond func() (boo
 			"轮询退化成对 cond 的忙轮询（实测 200ms 约 113 万次调用）；"+
 			"要立即重拉请显式传小正间隔，服务端 hold 形态用 poll 包（#292）", interval))
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	deadline := time.Now().Add(timeout)
 	for {
 		done, err := cond()

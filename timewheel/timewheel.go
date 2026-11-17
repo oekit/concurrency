@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/async"
 	"github.com/oekit/concurrency/internal/ticker"
 )
@@ -215,10 +217,8 @@ func (tw *TimingWheel) HasTimer(key any) bool {
 // Close 幂等关闭：停止事件循环，未触发的任务被丢弃。等待退出最多到
 // ctx 结束，超时返回 ctx.Err()。
 func (tw *TimingWheel) Close(ctx context.Context) error {
-	if ctx == nil {
-		// #330：nil ctx = Background（#159 口径）——语义即「无限等排空」。
-		ctx = context.Background()
-	}
+	// 口径单源：pkg/contextx.OrBackground（nil = Background，即「无限等排空」）。
+	ctx = contextx.OrBackground(ctx)
 	tw.closed.Do(func() {
 		close(tw.stopCh)
 	})

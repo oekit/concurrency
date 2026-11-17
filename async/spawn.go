@@ -3,6 +3,8 @@ package async
 import (
 	"context"
 	"time"
+
+	"github.com/oekit/pkg/contextx"
 )
 
 // Spawn 发射**带句柄的旁路任务**（#197）：脱离 parent 生命周期（WithoutCancel
@@ -82,13 +84,11 @@ func (h *Handle[T]) Done() <-chan struct{} {
 // 返回 (零值, ctx.Err())——**任务不会因此取消**（Spawn 已脱离 ctx 生命周期，
 // 这只是放弃等待），任务继续跑完、结果丢弃。
 //
-// ctx 为 nil 按 context.Background() 处理（与 syncx/retry 等包同口径）。
+// ctx 为 nil 按 context.Background() 处理。
 // 任务已完成且 ctx 恰好也已取消时，返回已完成的结果而非 ctx.Err()
 // （结果已就位时取消没有意义）。
 func (h *Handle[T]) Wait(ctx context.Context) (T, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	select {
 	case <-h.done:
 		return h.val, h.err
@@ -128,9 +128,7 @@ func (h *Handle[T]) Wait(ctx context.Context) (T, error) {
 // 的单返回布尔）：timedOut 与 error 是**并列的两种「没拿到结果」**——
 // timedOut=true 时 err 恒为 nil，调用方先判 timedOut 再判 err。
 func (h *Handle[T]) WaitUpTo(ctx context.Context, d time.Duration) (T, error, bool) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	var timerC <-chan time.Time
 	if d > 0 {
 		timer := time.NewTimer(d)

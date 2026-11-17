@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/async"
 	"github.com/oekit/concurrency/retry"
 )
@@ -84,9 +86,7 @@ type Loop struct {
 // 入口已取消的 ctx 会被拒绝启动并打一行可定位的 warn 日志（连首跑都不执行，
 // 与 FirstDelay 路径的取消语义对齐）。
 func Run(ctx context.Context, cfg Config, fn func(ctx context.Context)) *Loop {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	l := &Loop{done: make(chan struct{})}
 	async.GoSafeLabeled(cfg.Name, func() {
 		defer close(l.done)

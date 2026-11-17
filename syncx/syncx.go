@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/async"
 )
 
@@ -48,9 +50,7 @@ func (g *KeyedGate) Acquire(ctx context.Context, key string) (func(), error) {
 	if g.cap <= 0 {
 		return func() {}, nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	ch := g.slot(key)
 	select {
 	case ch <- struct{}{}:
@@ -212,9 +212,7 @@ func FanInLimit[T any](n, limit int, fn func(i int) (T, error)) []Slot[T] {
 // 照常落槽。其余语义与 FanInLimit 一致（panic 进槽并上报、limit<=0 = 不设上限、
 // n<=0 = nil；ctx 为 nil 时按 context.Background() 处理）。
 func FanInLimitCtx[T any](ctx context.Context, n, limit int, fn func(ctx context.Context, i int) (T, error)) []Slot[T] {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if n <= 0 {
 		return nil
 	}

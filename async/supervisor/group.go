@@ -6,8 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oekit/concurrency/async"
+	"github.com/oekit/pkg/contextx"
 	pkgerrors "github.com/oekit/pkg/errors"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // GroupOption 配置 Group 的重启策略与观测钩子。
@@ -164,9 +166,7 @@ func NewGroup[T any](
 	if start == nil {
 		panic("supervisor.NewGroup: start 不能为 nil——起了不跑的目标等于没起")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	groupCtx, cancel := context.WithCancel(ctx) //nolint:gosec // G118: cancel 存在 Group.cancel 里，由 Stop（或父 ctx 取消）调用
 	g := &Group[T]{
 		ctx:    groupCtx,

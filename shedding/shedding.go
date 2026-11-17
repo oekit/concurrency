@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/window"
 )
 
@@ -64,7 +66,7 @@ type (
 		// Allow 判断请求是否放行：放行返回 Promise 供调用方回填 Pass/Fail，
 		// 过载拒绝返回 ErrServiceOverloaded；ctx 已取消时返回 ctx.Err()
 		// （不消耗统计）；ctx 为 nil 时按 context.Background() 处理
-		// （与 retry/loop/syncx/breaker 的 nil ctx 口径一致，#159/#249）。
+		// （口径单源：pkg/contextx.OrBackground）。
 		Allow(ctx context.Context) (Promise, error)
 	}
 
@@ -154,11 +156,9 @@ func NewNopShedder() Shedder {
 }
 
 // Allow implements Shedder.Allow.
-// ctx 为 nil 视为 context.Background()（#159 全仓口径，#249 清尾）。
+// ctx 为 nil 视为 context.Background()。
 func (as *adaptiveShedder) Allow(ctx context.Context) (Promise, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -339,11 +339,9 @@ func (p *shedPromise) Fail() {
 }
 
 // Allow implements Shedder.Allow.
-// ctx 为 nil 视为 context.Background()（#159 全仓口径，#249 清尾）。
+// ctx 为 nil 视为 context.Background()。
 func (nopShedder) Allow(ctx context.Context) (Promise, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

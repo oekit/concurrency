@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/retry"
 )
 
@@ -174,9 +176,7 @@ func Supervise(ctx context.Context, loop func(ctx context.Context) error, opts .
 
 // run 监督主循环（运行在 GoSafeLabeled 的 goroutine 内）。
 func (s *Supervision) run(ctx context.Context, cfg superviseConfig, loop func(ctx context.Context) error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	// 已取消的 ctx 不首跑：监督没有「跑一轮再说」的理由
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		s.setErr(ctxErr)

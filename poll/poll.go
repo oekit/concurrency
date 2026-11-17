@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/async"
 	"github.com/oekit/concurrency/retry"
 )
@@ -153,9 +155,7 @@ func RunCursor[T any](
 	fetch func(ctx context.Context, cursor string) (items []T, next string, err error),
 	handle func(ctx context.Context, item T) error,
 ) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if fetch == nil {
 		panic("poll: fetch 不能为 nil——没有拉取函数的循环只会空转")
 	}

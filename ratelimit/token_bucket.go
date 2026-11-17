@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
 	"golang.org/x/time/rate"
 )
 
@@ -202,9 +203,7 @@ func (tb *TokenBucket) Wait(ctx context.Context) error {
 // 等待时长按注入时钟结算（WithTokenClock），但**实际睡眠走真实时间**——注入时钟
 // 只决定「要等多久」，不改变计时器本身。
 func (tb *TokenBucket) WaitN(ctx context.Context, n int) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if n <= 0 {
 		return nil
 	}
