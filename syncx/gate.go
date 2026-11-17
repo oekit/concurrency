@@ -3,6 +3,8 @@ package syncx
 import (
 	"context"
 	"sync/atomic"
+
+	"github.com/oekit/pkg/contextx"
 )
 
 // idempotentRelease 把「取名额成功的归还动作」包成幂等 release（#263：Gate 与
@@ -66,9 +68,7 @@ func (g *Gate) Acquire(ctx context.Context) (func(), error) {
 	if g.cap <= 0 {
 		return func() {}, nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	select {
 	case g.sem <- struct{}{}:
 		return idempotentRelease(func() { <-g.sem }), nil

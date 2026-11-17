@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
+
 	"github.com/oekit/concurrency/async"
 )
 
@@ -105,10 +107,8 @@ func (w *WaitGroupWrapper) Wait() error {
 // NewWaitGroup 创建一个 WaitGroupWrapper。
 // ctx 为父 context，支持通过 WithTimeout 设置全局超时。
 func NewWaitGroup(ctx context.Context, opts ...RunOption) *WaitGroupWrapper {
-	if ctx == nil {
-		// #329：nil ctx = Background（#159 口径）——此前 WithCancel(nil) 直接 panic
-		ctx = context.Background()
-	}
+	// 口径单源：pkg/contextx.OrBackground。
+	ctx = contextx.OrBackground(ctx)
 	rOpts := &runOptions{}
 	for _, opt := range opts {
 		opt(rOpts)

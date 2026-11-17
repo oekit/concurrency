@@ -2,12 +2,15 @@ package gopool
 
 import (
 	"context"
-	"github.com/oekit/concurrency/async"
 	"log"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oekit/pkg/contextx"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // PanicHandler panic 恢复处理函数：ctx 为提交任务时的上下文（可能为
@@ -157,11 +160,8 @@ func (p *Pool) Closed() bool { return p.closed.Load() }
 // 并等待所有已提交任务执行完成；ctx 到期返回其错误。
 // 调用方应先停止提交再 Close；Close 可重复调用。
 func (p *Pool) Close(ctx context.Context) error {
-	if ctx == nil {
-		// #330：nil ctx = Background（#159 口径）——nil 直接进 select 的
-		// ctx.Done() 解引用 panic；语义即「无限等排空」。
-		ctx = context.Background()
-	}
+	// 口径单源：pkg/contextx.OrBackground（nil = Background，即「无限等排空」）。
+	ctx = contextx.OrBackground(ctx)
 	// 置位在 submitMu 内：与 CtxGo 的「检查 + Add」互斥 ⇒ 不会有 Add 发生在
 	// 随后的 wg.Wait() 期间（否则运行时 panic：WaitGroup misuse）。
 	// wg.Wait() 必须在锁外：任务里再提交任务时要拿这把锁。

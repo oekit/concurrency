@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oekit/pkg/contextx"
 )
 
 // ErrCircuitOpen 是熔断打开（请求被拒绝）时的全库规范哨兵，错误消息逐字为
@@ -55,8 +57,7 @@ type (
 
 	// Breaker 是熔断器接口。Allow/Do 系列全部 ctx-aware：ctx 已取消时直接返回
 	// ctx.Err()，不消耗熔断统计；ctx 为 nil 时视为 context.Background()
-	// （与 retry/loop/syncx 的 nil ctx 口径一致，#159——本仓多个原语显式兜底，
-	// 调用方按同一契约传参不会在 breaker 上炸掉请求 goroutine）。
+	// （口径单源：pkg/contextx.OrBackground）。
 	// 拒绝时返回裸 ErrCircuitOpen（可 errors.Is）；
 	// execute panic 记一次失败样本后原样 re-panic。
 	Breaker interface {
@@ -471,11 +472,9 @@ func (cb *circuitBreaker) State() State {
 
 // Allow 判断请求是否放行：放行返回 Promise 供调用方回填 Pass/Fail，
 // 拒绝返回裸 ErrCircuitOpen 并触发拒绝回调；ctx 已取消时返回 ctx.Err()；
-// ctx 为 nil 视为 context.Background()（#159）。
+// ctx 为 nil 视为 context.Background()。
 func (cb *circuitBreaker) Allow(ctx context.Context) (Promise, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -487,11 +486,9 @@ func (cb *circuitBreaker) Allow(ctx context.Context) (Promise, error) {
 }
 
 // AllowGen 同 Allow，额外返回本次放行的代（GenBreaker 扩展接口）；
-// 拒绝时返回 (nil, 0, ErrCircuitOpen)；ctx 为 nil 视为 context.Background()（#159）。
+// 拒绝时返回 (nil, 0, ErrCircuitOpen)；ctx 为 nil 视为 context.Background()。
 func (cb *circuitBreaker) AllowGen(ctx context.Context) (Promise, uint64, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -508,11 +505,9 @@ func (cb *circuitBreaker) SuccessGen(gen uint64) {
 }
 
 // FailureGen 按代回填失败；ctx 已取消时不消耗统计（GenBreaker 扩展接口）；
-// ctx 为 nil 视为 context.Background()（#159）。
+// ctx 为 nil 视为 context.Background()。
 func (cb *circuitBreaker) FailureGen(ctx context.Context, gen uint64) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return
 	}
@@ -543,12 +538,10 @@ func (cb *circuitBreaker) DoWithFallback(ctx context.Context, execute func() err
 }
 
 // do 为 Do 系列的公共实现：记录失败原因、分发拒绝回调与应用 fallback。
-// ctx 为 nil 视为 context.Background()（#159，Do/DoWithAcceptable/DoWithFallback 同口径）。
+// ctx 为 nil 视为 context.Background()。
 func (cb *circuitBreaker) do(ctx context.Context, execute func() error,
 	fallback func(err error) error, acceptable func(error) bool) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

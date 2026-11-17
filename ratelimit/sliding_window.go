@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/oekit/pkg/contextx"
 )
 
 // SlidingWindow 是滑动窗口限流器。
@@ -263,9 +265,7 @@ func (sw *SlidingWindow) Wait(ctx context.Context) error {
 	if sw.maxCount <= 0 {
 		return nil // 不限流档（#135）：立即放行、不记账
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	for {
 		sw.mu.Lock()
 		now := sw.now()

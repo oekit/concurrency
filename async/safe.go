@@ -5,6 +5,8 @@ import (
 	"log"
 	"runtime/debug"
 	"sync/atomic"
+
+	"github.com/oekit/pkg/contextx"
 )
 
 // PanicHandler 是 panic 恢复时的处理函数，签名与 gopool.PanicHandler 完全一致
@@ -25,9 +27,7 @@ type taskCtxKey struct{}
 // withTask 给 panic 汇报用的 ctx 附带任务标签；task 为空时原样返回，
 // ctx 为 nil 时垫 Background。
 func withTask(ctx context.Context, task string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = contextx.OrBackground(ctx)
 	if task == "" {
 		return ctx
 	}
