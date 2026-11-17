@@ -1,3 +1,9 @@
+## [v0.39.0] — 2026-11-18
+
+- KeyedLimiterOf 补时钟注入 WithClock,对齐 #341 同族三兄弟口径(#361);retry 导出 Wait(ctx,d) 可中断 sleep 与 SaturatedBackoff 指数退避原语,poll/loop/async 家族件从注释级对齐升级为代码级单源(#362);nil-ctx 兜底 25 处收敛 contextx.OrBackground(#159 口径单源收尾)
+
+关联问题单：concurrency#361、concurrency#362。
+
 ## [v0.38.1] — 2026-11-16
 
 - refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至各依赖最新已发布版本（pkg v0.52.0）
