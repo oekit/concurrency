@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oekit/concurrency/retry"
 )
 
 // SuperviseOption 是 Supervise 的函数选项。
@@ -205,19 +207,21 @@ func (s *Supervision) run(ctx context.Context, cfg superviseConfig, loop func(ct
 			return
 		}
 		s.restarts.Add(1)
-		wait := restartBackoff(consec, cfg.initialBackoff, cfg.maxBackoff)
+		// 重启节奏 = 饱和指数退避（initial*2^(k-1) 受 max 封顶；max<=0 固定
+		// initial、initial<=0 立即重启——口径见 retry.SaturatedBackoff）。
+		// 指数公式与溢出护栏（#283）由此与 retry 单源，本侧不再各养一份（#362）；
+		// consec 计到 int 溢出需要 2^31 次连续失败，截断无害（attempt<1 视为 1）。
+		wait := retry.SaturatedBackoff(cfg.initialBackoff, cfg.maxBackoff, int(consec))
 		if cfg.onRestart != nil {
 			restarts := s.restarts.Load()
 			RunSafe(func() { cfg.onRestart(restarts, err, wait) })
 		}
 		if wait > 0 {
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				s.setErr(ctx.Err())
+			// 可被停机取消的定时等待（retry.Wait 单源，#362）：取消以 ctx.Err()
+			// 告终——取消是停机决定，不该伪装成业务错误。
+			if err := retry.Wait(ctx, wait); err != nil {
+				s.setErr(err)
 				return
-			case <-timer.C:
 			}
 		}
 	}
@@ -237,35 +241,4 @@ func (s *Supervision) setErr(err error) {
 	s.errMu.Lock()
 	s.err = err
 	s.errMu.Unlock()
-}
-
-// restartBackoff 第 k 次连续失败后的重启等待：initial*2^(k-1) 受 max 封顶；
-// max <= 0 固定 initial（无封顶就不做指数——无界翻倍只会饱和成天文数字）；
-// initial <= 0 恒 0（立即重启，调用方自担热循环风险）。
-// 溢出防护对齐 retry.addJitter 的口径：再翻倍必溢出时直接取封顶值——
-// 真实等待只会更大，封顶即正确答案；负等待（溢出回绕）等于零等待，会静默绕过退避。
-func restartBackoff(k int64, initial, max time.Duration) time.Duration {
-	if initial <= 0 {
-		return 0
-	}
-	if max <= 0 {
-		return initial
-	}
-	if initial >= max {
-		return max
-	}
-	d := initial
-	for i := int64(1); i < k; i++ {
-		if d >= max {
-			return max
-		}
-		if d >= time.Duration(1<<62) {
-			return max
-		}
-		d *= 2
-	}
-	if d > max {
-		d = max
-	}
-	return d
 }

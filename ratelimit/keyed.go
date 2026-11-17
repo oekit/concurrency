@@ -19,6 +19,7 @@ type KeyedLimiterOf[K comparable] struct {
 	maxEntries  int           // 0 = 不限
 	retryAfter  time.Duration // 容量护栏拒绝时建议的 Retry-After
 	evictFn     func(key K, idle time.Duration)
+	now         func() time.Time // 时钟（WithClock 注入，缺省 time.Now；#361）
 	done        chan struct{}
 	closeOnce   sync.Once
 	overCapHits atomic.Int64
@@ -85,6 +86,7 @@ type keyedConfig[K comparable] struct {
 	maxEntries int
 	retryAfter time.Duration
 	evictFn    func(key K, idle time.Duration)
+	now        func() time.Time
 }
 
 // WithIdleTTL 设置空闲回收周期；表满时也先触发回收再判满。
@@ -124,6 +126,21 @@ func WithMaxEntries[K comparable](max int) KeyedOption[K] {
 // <=0 使用默认 1 分钟。
 func WithOverCapRetryAfter[K comparable](d time.Duration) KeyedOption[K] {
 	return func(c *keyedConfig[K]) { c.retryAfter = d }
+}
+
+// WithClock 注入时钟（nil = time.Now；与 LockoutConfig.Now / budget.WithClock
+// 同款，假时钟测试完全确定；#361）。
+//
+// 走此时钟的面：条目 lastSeen（安装与各条登记/快路径的刷新）、空闲过期判定
+// （后台清扫与表满 sweep-on-pressure 两条路径）、回收 idle 的计算。清扫节奏
+// 仍走真实 ticker（cleanupInterval 只定节奏），到期/空闲判定一律用本时钟——
+// 假时钟下「Clock 推进 → 空闲条目被回收」完全确定，无 sleep。
+//
+// 同族口径：SlidingWindow 的 WithSlidingWindowClock / TokenBucket 的
+// WithTokenClock / LockoutConfig.Now（#341）；本项补齐 KeyedLimiterOf——
+// 此前空闲回收只有真实时间口径，idle 回收无法确定性测试。
+func WithClock[K comparable](clock func() time.Time) KeyedOption[K] {
+	return func(c *keyedConfig[K]) { c.now = clock }
 }
 
 // NewKeyedLimiter 创建 string key 的限流器管理器（兼容旧 API）。
@@ -214,6 +231,9 @@ func NewKeyedLimiterByFunc[K comparable](factory func(K) Limiter, opts ...KeyedO
 	if cfg.maxEntries < 0 {
 		cfg.maxEntries = 0
 	}
+	if cfg.now == nil {
+		cfg.now = time.Now // nil 时钟回退缺省（LockoutConfig.Now 同口径）
+	}
 
 	kl := &KeyedLimiterOf[K]{
 		limiters:   make(map[K]*limiterEntry),
@@ -222,6 +242,7 @@ func NewKeyedLimiterByFunc[K comparable](factory func(K) Limiter, opts ...KeyedO
 		maxEntries: cfg.maxEntries,
 		retryAfter: cfg.retryAfter,
 		evictFn:    cfg.evictFn,
+		now:        cfg.now,
 		done:       make(chan struct{}),
 	}
 	async.GoSafe(kl.cleanup)
@@ -286,10 +307,11 @@ func (kl *KeyedLimiterOf[K]) guardLocked(now time.Time, evicted *[]evictedEntry[
 	return true
 }
 
-// installEntryLocked 构造条目并安装（调用方已持写锁）：lastSeen 置现在。
+// installEntryLocked 构造条目并安装（调用方已持写锁）：lastSeen 置现在
+// （「现在」取注入时钟，WithClock）。
 func (kl *KeyedLimiterOf[K]) installEntryLocked(key K, l Limiter, rate int64, hasRate bool) *limiterEntry {
 	entry := &limiterEntry{limiter: l, rate: rate, hasRate: hasRate}
-	entry.lastSeen.Store(time.Now().UnixNano())
+	entry.lastSeen.Store(kl.now().UnixNano())
 	kl.limiters[key] = entry
 	return entry
 }
@@ -301,7 +323,7 @@ func (kl *KeyedLimiterOf[K]) installEntryLocked(key K, l Limiter, rate int64, ha
 // ok=false = 护栏拒绝（不安装）；evicted 交调用方锁外 reportEvicts。
 func (kl *KeyedLimiterOf[K]) installLocked(key K, l Limiter, rate int64, hasRate bool) (ok bool, evicted []evictedEntry[K]) {
 	if _, exists := kl.limiters[key]; !exists {
-		if !kl.guardLocked(time.Now(), &evicted) {
+		if !kl.guardLocked(kl.now(), &evicted) {
 			return false, evicted
 		}
 	}
@@ -320,19 +342,19 @@ func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
 	entry, ok := kl.limiters[key]
 	kl.mu.RUnlock()
 	if ok {
-		entry.lastSeen.Store(time.Now().UnixNano())
+		entry.lastSeen.Store(kl.now().UnixNano())
 		return entry.limiter
 	}
 
 	kl.mu.Lock()
 	// 双重检查
 	if cur, ok := kl.limiters[key]; ok {
-		cur.lastSeen.Store(time.Now().UnixNano())
+		cur.lastSeen.Store(kl.now().UnixNano())
 		kl.mu.Unlock()
 		return cur.limiter
 	}
 	var evicted []evictedEntry[K]
-	if !kl.guardLocked(time.Now(), &evicted) {
+	if !kl.guardLocked(kl.now(), &evicted) {
 		kl.mu.Unlock()
 		kl.reportEvicts(evicted) // 拒绝路径的回收也要可观测
 		return nil
@@ -442,7 +464,7 @@ func (kl *KeyedLimiterOf[K]) ReplaceIfChanged(key K, rate int64, l Limiter) bool
 	}
 	kl.mu.Lock()
 	if entry, ok := kl.limiters[key]; ok && entry.hasRate && entry.rate == rate {
-		entry.lastSeen.Store(time.Now().UnixNano())
+		entry.lastSeen.Store(kl.now().UnixNano())
 		kl.mu.Unlock()
 		return false
 	}
@@ -482,7 +504,7 @@ func (kl *KeyedLimiterOf[K]) AllowWithRate(key K, rate int64, newBucket func() L
 	kl.mu.RLock()
 	entry, ok := kl.limiters[key]
 	if ok && entry.hasRate && entry.rate == rate {
-		entry.lastSeen.Store(time.Now().UnixNano())
+		entry.lastSeen.Store(kl.now().UnixNano())
 		l := entry.limiter
 		kl.mu.RUnlock()
 		return l.Allow()
@@ -496,7 +518,7 @@ func (kl *KeyedLimiterOf[K]) AllowWithRate(key K, rate int64, newBucket func() L
 	}
 	kl.mu.Lock()
 	if cur, hit := kl.limiters[key]; hit && cur.hasRate && cur.rate == rate {
-		cur.lastSeen.Store(time.Now().UnixNano())
+		cur.lastSeen.Store(kl.now().UnixNano())
 		kl.mu.Unlock()
 		return cur.limiter.Allow() // 竞态方已装好同速率桶，白建的那只丢弃
 	}
@@ -579,7 +601,8 @@ func (kl *KeyedLimiterOf[K]) Close() {
 	})
 }
 
-// cleanup 定期清理过期的限流器。
+// cleanup 定期清理过期的限流器。ticker 只定节奏，空闲判定一律用注入时钟
+// （WithClock；LockoutOf.cleanup 同款——假时钟下真实 ticker 的时间戳不可比）。
 func (kl *KeyedLimiterOf[K]) cleanup() {
 	ticker := time.NewTicker(cleanupInterval(kl.ttl))
 	defer ticker.Stop()
@@ -588,7 +611,8 @@ func (kl *KeyedLimiterOf[K]) cleanup() {
 		select {
 		case <-kl.done:
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
+			now := kl.now()
 			var evicted []evictedEntry[K]
 			kl.mu.Lock()
 			for key, entry := range kl.limiters {
