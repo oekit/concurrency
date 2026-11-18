@@ -1,3 +1,9 @@
+## [v0.39.1] — 2026-11-18
+
+- ratelimit 键控 TTL 骨架单源 keyedTTLRegistry[K,E]——KeyedLimiterOf/LockoutOf 的 sweep/allowNew/cleanup/Close 收编,#361 WithClock 贯通到 registry 层;导出面与行为不变(#363)
+
+关联问题单：concurrency#363。
+
 ## [v0.39.0] — 2026-11-18
 
 - KeyedLimiterOf 补时钟注入 WithClock,对齐 #341 同族三兄弟口径(#361);retry 导出 Wait(ctx,d) 可中断 sleep 与 SaturatedBackoff 指数退避原语,poll/loop/async 家族件从注释级对齐升级为代码级单源(#362);nil-ctx 兜底 25 处收敛 contextx.OrBackground(#159 口径单源收尾)
