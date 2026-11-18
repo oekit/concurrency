@@ -2,7 +2,6 @@ package ratelimit
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -11,17 +10,17 @@ import (
 
 // KeyedLimiterOf 是按 key 隔离的限流器管理器（key 类型可定制）。
 // 每个 key 维护独立的限流器实例，支持空闲回收、容量护栏、速率热更。
+//
+// 「键控 map + TTL 回收 + 容量护栏 + Close(done)」骨架经 #363 收编进
+// keyedTTLRegistry（reg 字段）——清扫循环 / 表满 sweep-on-pressure / Close
+// 幂等单源，本类型只保留限流语义（factory、速率元数据、Retry-After、
+// 回收观测面）。
 type KeyedLimiterOf[K comparable] struct {
-	mu          sync.RWMutex
-	limiters    map[K]*limiterEntry
+	reg         *keyedTTLRegistry[K, *limiterEntry]
 	factory     func(K) Limiter
-	ttl         time.Duration // 空闲过期；<=0 用 defaultTTL
-	maxEntries  int           // 0 = 不限
 	retryAfter  time.Duration // 容量护栏拒绝时建议的 Retry-After
 	evictFn     func(key K, idle time.Duration)
-	now         func() time.Time // 时钟（WithClock 注入，缺省 time.Now；#361）
-	done        chan struct{}
-	closeOnce   sync.Once
+	now         func() time.Time // 时钟别名（与 reg.now 同一函数值，构造期固化；WithClock/#361）
 	overCapHits atomic.Int64
 	evictions   atomic.Int64
 }
@@ -43,7 +42,8 @@ const minCleanupInterval = time.Second
 // ttl 落在 ns 级时 ttl/2 会算出 1ns 这样的间隔，ticker 会以 GHz 频率空转烧核。
 const minTickInterval = time.Millisecond
 
-// cleanupInterval 返回后台清扫的 ticker 间隔（KeyedLimiterOf 与 LockoutOf 共用）。
+// cleanupInterval 返回后台清扫的 ticker 间隔（keyedTTLRegistry 的清扫节奏；
+// KeyedLimiterOf 与 LockoutOf 经 #363 收编后共用同一份实现）。
 //
 // ttl/2 可能整除为 0（ttl=1ns 时 ttl/2=0），而 time.NewTicker(0) 直接 panic——
 // panic 被 async.GoSafe 收编后进程不崩，但**后台清扫协程当场死亡**：
@@ -70,12 +70,6 @@ type limiterEntry struct {
 	lastSeen atomic.Int64 // UnixNano，无锁更新
 	rate     int64        // 速率元数据（WithRate 家族登记；见 ReplaceIfChanged）
 	hasRate  bool         // rate=0 是合法元数据之外的「未登记」标记——不用 rate==0 判
-}
-
-// evictedEntry 是一次空闲回收的观测载荷（回收路径统一收集、锁外回调）。
-type evictedEntry[K comparable] struct {
-	key  K
-	idle time.Duration
 }
 
 // KeyedOption 是 KeyedLimiterOf 的函数选项。
@@ -236,45 +230,40 @@ func NewKeyedLimiterByFunc[K comparable](factory func(K) Limiter, opts ...KeyedO
 	}
 
 	kl := &KeyedLimiterOf[K]{
-		limiters:   make(map[K]*limiterEntry),
 		factory:    factory,
-		ttl:        cfg.ttl,
-		maxEntries: cfg.maxEntries,
 		retryAfter: cfg.retryAfter,
 		evictFn:    cfg.evictFn,
 		now:        cfg.now,
-		done:       make(chan struct{}),
 	}
-	async.GoSafe(kl.cleanup)
+	// 骨架（清扫循环/表满回收/Close 幂等）收编进 keyedTTLRegistry（#363）：
+	// 条目判定回调化——空闲超 ttl 即过期（ttl 以 reg.ttl 为单源），回收 idle
+	// 锁内按注入时钟采集，观测载荷锁外交 reportEvicts（#142）。
+	kl.reg = newKeyedTTLRegistry[K, *limiterEntry](keyedTTLConfig[K, *limiterEntry]{
+		ttl:        cfg.ttl,
+		maxEntries: cfg.maxEntries,
+		now:        cfg.now,
+		expired:    kl.idleExpired,
+		idleOf:     kl.idleDuration,
+		onEvict:    kl.reportEvicts,
+	})
+	kl.reg.start() // 后台清扫（owner wiring 完成后再启动——回调反引 kl.reg）
 	return kl
 }
 
-// allowNew 判定是否允许登记新 key（容量护栏）。
-// 表满时先回收空闲条目；仍满则拒绝未登记 key。
-// 回收条目记录到 evicted（可 nil）供调用方锁外回调——本函数在持锁状态下运行，
-// 回调不允许在锁内触发（消费方回调里重入本管理器是合理需求，#142）。
-func (kl *KeyedLimiterOf[K]) allowNew(now time.Time, evicted *[]evictedEntry[K]) bool {
-	if kl.maxEntries <= 0 || len(kl.limiters) < kl.maxEntries {
-		return true
-	}
-	// 表满：触发一次空闲回收再判
-	for key, entry := range kl.limiters {
-		if now.Sub(time.Unix(0, entry.lastSeen.Load())) > kl.ttl {
-			delete(kl.limiters, key)
-			if evicted != nil {
-				*evicted = append(*evicted, evictedEntry[K]{
-					key:  key,
-					idle: now.Sub(time.Unix(0, entry.lastSeen.Load())),
-				})
-			}
-		}
-	}
-	return len(kl.limiters) < kl.maxEntries
+// idleExpired 是 registry 的条目过期判定：空闲（now - lastSeen）超 ttl。
+// lastSeen 无锁更新（atomic），判定一律走注入时钟（WithClock/#361）。
+func (kl *KeyedLimiterOf[K]) idleExpired(e *limiterEntry, now time.Time) bool {
+	return now.Sub(time.Unix(0, e.lastSeen.Load())) > kl.reg.ttl
+}
+
+// idleDuration 是 registry 的回收 idle 计算（onEvict 观测载荷，锁内采集）。
+func (kl *KeyedLimiterOf[K]) idleDuration(e *limiterEntry, now time.Time) time.Duration {
+	return now.Sub(time.Unix(0, e.lastSeen.Load()))
 }
 
 // reportEvicts 记回收计数并在锁外逐个触发回调（#142）。回调 panic 按
 // async.RunSafeLabeled 收编（task=ratelimit.keyed.evict），不影响主路径。
-func (kl *KeyedLimiterOf[K]) reportEvicts(evicted []evictedEntry[K]) {
+func (kl *KeyedLimiterOf[K]) reportEvicts(evicted []keyedEviction[K]) {
 	if len(evicted) == 0 {
 		return
 	}
@@ -291,20 +280,22 @@ func (kl *KeyedLimiterOf[K]) reportEvicts(evicted []evictedEntry[K]) {
 //
 // Get / Replace / ReplaceIfChanged / AllowWithRate / Create 五个登记入口的
 // 「容量护栏 + 条目安装」块收敛为 installLocked（Get 的「护栏过后再调
-// factory」序列拆用 guardLocked + installEntryLocked 两段）——allowNew/
-// overCapHits/lastSeen/map 写入从 5 处人肉同步收敛到 1 处，#252「四个登记
-// 入口的护栏必须一视同仁」的不变量由构造保证。
+// factory」序列拆用 guardLocked + installEntryLocked 两段）——护栏判定
+// （registry.allowNewLocked 的 sweep-on-pressure）/overCapHits/lastSeen/
+// map 写入从 5 处人肉同步收敛到 1 处，#252「四个登记入口的护栏必须
+// 一视同仁」的不变量由构造保证。
 
-// guardLocked 容量护栏（调用方已持写锁）：表满先回收空闲条目（同 Allow 建
-// 桶路径的 sweep-on-pressure），仍满拒绝并计一次 OverCapHits。返回 false =
-// 拒绝登记；evicted 交调用方锁外回调（回收路径统一收集、回调不允许在锁内
-// 触发——消费方回调里重入本管理器是合理需求，#142）。
-func (kl *KeyedLimiterOf[K]) guardLocked(now time.Time, evicted *[]evictedEntry[K]) bool {
-	if !kl.allowNew(now, evicted) {
+// guardLocked 容量护栏（调用方已持写锁）：registry.allowNewLocked 表满先
+// 回收空闲条目（同 Allow 建桶路径的 sweep-on-pressure），仍满拒绝并计一次
+// OverCapHits。返回 false = 拒绝登记；evicted 交调用方锁外回调（回收路径
+// 统一收集、回调不允许在锁内触发——消费方回调里重入本管理器是合理需求，
+// #142）。
+func (kl *KeyedLimiterOf[K]) guardLocked(now time.Time) (evicted []keyedEviction[K], ok bool) {
+	evicted, ok = kl.reg.allowNewLocked(now)
+	if !ok {
 		kl.overCapHits.Add(1)
-		return false
 	}
-	return true
+	return evicted, ok
 }
 
 // installEntryLocked 构造条目并安装（调用方已持写锁）：lastSeen 置现在
@@ -312,7 +303,7 @@ func (kl *KeyedLimiterOf[K]) guardLocked(now time.Time, evicted *[]evictedEntry[
 func (kl *KeyedLimiterOf[K]) installEntryLocked(key K, l Limiter, rate int64, hasRate bool) *limiterEntry {
 	entry := &limiterEntry{limiter: l, rate: rate, hasRate: hasRate}
 	entry.lastSeen.Store(kl.now().UnixNano())
-	kl.limiters[key] = entry
+	kl.reg.putLocked(key, entry)
 	return entry
 }
 
@@ -321,9 +312,9 @@ func (kl *KeyedLimiterOf[K]) installEntryLocked(key K, l Limiter, rate int64, ha
 // 安装——覆盖语义（Replace 热更）与「已存在拒绝/元数据比对」（Create/
 // ReplaceIfChanged/AllowWithRate）由调用方先行判定后才走到这里。
 // ok=false = 护栏拒绝（不安装）；evicted 交调用方锁外 reportEvicts。
-func (kl *KeyedLimiterOf[K]) installLocked(key K, l Limiter, rate int64, hasRate bool) (ok bool, evicted []evictedEntry[K]) {
-	if _, exists := kl.limiters[key]; !exists {
-		if !kl.guardLocked(kl.now(), &evicted) {
+func (kl *KeyedLimiterOf[K]) installLocked(key K, l Limiter, rate int64, hasRate bool) (ok bool, evicted []keyedEviction[K]) {
+	if _, exists := kl.reg.lookupLocked(key); !exists {
+		if evicted, ok = kl.guardLocked(kl.now()); !ok {
 			return false, evicted
 		}
 	}
@@ -338,36 +329,34 @@ func (kl *KeyedLimiterOf[K]) installLocked(key K, l Limiter, rate int64, hasRate
 //     ⇒ IdleTTL 永不回收（慢性泄漏），还会占住 WithMaxEntries 的名额把真 key
 //     挤出护栏（OverCapHits 增长，症状与「限流命中」不可分辨）。
 func (kl *KeyedLimiterOf[K]) Get(key K) Limiter {
-	kl.mu.RLock()
-	entry, ok := kl.limiters[key]
-	kl.mu.RUnlock()
+	entry, ok := kl.reg.lookup(key)
 	if ok {
 		entry.lastSeen.Store(kl.now().UnixNano())
 		return entry.limiter
 	}
 
-	kl.mu.Lock()
+	kl.reg.Lock()
 	// 双重检查
-	if cur, ok := kl.limiters[key]; ok {
+	if cur, ok := kl.reg.lookupLocked(key); ok {
 		cur.lastSeen.Store(kl.now().UnixNano())
-		kl.mu.Unlock()
+		kl.reg.Unlock()
 		return cur.limiter
 	}
-	var evicted []evictedEntry[K]
-	if !kl.guardLocked(kl.now(), &evicted) {
-		kl.mu.Unlock()
+	evicted, guardOK := kl.guardLocked(kl.now())
+	if !guardOK {
+		kl.reg.Unlock()
 		kl.reportEvicts(evicted) // 拒绝路径的回收也要可观测
 		return nil
 	}
 
 	limiter := kl.factory(key)
 	if limiter == nil {
-		kl.mu.Unlock()
+		kl.reg.Unlock()
 		kl.reportEvicts(evicted)
 		return nil
 	}
 	entry = kl.installEntryLocked(key, limiter, 0, false)
-	kl.mu.Unlock()
+	kl.reg.Unlock()
 	kl.reportEvicts(evicted)
 	return entry.limiter
 }
@@ -419,7 +408,7 @@ func (kl *KeyedLimiterOf[K]) AllowWithRetryAfter(key K) (wait time.Duration, ok 
 // 换桶即新配额，桶内余量归零（调用方接受）。
 //
 // 返回 true 表示已登记/已替换；false 表示 l 为 nil 或**容量护栏拒绝**——
-// key 未登记且表满时与 Create 同款走 allowNew（先回收空闲条目，仍满拒绝并计
+// key 未登记且表满时与 Create 同款走护栏（先回收空闲条目，仍满拒绝并计
 // 一次 OverCapHits，#252）：四个登记入口的护栏必须一视同仁，否则速率热更/
 // 配置下发路径为外部输入驱动的新 key 建桶时，表可无限涨过 WithMaxEntries，
 // 护栏与 OverCapHits/Evictions 观测面双双静默失效。已登记 key 换桶不受护栏
@@ -432,9 +421,9 @@ func (kl *KeyedLimiterOf[K]) Replace(key K, l Limiter) bool {
 	if l == nil {
 		return false
 	}
-	kl.mu.Lock()
+	kl.reg.Lock()
 	ok, evicted := kl.installLocked(key, l, 0, false)
-	kl.mu.Unlock()
+	kl.reg.Unlock()
 	kl.reportEvicts(evicted) // 回调在锁外（消费方可重入本管理器，#142）；拒绝路径的回收也要可观测
 	return ok
 }
@@ -462,14 +451,14 @@ func (kl *KeyedLimiterOf[K]) ReplaceIfChanged(key K, rate int64, l Limiter) bool
 	if l == nil {
 		return false
 	}
-	kl.mu.Lock()
-	if entry, ok := kl.limiters[key]; ok && entry.hasRate && entry.rate == rate {
+	kl.reg.Lock()
+	if entry, ok := kl.reg.lookupLocked(key); ok && entry.hasRate && entry.rate == rate {
 		entry.lastSeen.Store(kl.now().UnixNano())
-		kl.mu.Unlock()
+		kl.reg.Unlock()
 		return false
 	}
 	ok, evicted := kl.installLocked(key, l, rate, true)
-	kl.mu.Unlock()
+	kl.reg.Unlock()
 	kl.reportEvicts(evicted)
 	return ok
 }
@@ -501,29 +490,29 @@ func (kl *KeyedLimiterOf[K]) AllowWithRate(key K, rate int64, newBucket func() L
 	}
 
 	// 快路径：元数据一致直接用现桶
-	kl.mu.RLock()
-	entry, ok := kl.limiters[key]
+	kl.reg.RLock()
+	entry, ok := kl.reg.lookupLocked(key)
 	if ok && entry.hasRate && entry.rate == rate {
 		entry.lastSeen.Store(kl.now().UnixNano())
 		l := entry.limiter
-		kl.mu.RUnlock()
+		kl.reg.RUnlock()
 		return l.Allow()
 	}
-	kl.mu.RUnlock()
+	kl.reg.RUnlock()
 
 	// 慢路径：锁外建桶，落锁比对安装（竞态方以库内元数据为准）
 	l := newBucket()
 	if l == nil {
 		return false
 	}
-	kl.mu.Lock()
-	if cur, hit := kl.limiters[key]; hit && cur.hasRate && cur.rate == rate {
+	kl.reg.Lock()
+	if cur, hit := kl.reg.lookupLocked(key); hit && cur.hasRate && cur.rate == rate {
 		cur.lastSeen.Store(kl.now().UnixNano())
-		kl.mu.Unlock()
+		kl.reg.Unlock()
 		return cur.limiter.Allow() // 竞态方已装好同速率桶，白建的那只丢弃
 	}
 	ok, evicted := kl.installLocked(key, l, rate, true)
-	kl.mu.Unlock()
+	kl.reg.Unlock()
 	kl.reportEvicts(evicted)
 	if !ok {
 		return false
@@ -535,9 +524,7 @@ func (kl *KeyedLimiterOf[K]) AllowWithRate(key K, rate int64, newBucket func() L
 // ok=false 表示 key 不存在或登记时未带元数据（factory/Create/Replace 路径）。
 // 用于消费方观测/对账「这个 key 现在生效的是哪一档」——事实以库内登记为准。
 func (kl *KeyedLimiterOf[K]) CurrentRate(key K) (rate int64, ok bool) {
-	kl.mu.RLock()
-	defer kl.mu.RUnlock()
-	entry, exists := kl.limiters[key]
+	entry, exists := kl.reg.lookup(key)
 	if !exists || !entry.hasRate {
 		return 0, false
 	}
@@ -557,29 +544,27 @@ func (kl *KeyedLimiterOf[K]) Create(key K, l Limiter) bool {
 	if l == nil {
 		return false
 	}
-	kl.mu.Lock()
-	if _, exists := kl.limiters[key]; exists {
-		kl.mu.Unlock()
+	kl.reg.Lock()
+	if _, exists := kl.reg.lookupLocked(key); exists {
+		kl.reg.Unlock()
 		return false
 	}
 	ok, evicted := kl.installLocked(key, l, 0, false)
-	kl.mu.Unlock()
+	kl.reg.Unlock()
 	kl.reportEvicts(evicted)
 	return ok
 }
 
 // Delete 删除指定 key 的限流器。
 func (kl *KeyedLimiterOf[K]) Delete(key K) {
-	kl.mu.Lock()
-	defer kl.mu.Unlock()
-	delete(kl.limiters, key)
+	kl.reg.Lock()
+	defer kl.reg.Unlock()
+	kl.reg.deleteLocked(key)
 }
 
 // Len 返回当前活跃的限流器数量。
 func (kl *KeyedLimiterOf[K]) Len() int {
-	kl.mu.RLock()
-	defer kl.mu.RUnlock()
-	return len(kl.limiters)
+	return kl.reg.len()
 }
 
 // OverCapHits 返回容量护栏拒绝未登记 key 的累计次数（可观测性）。
@@ -594,40 +579,10 @@ func (kl *KeyedLimiterOf[K]) Evictions() int64 {
 	return kl.evictions.Load()
 }
 
-// Close 关闭限流器管理器，停止清理 goroutine。可安全重复调用。
+// Close 关闭限流器管理器，停止清理 goroutine。可安全重复调用
+// （幂等语义收编进 registry，#363）。
 func (kl *KeyedLimiterOf[K]) Close() {
-	kl.closeOnce.Do(func() {
-		close(kl.done)
-	})
-}
-
-// cleanup 定期清理过期的限流器。ticker 只定节奏，空闲判定一律用注入时钟
-// （WithClock；LockoutOf.cleanup 同款——假时钟下真实 ticker 的时间戳不可比）。
-func (kl *KeyedLimiterOf[K]) cleanup() {
-	ticker := time.NewTicker(cleanupInterval(kl.ttl))
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-kl.done:
-			return
-		case <-ticker.C:
-			now := kl.now()
-			var evicted []evictedEntry[K]
-			kl.mu.Lock()
-			for key, entry := range kl.limiters {
-				if now.Sub(time.Unix(0, entry.lastSeen.Load())) > kl.ttl {
-					delete(kl.limiters, key)
-					evicted = append(evicted, evictedEntry[K]{
-						key:  key,
-						idle: now.Sub(time.Unix(0, entry.lastSeen.Load())),
-					})
-				}
-			}
-			kl.mu.Unlock()
-			kl.reportEvicts(evicted) // 锁外回调（#142）
-		}
-	}
+	kl.reg.Close()
 }
 
 // retryProber 支持「预留→读延迟→归还」的限流器可实现此接口，

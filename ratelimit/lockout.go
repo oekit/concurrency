@@ -1,10 +1,7 @@
 package ratelimit
 
 import (
-	"sync"
 	"time"
-
-	"github.com/oekit/concurrency/async"
 )
 
 // LockoutConfig 是 Lockout 的构造配置。
@@ -69,18 +66,17 @@ type lockoutEntry struct {
 //	    return err
 //	}
 //	lo.Reset("user:42") // 登录成功
+//
+// 「键控 map + TTL 回收 + 容量护栏 + Close(done)」骨架经 #363 收编进
+// keyedTTLRegistry（reg 字段）——清扫循环 / 表满 sweep-on-pressure / Close
+// 幂等单源；条目判定回调化为 reclaimable（锁定中/窗口内有样本免回收，#83）。
+// 本类型只保留防爆破语义（窗口/阈值/锁定时长/护栏 fail-open 记账）。
 type LockoutOf[K comparable] struct {
-	mu         sync.Mutex
-	entries    map[K]*lockoutEntry
-	window     time.Duration
-	threshold  int
-	lockDur    time.Duration
-	maxEntries int
-	ttl        time.Duration
-	now        func() time.Time
-	overCap    int64 // 容量护栏丢弃失败样本的累计次数
-	done       chan struct{}
-	closeOnce  sync.Once
+	reg       *keyedTTLRegistry[K, *lockoutEntry]
+	window    time.Duration
+	threshold int
+	lockDur   time.Duration
+	overCap   int64 // 容量护栏丢弃失败样本的累计次数（reg.mu 串行化）
 }
 
 // Lockout 是 string key 的别名，兼容惯例（对齐 KeyedLimiter）。
@@ -116,16 +112,21 @@ func NewLockoutOf[K comparable](cfg LockoutConfig) *LockoutOf[K] {
 		now = time.Now
 	}
 	l := &LockoutOf[K]{
-		entries:    make(map[K]*lockoutEntry),
-		window:     cfg.Window,
-		threshold:  cfg.Threshold,
-		lockDur:    cfg.LockDuration,
-		maxEntries: cfg.MaxEntries,
-		ttl:        ttl,
-		now:        now,
-		done:       make(chan struct{}),
+		window:    cfg.Window,
+		threshold: cfg.Threshold,
+		lockDur:   cfg.LockDuration,
 	}
-	async.GoSafe(l.cleanup)
+	// 骨架（清扫循环/表满回收/Close 幂等）收编进 keyedTTLRegistry（#363）：
+	// 条目判定回调化为 reclaimable（锁定中免回收——提前驱逐等于提前解锁；
+	// 窗口内仍有有效失败样本免回收，#83），无回收观测面（onEvict 缺省 nil，
+	// sweep 纯删除零分配）。
+	l.reg = newKeyedTTLRegistry[K, *lockoutEntry](keyedTTLConfig[K, *lockoutEntry]{
+		ttl:        ttl,
+		maxEntries: cfg.MaxEntries,
+		now:        now,
+		expired:    l.reclaimable,
+	})
+	l.reg.start() // 后台清扫（owner wiring 完成后再启动——回调反引 l.reg）
 	return l
 }
 
@@ -137,18 +138,18 @@ func NewLockoutOf[K comparable](cfg LockoutConfig) *LockoutOf[K] {
 //
 // 锁定期间调用只入窗口记账，不延长当前锁定。
 func (l *LockoutOf[K]) RecordFailure(key K) (locked bool, lockRemain time.Duration) {
-	now := l.now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	now := l.reg.now()
+	l.reg.Lock()
+	defer l.reg.Unlock()
 
-	e, ok := l.entries[key]
+	e, ok := l.reg.lookupLocked(key)
 	if !ok {
-		if !l.allowNew(now) {
+		if _, allow := l.reg.allowNewLocked(now); !allow {
 			l.overCap++
 			return false, 0
 		}
 		e = &lockoutEntry{lastSeen: now}
-		l.entries[key] = e
+		l.reg.putLocked(key, e)
 	}
 	e.lastSeen = now
 	l.prune(e, now)
@@ -173,11 +174,11 @@ func (l *LockoutOf[K]) RecordFailure(key K) (locked bool, lockRemain time.Durati
 // 返回序与 RecordFailure 统一为 (locked, lockRemain)——两个方法同序是刻意设计，
 // 避免调用方在相邻调用间交换返回值顺序。
 func (l *LockoutOf[K]) CheckLocked(key K) (locked bool, lockRemain time.Duration) {
-	now := l.now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	now := l.reg.now()
+	l.reg.Lock()
+	defer l.reg.Unlock()
 
-	e, ok := l.entries[key]
+	e, ok := l.reg.lookupLocked(key)
 	if !ok {
 		return false, 0
 	}
@@ -191,71 +192,30 @@ func (l *LockoutOf[K]) CheckLocked(key K) (locked bool, lockRemain time.Duration
 // Reset 清零 key 的失败计数并解除现存锁定（成功操作后调用；亦可用作管理员解封）。
 // key 未登记为 no-op。
 func (l *LockoutOf[K]) Reset(key K) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.entries, key)
+	l.reg.Lock()
+	defer l.reg.Unlock()
+	l.reg.deleteLocked(key)
 }
 
 // Len 返回当前活跃条目数（含锁定中）。
 func (l *LockoutOf[K]) Len() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.entries)
+	return l.reg.len()
 }
 
 // OverCapHits 返回容量护栏丢弃失败样本的累计次数（可观测性）。
 func (l *LockoutOf[K]) OverCapHits() int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.reg.Lock()
+	defer l.reg.Unlock()
 	return l.overCap
 }
 
-// Close 停止后台清扫 goroutine。可安全重复调用（KeyedLimiterOf 同款幂等语义）。
+// Close 停止后台清扫 goroutine。可安全重复调用（幂等语义收编进 registry，
+// KeyedLimiterOf 同款，#363）。
 func (l *LockoutOf[K]) Close() {
-	l.closeOnce.Do(func() {
-		close(l.done)
-	})
+	l.reg.Close()
 }
 
-// cleanup 定期回收空闲条目；ticker 只定节奏，到期/空闲判定一律用注入时钟
-// （假时钟下真实 ticker 的时间戳不可比）。锁定中的条目免于回收，
-// 窗口内仍有有效失败样本的条目同样免于回收（#83：空闲回收线不得短于失败窗口）。
-func (l *LockoutOf[K]) cleanup() {
-	ticker := time.NewTicker(cleanupInterval(l.ttl))
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-l.done:
-			return
-		case <-ticker.C:
-			now := l.now()
-			l.mu.Lock()
-			for key, e := range l.entries {
-				if l.reclaimable(e, now) {
-					delete(l.entries, key)
-				}
-			}
-			l.mu.Unlock()
-		}
-	}
-}
-
-// allowNew 判定容量护栏：表满时先回收空闲且未锁定的条目再判（锁定条目不参与回收
-// ——提前驱逐等于提前解锁）。仍满则拒绝登记新 key。
-func (l *LockoutOf[K]) allowNew(now time.Time) bool {
-	if l.maxEntries <= 0 || len(l.entries) < l.maxEntries {
-		return true
-	}
-	for key, e := range l.entries {
-		if l.reclaimable(e, now) {
-			delete(l.entries, key)
-		}
-	}
-	return len(l.entries) < l.maxEntries
-}
-
-// reclaimable 判定条目是否可被空闲回收。三条约束：
+// reclaimable 是 registry 的条目过期判定（expired 回调）。三条约束：
 //  1. 锁定中的条目免于回收——提前驱逐等于提前解锁；
 //  2. **窗口内仍有有效失败样本的条目免于回收**（#83）——空闲回收线若短于失败
 //     窗口，会把「窗口内失败事件按 key 累计」的滑窗语义截短成「空闲不超过
@@ -270,7 +230,7 @@ func (l *LockoutOf[K]) reclaimable(e *lockoutEntry, now time.Time) bool {
 	if l.hasWindowSample(e, now) {
 		return false
 	}
-	return now.Sub(e.lastSeen) > l.ttl
+	return now.Sub(e.lastSeen) > l.reg.ttl
 }
 
 // hasWindowSample 判定条目是否仍有落在 (now-Window, now] 内的失败样本。
