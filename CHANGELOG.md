@@ -1,3 +1,7 @@
+## [v0.39.2] — 2026-11-20
+
+- test(singleflight): 删除与 pkg/internal/singleflight 逐字重复的 10 个历史测试函数（~304 行）——语义由 pkg/singleflighttest.Run 契约套件等价或更强覆盖（本仓 contract_test.go 已消费）；保留 6 个特性独有测试（DoShared/DoChan/ResultWaiters/waiters 内部态时序等）（#374）
+
 ## [v0.39.1] — 2026-11-18
 
 - ratelimit 键控 TTL 骨架单源 keyedTTLRegistry[K,E]——KeyedLimiterOf/LockoutOf 的 sweep/allowNew/cleanup/Close 收编,#361 WithClock 贯通到 registry 层;导出面与行为不变(#363)
