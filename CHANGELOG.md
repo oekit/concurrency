@@ -1,3 +1,12 @@
+## [v0.40.0] — 2026-11-21
+
+- 第三轮设计/缺陷审计（2026-11-21）concurrency 修复：
+
+- feat: breaker 结构化钩子 WithBreakerLabels/WithBreakerStateChangeEvent/WithBreakerRejectEvent——状态迁移与拒绝事件携带 Name+Labels 与 RejectReason 枚举，指标接线不再维护并行注册表+name 前缀反解；labels 参与 GetBreaker 同名冲突指纹（#376）
+- fix: retry/httpx Classifier 默认把 breaker.ErrCircuitOpen 判为不可重试（哨兵优先于状态码，裸哨兵/包装链/*HTTPError 均命中）+ 新增 ClassifierWithNotRetryable 自定义排除口——开闸期不再退避空烧（#377）
+
+关联问题单：concurrency#376、concurrency#377。
+
 ## [v0.39.2] — 2026-11-20
 
 - test(singleflight): 删除与 pkg/internal/singleflight 逐字重复的 10 个历史测试函数（~304 行）——语义由 pkg/singleflighttest.Run 契约套件等价或更强覆盖（本仓 contract_test.go 已消费）；保留 6 个特性独有测试（DoShared/DoChan/ResultWaiters/waiters 内部态时序等）（#374）
