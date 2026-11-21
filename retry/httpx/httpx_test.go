@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oekit/concurrency/breaker"
 	"github.com/oekit/concurrency/retry"
 	"github.com/oekit/concurrency/retry/httpx"
 	pkgerrors "github.com/oekit/pkg/errors"
@@ -195,5 +196,102 @@ func TestClassifier_TransportFailureRetryable(t *testing.T) {
 	}
 	if !c(&httpx.HTTPError{Status: 429}) {
 		t.Fatal("429 应可重试")
+	}
+}
+
+// TestClassifier_CircuitOpenNotRetryable 回归测试（#377）：breaker.ErrCircuitOpen
+// 是「现在别发」而非「发失败了」，Classifier 默认判不可重试——裸哨兵、包装链、
+// 以及被 *HTTPError 包裹（含 Status=0 传输层形态）都必须命中，哨兵判定优先于
+// 状态码判定。
+func TestClassifier_CircuitOpenNotRetryable(t *testing.T) {
+	c := httpx.Classifier()
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"bare", breaker.ErrCircuitOpen},
+		{"wrapped", pkgerrors.Wrapf(breaker.ErrCircuitOpen, "send sms")},
+		{"http status 0", &httpx.HTTPError{Status: 0, Err: breaker.ErrCircuitOpen}},
+		{"http status 429", &httpx.HTTPError{Status: 429, Err: breaker.ErrCircuitOpen}},
+		{"http status 503", &httpx.HTTPError{Status: 503, Err: pkgerrors.Wrapf(breaker.ErrCircuitOpen, "upstream")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if c(tc.err) {
+				t.Fatalf("Classifier(%v) = true, want false（开闸期不得重试）", tc.err)
+			}
+		})
+	}
+}
+
+// TestClassifierWithNotRetryable_CustomSentinel 组合口排除业务哨兵（errors.Is
+// 语义、含包装链）；nil 哨兵忽略；未传入的哨兵不影响 Classifier 既有判定。
+func TestClassifierWithNotRetryable_CustomSentinel(t *testing.T) {
+	perm := errors.New("permission denied")
+	c := httpx.ClassifierWithNotRetryable(perm)
+
+	if c(perm) {
+		t.Fatal("自定义哨兵应不可重试")
+	}
+	if c(pkgerrors.Wrapf(perm, "send")) {
+		t.Fatal("包装链上的自定义哨兵应不可重试")
+	}
+	if !c(errors.New("connection reset")) {
+		t.Fatal("未命中哨兵的传输层错误仍应可重试")
+	}
+	if !c(&httpx.HTTPError{Status: 503, Err: errors.New("unavailable")}) {
+		t.Fatal("未命中哨兵的 5xx 仍应可重试")
+	}
+	// 默认 Classifier 不认识自定义哨兵（其余错误按传输层失败处理）。
+	if !httpx.Classifier()(perm) {
+		t.Fatal("默认 Classifier 不应改动对业务哨兵的既有判定")
+	}
+	// nil 哨兵不得 panic，也不得把 nil 当通配符排除一切错误。
+	withNil := httpx.ClassifierWithNotRetryable(nil, perm)
+	if withNil(perm) {
+		t.Fatal("nil 之后的哨兵仍应生效")
+	}
+	if !withNil(errors.New("connection reset")) {
+		t.Fatal("nil 哨兵不得误伤其他错误")
+	}
+	// 开闸哨兵在组合口下依然默认排除（重复传入无副作用）。
+	if httpx.ClassifierWithNotRetryable(breaker.ErrCircuitOpen)(breaker.ErrCircuitOpen) {
+		t.Fatal("ErrCircuitOpen 在组合口下仍应默认不可重试")
+	}
+}
+
+// TestClassifier_CircuitOpenEndToEndWithBreaker 钉住 #377 的消费方现场：真实
+// 熔断器开闸后，retry.Do + Classifier 只尝试一次，退避循环不再空烧——execute
+// 一次都不执行，错误原样返回。
+func TestClassifier_CircuitOpenEndToEndWithBreaker(t *testing.T) {
+	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	brk := breaker.NewBreaker("httpx-open-e2e",
+		breaker.WithBreakerClock(func() time.Time { return fixed }),
+		breaker.WithConsecutiveFailures(1),
+	)
+	ctx := context.Background()
+	boom := errors.New("boom")
+	if err := brk.Do(ctx, func() error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("tripping Do err = %v, want boom", err)
+	}
+
+	calls, executed := 0, 0
+	err := retry.Do(ctx, retry.Config{
+		Attempts:  5,
+		Delay:     time.Millisecond,
+		Retryable: httpx.Classifier(),
+	}, func(int) error {
+		calls++
+		return brk.Do(ctx, func() error { executed++; return nil })
+	})
+
+	if !errors.Is(err, breaker.ErrCircuitOpen) {
+		t.Fatalf("retry err = %v, want ErrCircuitOpen", err)
+	}
+	if calls != 1 {
+		t.Fatalf("attempts = %d, want 1（开闸期不重试）", calls)
+	}
+	if executed != 0 {
+		t.Fatalf("execute calls = %d, want 0（开闸拒绝不执行真实调用）", executed)
 	}
 }

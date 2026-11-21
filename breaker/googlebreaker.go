@@ -123,6 +123,11 @@ type googleBreaker struct {
 	// onStateChange 为状态迁移钩子（#351，缺省 nil）：仅在业务可见迁移处、
 	// 写完新状态后经 setStateLocked 同步回调；探测失联回收路径刻意不调用。
 	onStateChange func(name string, from, to State)
+	// meta 是创建期元信息（Name + Labels），随结构化迁移事件回传（#376）。
+	meta BreakerMeta
+	// onStateChangeEvent 是结构化迁移钩子（#376，缺省 nil）：与 onStateChange
+	// 并存、各自独立触发，额外携带 meta（含创建期 Labels）。
+	onStateChangeEvent func(StateChangeEvent)
 	// cooldown 为冷却期：open 态自进入/重开起多久放行半开探测；0 = 沿用 probeTimeout
 	// （WithCooldown 独立覆盖——冷却期与探测失联时限是两个独立决策，见 #19）。
 	cooldown time.Duration
@@ -174,8 +179,12 @@ func (b *googleBreaker) setStateLocked(to breakerState) {
 		return
 	}
 	b.state = to
+	fromPub, toPub := from.publicState(), to.publicState()
 	if b.onStateChange != nil {
-		b.onStateChange(b.name, from.publicState(), to.publicState())
+		b.onStateChange(b.name, fromPub, toPub)
+	}
+	if b.onStateChangeEvent != nil {
+		b.onStateChangeEvent(StateChangeEvent{Meta: b.meta, From: fromPub, To: toPub})
 	}
 }
 
@@ -187,22 +196,32 @@ func newGoogleBreaker(name string, cfg breakerConfig) *googleBreaker {
 		window.WithWindowClock[int64, *bucket](cfg.clock),
 	)
 	return &googleBreaker{
-		name:          name,
-		stat:          st,
-		clock:         cfg.clock,
-		windowSize:    cfg.windowSize,
-		forcePass:     cfg.forcePass,
-		probeTimeout:  cfg.probeTimeout,
-		cooldown:      cfg.cooldown,
-		consecutive:   cfg.consecutive,
-		onStateChange: cfg.onStateChange,
+		name:               name,
+		meta:               BreakerMeta{Name: name, Labels: cfg.labels},
+		stat:               st,
+		clock:              cfg.clock,
+		windowSize:         cfg.windowSize,
+		forcePass:          cfg.forcePass,
+		probeTimeout:       cfg.probeTimeout,
+		cooldown:           cfg.cooldown,
+		consecutive:        cfg.consecutive,
+		onStateChange:      cfg.onStateChange,
+		onStateChangeEvent: cfg.onStateChangeEvent,
 	}
 }
 
 // allowGen 为统一放行入口：探测调度（超时回收 + 冷却期满放行半开探测）之后
 // 按状态走放行策略，返回携带代的承诺。拒绝时记一次丢弃样本并返回 ErrCircuitOpen
-// （此时不产生代，返回值为 0）。
+// （此时不产生代，返回值为 0）。保留三返回值形态供既有调用方使用；
+// 需要拒绝来源枚举的内部路径用 allowGenWithReason（#376）。
 func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
+	p, gen, _, err := b.allowGenWithReason()
+	return p, gen, err
+}
+
+// allowGenWithReason 同 allowGen，额外返回拒绝来源（RejectReasonOpen /
+// RejectReasonHalfOpen）；err == nil 时该返回值无意义（忽略）。
+func (b *googleBreaker) allowGenWithReason() (googlePromise, uint64, RejectReason, error) {
 	now := b.clock().UnixNano()
 
 	b.mu.Lock()
@@ -226,7 +245,7 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 		b.setStateLocked(stateHalfOpen) // 上报 open→half-open（开始探测，#351）
 		b.mu.Unlock()
 		b.lastPass.Store(now)
-		return googlePromise{b: b, gen: gen, probe: true}, gen, nil
+		return googlePromise{b: b, gen: gen, probe: true}, gen, RejectReasonOpen, nil
 	}
 	// gen 在下方 #328 复核点统一读取(此处预读会成 ineffectual 死赋值)
 	st := b.state
@@ -275,7 +294,7 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	b.mu.Unlock()
 	if st == stateClosed {
 		// closed 态：预算内全量放行（速率型触发已由上面的判定接管）
-		return googlePromise{b: b, gen: gen}, gen, nil
+		return googlePromise{b: b, gen: gen}, gen, RejectReasonOpen, nil
 	}
 
 	// open/half-open 放行策略（#25 语义修正）：熔断期流量收敛到探测级——
@@ -291,10 +310,14 @@ func (b *googleBreaker) allowGen() (googlePromise, uint64, error) {
 	// 反向则由 force-pass 的成功替真探测关闸。观察哨流量由 open 态的 forcePass
 	// 节奏承担，half-open 只等探测回报。
 	if st == stateOpen && b.tryForcePass(now) {
-		return googlePromise{b: b, gen: gen}, gen, nil
+		return googlePromise{b: b, gen: gen}, gen, RejectReasonOpen, nil
+	}
+	reason := RejectReasonOpen
+	if st == stateHalfOpen {
+		reason = RejectReasonHalfOpen
 	}
 	b.markDrop()
-	return googlePromise{}, 0, ErrCircuitOpen
+	return googlePromise{}, 0, reason, ErrCircuitOpen
 }
 
 // allow 判定放行并返回承诺；拒绝时返回 ErrCircuitOpen。等价于 AllowGen 丢弃返回的代。
@@ -328,13 +351,20 @@ func (b *googleBreaker) tryForcePass(now int64) bool {
 // rejected 标记本次是否被熔断拒绝（拒绝时 req 不会执行）。
 // req panic 时记一次失败样本后原样 re-panic（success 仍为 false，defer 先于 panic 传播执行）。
 func (b *googleBreaker) doReq(req func() error, acceptable func(error) bool) (err error, rejected bool) {
-	p, _, aerr := b.allowGen()
+	rejected, _, err = b.doReqWithReason(req, acceptable)
+	return err, rejected
+}
+
+// doReqWithReason 同 doReq，额外返回拒绝来源枚举（仅 rejected == true 时有意义，#376）。
+// 结果顺序遵循 error 置尾约定（staticcheck ST1008）。
+func (b *googleBreaker) doReqWithReason(req func() error, acceptable func(error) bool) (rejected bool, reason RejectReason, err error) {
+	p, _, reason, aerr := b.allowGenWithReason()
 	if aerr != nil {
-		// **不重复记 drop**：allowGen 在返回 ErrCircuitOpen 前已经记过一次
+		// **不重复记 drop**：allowGenWithReason 在返回 ErrCircuitOpen 前已经记过一次
 		// （让 Allow 与 Do* 的样本口径一致）。此前这里再记一次 ⇒ 每次拒绝
 		// 记**两个**丢弃样本，而 Allow 只记一个 ⇒ history.total 在整个
 		// 熔断窗口里被灌水（它是 SRE 触发器的输入）。
-		return aerr, true
+		return true, reason, aerr
 	}
 
 	var succ bool
@@ -351,7 +381,7 @@ func (b *googleBreaker) doReq(req func() error, acceptable func(error) bool) (er
 	if acceptable(err) {
 		succ = true
 	}
-	return err, false
+	return false, RejectReasonOpen, err
 }
 
 // report 按代回填一次放行的结果：陈旧代（gen < 当前代）整体作废——不计窗口、不迁移、

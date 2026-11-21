@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +42,58 @@ func (s State) String() string {
 	default:
 		return "closed"
 	}
+}
+
+// BreakerMeta 是熔断器的结构化元信息：创建期固定的 Name 与 Labels（#376）。
+//
+// 结构化钩子（WithBreakerStateChangeEvent / WithBreakerRejectEvent）随事件回传
+// 本结构，指标接线直接取 Labels 作维度标签——无需维护 name→labels 的并行注册表，
+// 也无需按 name 前缀反解业务维度（此前消费方两处静默同步的根源）。
+type BreakerMeta struct {
+	// Name 是熔断器标识（与 Breaker.Name() 一致）。
+	Name string
+	// Labels 是创建期经 WithBreakerLabels 挂载的维度标签；nil 表示未挂载。
+	// 所有事件共享同一份只读快照——回调中**不得修改**。
+	Labels map[string]string
+}
+
+// StateChangeEvent 是状态迁移事件的结构化视图（#376）：Meta 携带 Name 与创建期
+// Labels，From/To 为迁移两端。触发时机与语义与 WithBreakerStateChangeHandler
+// 完全一致（真实迁移后同步回调一次，from == to 不触发）。
+type StateChangeEvent struct {
+	Meta BreakerMeta
+	From State
+	To   State
+}
+
+// RejectReason 是熔断器拒绝请求的来源枚举（#376）：回答「为什么现在拒绝」，
+// 与拒绝事件 Detail 里的「最近失败原因摘要」是两个维度，可直接作指标标签。
+type RejectReason uint8
+
+const (
+	// RejectReasonOpen：open 态且未领到 forcePass 探活名额（熔断期常规拒绝）。
+	RejectReasonOpen RejectReason = iota
+	// RejectReasonHalfOpen：half-open 态挂起探测在飞，普通请求一律拒绝。
+	RejectReasonHalfOpen
+)
+
+// String 返回拒绝来源名（"open"/"half-open"，供日志与监控打点）。
+func (r RejectReason) String() string {
+	switch r {
+	case RejectReasonHalfOpen:
+		return "half-open"
+	default:
+		return "open"
+	}
+}
+
+// RejectEvent 是拒绝事件的结构化视图（#376）：Meta 携带 Name 与创建期 Labels，
+// Reason 为拒绝来源枚举，Detail 为最近失败原因摘要（与旧拒绝回调的 reason 参数
+// 同口径：最多 5 条、最新在前、换行拼接；无记录时为 ErrCircuitOpen 的消息）。
+type RejectEvent struct {
+	Meta   BreakerMeta
+	Reason RejectReason
+	Detail string
 }
 
 // numHistoryReasons 为拒绝回调 reason 保留的最近失败原因条数（对齐上游 errorWindow）。
@@ -127,15 +181,22 @@ type breakerConfig struct {
 	cooldown       time.Duration
 	consecutive    int
 	clock          func() time.Time
+	labels         map[string]string
 	onReject       func(name, reason string)
+	onRejectEvent  func(RejectEvent)
 	onConflict     func(name, detail string)
 	onStateChange  func(name string, from, to State)
+	// onStateChangeEvent 是结构化迁移回调（#376）：与 onStateChange 并存、各自
+	// 独立触发，额外携带 Name 与创建期 Labels。
+	onStateChangeEvent func(StateChangeEvent)
 }
 
 // configFingerprint 是 breakerConfig 中**值语义**字段的指纹：用于同名共享熔断器判定
 // 「本次 opts 是否与首次创建不同」（#29）。刻意排除全部函数字段（clock / onReject /
-// onConflict / onStateChange）——函数值不可比较，且钩子属每调用方的私有接线，差异不构成"参数冲突"
+// onConflict / onStateChange 等）——函数值不可比较，且钩子属每调用方的私有接线，差异不构成"参数冲突"
 // （否则先注册 reject handler 的调用方会被后续每个调用方无谓地告警一次）。
+// labels 是值语义元信息（参与指纹，规范化后比较）：同名但 labels 不同同样是
+// 「首建生效、后到被静默丢弃」，指标维度会因此错位，必须可观测。
 type configFingerprint struct {
 	windowSize     int
 	windowInterval time.Duration
@@ -143,6 +204,7 @@ type configFingerprint struct {
 	probeTimeout   time.Duration
 	cooldown       time.Duration
 	consecutive    int
+	labels         string
 }
 
 // fingerprint 提取可比较的配置指纹。
@@ -154,13 +216,36 @@ func (c *breakerConfig) fingerprint() configFingerprint {
 		probeTimeout:   c.probeTimeout,
 		cooldown:       c.cooldown,
 		consecutive:    c.consecutive,
+		labels:         canonicalLabels(c.labels),
 	}
+}
+
+// canonicalLabels 把 labels 规范化成可比较串（键排序，%q 转义避免拼接歧义）。
+// 空 labels 返回空串，与未挂载同口径。
+func canonicalLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%q=%q;", k, labels[k])
+	}
+	return b.String()
 }
 
 // String 渲染指纹为可读串，供冲突告警的 detail 直接引用。
 func (f configFingerprint) String() string {
-	return fmt.Sprintf("window=%d桶/%v, forcePass=%v, probeTimeout=%v, cooldown=%v, consecutive=%d",
+	s := fmt.Sprintf("window=%d桶/%v, forcePass=%v, probeTimeout=%v, cooldown=%v, consecutive=%d",
 		f.windowSize, f.windowInterval, f.forcePass, f.probeTimeout, f.cooldown, f.consecutive)
+	if f.labels != "" {
+		s += ", labels=" + f.labels
+	}
+	return s
 }
 
 // newBreakerConfig 按缺省值铺底后逐项应用 opts，是 Breaker 配置的唯一构造入口
@@ -276,13 +361,56 @@ func WithBreakerClock(clock func() time.Time) BreakerOption {
 	}
 }
 
+// WithBreakerLabels 挂载创建期维度标签（channel_type、tenant、endpoint 等），
+// 随配置固定并由结构化钩子（WithBreakerStateChangeEvent / WithBreakerRejectEvent）
+// 原样回传（#376）：指标接线直接以 labels 作维度，无需并行注册表、也无需按 name
+// 前缀反解业务维度。
+//
+// 传 nil / 空 map 等价未挂载。选项应用时对 map 做浅拷贝，调用方后续修改入参不影响
+// 已创建的熔断器；回调中拿到的 Labels 是所有事件共享的只读快照，**不得修改**。
+// labels 参与 GetBreaker 的同名异参冲突指纹：同名但 labels 不同同样会触发
+// WithBreakerConflictHandler（首建生效、后到被静默丢弃的问题因此可观测）。
+func WithBreakerLabels(labels map[string]string) BreakerOption {
+	return func(c *breakerConfig) {
+		if len(labels) == 0 {
+			c.labels = nil
+			return
+		}
+		c.labels = maps.Clone(labels)
+	}
+}
+
 // WithBreakerRejectHandler 注册拒绝回调（缺省 no-op，本包不强制接 logx/metrics，
 // 由上层显式接入）。name 为熔断器标识；reason 为最近失败原因（最多 5 条、最新在前、
 // 换行拼接；无记录时回退哨兵消息）。拒绝事件在 Allow/Do 系列每次拒绝时触发。
+//
+// #376 起提供结构化替代 WithBreakerRejectEvent（携带 Name/Labels/RejectReason，
+// 指标接线无需按 name 反解维度）；两个回调可并存、各自独立触发，本回调保持兼容。
 func WithBreakerRejectHandler(handler func(name, reason string)) BreakerOption {
 	return func(c *breakerConfig) {
 		if handler != nil {
 			c.onReject = handler
+		}
+	}
+}
+
+// WithBreakerRejectEvent 注册结构化拒绝回调（缺省 no-op，#376）。
+//
+// 触发时机、同步性与 WithBreakerRejectHandler 完全一致：open/half-open 态每次被拒
+// 都回调一次（锁外调用，不持状态机锁）；两个回调可并存、各自独立触发。区别仅在
+// 事件载荷——RejectEvent 同时给出：
+//
+//	Meta.Name    熔断器标识
+//	Meta.Labels  创建期经 WithBreakerLabels 挂载的维度标签（指标维度直接可用）
+//	Reason       拒绝来源枚举（open / half-open）
+//	Detail       最近失败原因摘要（与旧回调 reason 参数同口径）
+//
+// 指标接线推荐本回调：标签随配置走，无需维护 name→labels 并行注册表，也无需
+// 解析 name 前缀。回调应做轻量记录/投递到宿主队列，勿在内阻塞或做重活。
+func WithBreakerRejectEvent(handler func(RejectEvent)) BreakerOption {
+	return func(c *breakerConfig) {
+		if handler != nil {
+			c.onRejectEvent = handler
 		}
 	}
 }
@@ -310,10 +438,30 @@ func WithBreakerRejectHandler(handler func(name, reason string)) BreakerOption {
 // 回调只应做轻量记录/投递到宿主自己的队列，勿在内阻塞或做重活。回调 panic 原样
 // 向上传播（与拒绝回调同口径，本包不做 recover）；因回调持锁执行，panic 还意味着
 // 该实例的锁不会被释放——回调实现必须保证不 panic。
+//
+// #376 起提供结构化替代 WithBreakerStateChangeEvent（事件携带 Name 与创建期 Labels，
+// 指标接线无需按 name 反解维度）；两个回调可并存、各自独立触发，本回调保持兼容。
 func WithBreakerStateChangeHandler(handler func(name string, from, to State)) BreakerOption {
 	return func(c *breakerConfig) {
 		if handler != nil {
 			c.onStateChange = handler
+		}
+	}
+}
+
+// WithBreakerStateChangeEvent 注册结构化**状态迁移**回调（缺省 no-op，#376）。
+//
+// 触发时机、同步性、锁内约束与 WithBreakerStateChangeHandler 完全一致（真实迁移
+// 后回调一次、from == to 不触发、持状态机锁执行、不得反向调用同一 breaker）；
+// 两个回调可并存、各自独立触发。区别仅在事件载荷——StateChangeEvent 同时给出
+// Meta.Name、创建期 Labels（WithBreakerLabels）与 From/To 两端状态。
+//
+// 指标接线推荐本回调：标签随配置走，与熔断器生命周期天然同步，无需并行注册表或
+// name 前缀反解。
+func WithBreakerStateChangeEvent(handler func(StateChangeEvent)) BreakerOption {
+	return func(c *breakerConfig) {
+		if handler != nil {
+			c.onStateChangeEvent = handler
 		}
 	}
 }
@@ -347,10 +495,12 @@ func WithBreakerConflictHandler(handler func(name, detail string)) BreakerOption
 // circuitBreaker 是 Breaker 的公开实现：googleBreaker 核心之上的薄包装，
 // 负责 ctx 检查、失败原因收集与拒绝回调分发（对齐上游 loggedThrottle 的职责）。
 type circuitBreaker struct {
-	name     string
-	gb       *googleBreaker
-	reasons  *errorReasons
-	onReject func(name, reason string)
+	name          string
+	meta          BreakerMeta
+	gb            *googleBreaker
+	reasons       *errorReasons
+	onReject      func(name, reason string)
+	onRejectEvent func(RejectEvent)
 }
 
 // NewBreaker 返回以 name 标识的 Google SRE 自适应熔断器（显式 closed/open/half-open
@@ -363,10 +513,12 @@ func NewBreaker(name string, opts ...BreakerOption) Breaker {
 // newCircuitBreaker 按已构造好的 cfg 组装公开实现。
 func newCircuitBreaker(name string, cfg breakerConfig) *circuitBreaker {
 	return &circuitBreaker{
-		name:     name,
-		gb:       newGoogleBreaker(name, cfg),
-		reasons:  newErrorReasons(),
-		onReject: cfg.onReject,
+		name:          name,
+		meta:          BreakerMeta{Name: name, Labels: cfg.labels},
+		gb:            newGoogleBreaker(name, cfg),
+		reasons:       newErrorReasons(),
+		onReject:      cfg.onReject,
+		onRejectEvent: cfg.onRejectEvent,
 	}
 }
 
@@ -478,9 +630,9 @@ func (cb *circuitBreaker) Allow(ctx context.Context) (Promise, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	p, err := cb.gb.allow()
+	p, _, reason, err := cb.gb.allowGenWithReason()
 	if err != nil {
-		cb.reportReject()
+		cb.reportReject(reason)
 	}
 	return p, err
 }
@@ -492,9 +644,9 @@ func (cb *circuitBreaker) AllowGen(ctx context.Context) (Promise, uint64, error)
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	p, gen, err := cb.gb.allowGen()
+	p, gen, reason, err := cb.gb.allowGenWithReason()
 	if err != nil {
-		cb.reportReject()
+		cb.reportReject(reason)
 	}
 	return p, gen, err
 }
@@ -545,7 +697,7 @@ func (cb *circuitBreaker) do(ctx context.Context, execute func() error,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	err, rejected := cb.gb.doReq(execute, func(e error) bool {
+	rejected, reason, err := cb.gb.doReqWithReason(execute, func(e error) bool {
 		ok := acceptable(e)
 		if !ok && e != nil {
 			cb.reasons.add(e.Error())
@@ -555,7 +707,7 @@ func (cb *circuitBreaker) do(ctx context.Context, execute func() error,
 	if rejected {
 		// 按拒绝精确判定（而非对返回值做 errors.Is），execute 自身返回的错误
 		// 即使恰好等于哨兵也不会被误判为熔断拒绝
-		cb.reportReject()
+		cb.reportReject(reason)
 		if fallback != nil {
 			return fallback(err)
 		}
@@ -564,15 +716,21 @@ func (cb *circuitBreaker) do(ctx context.Context, execute func() error,
 }
 
 // reportReject 把拒绝事件分发到可选回调（缺省 no-op）。
-func (cb *circuitBreaker) reportReject() {
-	if cb.onReject == nil {
+// reason 为拒绝来源枚举（open / half-open），仅结构化回调消费。
+func (cb *circuitBreaker) reportReject(reason RejectReason) {
+	if cb.onReject == nil && cb.onRejectEvent == nil {
 		return
 	}
-	reason := cb.reasons.String()
-	if reason == "" {
-		reason = ErrCircuitOpen.Error()
+	detail := cb.reasons.String()
+	if detail == "" {
+		detail = ErrCircuitOpen.Error()
 	}
-	cb.onReject(cb.name, reason)
+	if cb.onReject != nil {
+		cb.onReject(cb.name, detail)
+	}
+	if cb.onRejectEvent != nil {
+		cb.onRejectEvent(RejectEvent{Meta: cb.meta, Reason: reason, Detail: detail})
+	}
 }
 
 func defaultAcceptable(err error) bool {

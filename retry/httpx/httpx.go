@@ -2,9 +2,9 @@
 // 收编消费方各自手写的同一段分类逻辑（429/5xx 重试、其余 4xx 拒收不重试、
 // ctx 取消不重试）。
 //
-// 零外部依赖（标准库之外零依赖）——不 import net/http：状态码以 int 传入，
-// 调用方用自己的 HTTP 客户端类型；URL 形态原语（#208 的 query 凭据剥离）
-// 只依赖 net/url。
+// 第三方依赖为零——不 import net/http：状态码以 int 传入，调用方用自己的 HTTP
+// 客户端类型；URL 形态原语（#208 的 query 凭据剥离）只依赖 net/url。唯一的同模块
+// 依赖是 breaker（仅为把 ErrCircuitOpen 默认判为不可重试，#377），不引入任何外部包。
 //
 // 接入形态（两问一体：「该不该重试」+「隔多久再试」）：
 //
@@ -14,6 +14,10 @@
 //	    DelayHint: httpx.RetryAfterHint(),
 //	    Exponential: true,
 //	}
+//
+// Classifier 默认把 breaker.ErrCircuitOpen 判为不可重试（开闸是「现在别发」而非
+// 「发失败了」，重试只会空烧退避预算直到开闸窗口结束）。需要排除更多业务哨兵时用
+// ClassifierWithNotRetryable(sentinel...)。
 //
 // 拿得到响应头的调用方（平台限流语义平台化，如 GitHub 403 次级限流）用
 // RetryableWithHeaders(status, header) 做头感知判定，平台特化逻辑只留
@@ -28,6 +32,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/oekit/concurrency/breaker"
 )
 
 // ErrNoRetryAfter 是 RetryAfterHint 在错误未携带建议时返回的包装哨兵
@@ -158,13 +164,39 @@ func IsTransportRetryable(err error) bool {
 }
 
 // Classifier 返回可直接塞进 retry.Config.Retryable 的判定函数：
+//   - breaker.ErrCircuitOpen（含包装链）→ false（#377：开闸是「现在别发」而非
+//     「发失败了」，退避重试只会再次撞闸、把整段开闸窗口的重试预算空烧掉）；
 //   - ctx 取消/超时（含包装链）→ false；
 //   - *HTTPError → Status==0 视为传输层失败（未收到响应，:86 的字段契约）
 //     重试；其余按 Retryable(status)（429/5xx true，4xx false）（#325：
 //     此前 Status==0 落进 Retryable(0)=false，连接错误被静默放弃重试）；
 //   - 其他错误 → true（视为传输层失败）。
+//
+// 需要排除额外业务哨兵时用 ClassifierWithNotRetryable；默认形态已覆盖
+// breaker.ErrCircuitOpen 这一同模块组合陷阱，不需要消费方手工拼接分类器。
 func Classifier() func(error) bool {
+	return ClassifierWithNotRetryable()
+}
+
+// ClassifierWithNotRetryable 返回在 Classifier 判定之上**额外**排除指定哨兵
+// （errors.Is 语义，含包装链）的分类器；nil 哨兵忽略。#377 的组合口：
+//
+//	cfg.Retryable = httpx.ClassifierWithNotRetryable(breaker.ErrCircuitOpen, ErrPermanent)
+//
+// breaker.ErrCircuitOpen 已由 Classifier 默认排除（重复传入无副作用），本口用于
+// 消费方自己的「业务性终止哨兵」（鉴权失败、参数非法等——重试永远不会成功）。
+// 哨兵判定先于 HTTP 状态码判定：即使 ErrCircuitOpen 被包进 *HTTPError（如
+// 429 响应体里再撞闸），也按不可重试处理。
+func ClassifierWithNotRetryable(sentinels ...error) func(error) bool {
 	return func(err error) bool {
+		if errors.Is(err, breaker.ErrCircuitOpen) {
+			return false
+		}
+		for _, sentinel := range sentinels {
+			if sentinel != nil && errors.Is(err, sentinel) {
+				return false
+			}
+		}
 		if !IsTransportRetryable(err) {
 			return false
 		}
