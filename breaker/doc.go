@@ -41,7 +41,11 @@
 //     往返在迁移处同步回调一次，from==to 不触发；与「每次被拒都触发」的拒绝回调
 //     语义严格分离，#351），由上层显式接 logx/metrics；State()/State 枚举
 //     （closed/open/half-open）供监控与日志打点（v0.13.0 起，放行判定仍以
-//     Allow/Do 返回结果为准）；
+//     Allow/Do 返回结果为准）。#376 起推荐结构化钩子
+//     WithBreakerStateChangeEvent / WithBreakerRejectEvent：事件携带
+//     BreakerMeta（Name + 创建期 WithBreakerLabels 维度标签）与拒绝来源枚举
+//     RejectReason（open/half-open）——指标接线直接取标签，无需并行注册表或
+//     name 前缀反解；旧钩子保持兼容、可与结构化钩子并存；
 //   - 与上游 go-zero 的关键语义分叉（v0.13.0 起）：上游 open 态按 SRE 公式概率
 //     丢弃、窗口滚空即全量放行；本仓三态化后熔断期收敛到探测级（forcePass +
 //     半开探测），恢复只由探测成功驱动——「状态」与「流量」不再失配；
