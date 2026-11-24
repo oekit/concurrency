@@ -3,6 +3,6 @@ module github.com/oekit/concurrency
 go 1.26.0
 
 require (
-	github.com/oekit/pkg v0.61.1
+	github.com/oekit/pkg v0.61.2
 	golang.org/x/time v0.14.0
 )
